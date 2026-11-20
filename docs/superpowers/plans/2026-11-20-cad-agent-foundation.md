@@ -474,7 +474,7 @@ public static class GateDetector
 {
     public const string T3Guidance =
         "图纸含未完整解析的自定义对象（如天正 TCH_*）。请在天正中执行【文件布图→图形导出】，" +
-        "保存类型选择天正3文件(*.t3)后重新导入；或等待解析支持矩阵点亮对应对象类。";
+        "保存类型选择天正T3文件(*.t3)后重新导入；或等待解析支持矩阵点亮对应对象类。";
 
     public static GateReport Inspect(DrawingSummary summary, ISupportMatrix matrix)
     {
@@ -598,9 +598,12 @@ public static class HashChain
     public const string GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
     public static string Canonical(AuditEntry e, long seq, string prevHash) =>
-        string.Join("|", seq, e.Ts.ToString("O"), e.Operator, e.Role, e.Session,
-            e.Source, e.Kind, e.Target, e.ParamsJson, e.BeforeHash, e.AfterHash,
-            e.SnapshotRef, e.PlanRef, prevHash);
+        string.Join("|", seq.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            e.Ts.ToString("O"), Esc(e.Operator), Esc(e.Role), Esc(e.Session),
+            Esc(e.Source), Esc(e.Kind), Esc(e.Target), Esc(e.ParamsJson), Esc(e.BeforeHash), Esc(e.AfterHash),
+            Esc(e.SnapshotRef), Esc(e.PlanRef), prevHash);
+
+    private static string Esc(string s) => s.Replace("\\", "\\\\").Replace("|", "\\p");
 
     public static string Compute(AuditEntry e, long seq, string prevHash) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(e, seq, prevHash))));
