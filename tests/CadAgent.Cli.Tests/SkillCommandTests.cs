@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CadAgent.Data.Tests;
 
 namespace CadAgent.Cli.Tests;
@@ -208,5 +209,139 @@ public class SkillCommandTests : IDisposable
         var (code, stdout, _) = Run("skill", "list");
         Assert.Equal(0, code);
         Assert.Contains("测试院标", stdout);
+    }
+
+    // ---- 最终审查 fix wave：promote 两阶段提交 + semantic-scan 规则包溯源 ----
+
+    private List<CadAgent.Core.AuditRecord> AuditRecords()
+    {
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        return audit.ReadAll().ToList();
+    }
+
+    private void ScanAndMapForPromote()
+    {
+        Assert.Equal(0, Run("semantic", "scan", "--drawing", _drawing).code);
+        Assert.Equal(0, Run("semantic", "map", "--layer", "W-自定义", "--class", "Column", "--drawing", _drawing).code);
+    }
+
+    [Fact]
+    public void Promote_FirstStageWriteFailure_ZeroMutation_FailureAudit()
+    {
+        // 模拟选择（最终审查裁定）：aliases.yaml.tmp 预置为目录——File.WriteAllText 对该
+        // 路径在任何 Move 之前抛异常，证明"先完整暂存、后 Move"的阶段分离。
+        // 失败必须留痕：semantic-promote-failed（movedFiles 空）+ stderr + exit 1，零变更。
+        ScanAndMapForPromote();
+        Directory.CreateDirectory(Path.Combine(_skillDir, "aliases.yaml.tmp"));
+        byte[] aliasesBefore = File.ReadAllBytes(Path.Combine(_skillDir, "aliases.yaml"));
+        byte[] manifestBefore = File.ReadAllBytes(Path.Combine(_skillDir, "skill.yaml"));
+        var (code, _, stderr) = Run("semantic", "promote", "--layer", "W-自定义", "--skill", _skillDir);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        Assert.Equal(aliasesBefore, File.ReadAllBytes(Path.Combine(_skillDir, "aliases.yaml")));
+        Assert.Equal(manifestBefore, File.ReadAllBytes(Path.Combine(_skillDir, "skill.yaml")));
+        Assert.False(File.Exists(Path.Combine(_skillDir, "skill.yaml.tmp"))); // 第二文件未暂存，更未 Move
+        var records = AuditRecords();
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "semantic-promoted");
+        var failed = Assert.Single(records, r => r.Entry.Kind == "semantic-promote-failed");
+        Assert.Equal("semantic", failed.Entry.Source);
+        Assert.Equal("W-自定义", failed.Entry.Target);
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.Equal("W-自定义", p.RootElement.GetProperty("layer").GetString());
+        Assert.Equal(_skillDir, p.RootElement.GetProperty("skill").GetString());
+        Assert.NotEmpty(p.RootElement.GetProperty("error").GetString()!);
+        Assert.Empty(p.RootElement.GetProperty("movedFiles").EnumerateArray());
+    }
+
+    [Fact]
+    public void Promote_SecondStageWriteFailure_ZeroMutation_NoPrematureMove()
+    {
+        // 更强模拟：skill.yaml.tmp 预置为目录。旧实现（写 aliases→Move→写 manifest→Move）
+        // 走到此处时 aliases.yaml 已被 Move——内容变更却无升版无审计（审查 Important #1）。
+        // 两阶段提交必须先完整暂存两个 .tmp 再开始 Move→此处零变更 + 失败审计 movedFiles 空。
+        ScanAndMapForPromote();
+        Directory.CreateDirectory(Path.Combine(_skillDir, "skill.yaml.tmp"));
+        byte[] aliasesBefore = File.ReadAllBytes(Path.Combine(_skillDir, "aliases.yaml"));
+        byte[] manifestBefore = File.ReadAllBytes(Path.Combine(_skillDir, "skill.yaml"));
+        var (code, _, stderr) = Run("semantic", "promote", "--layer", "W-自定义", "--skill", _skillDir);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        Assert.Equal(aliasesBefore, File.ReadAllBytes(Path.Combine(_skillDir, "aliases.yaml")));
+        Assert.Equal(manifestBefore, File.ReadAllBytes(Path.Combine(_skillDir, "skill.yaml")));
+        var records = AuditRecords();
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "semantic-promoted");
+        var failed = Assert.Single(records, r => r.Entry.Kind == "semantic-promote-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.Empty(p.RootElement.GetProperty("movedFiles").EnumerateArray());
+    }
+
+    [Fact]
+    public void Promote_MoveFailureMidSequence_FailureAudit_RecordsMovedFiles()
+    {
+        // 中途 Move 失败模拟（Windows）：skill.yaml 置只读——File.Move(overwrite:true)
+        // 对只读目标抛 UnauthorizedAccessException，而第一个 Move（aliases.yaml）已成功。
+        // 失败审计必须如实记录 movedFiles=["aliases.yaml"]（已变更未升版的可追溯证据），
+        // 无 semantic-promoted；manifest 字节不变；stderr + exit 1。
+        ScanAndMapForPromote();
+        string manifestPath = Path.Combine(_skillDir, "skill.yaml");
+        byte[] manifestBefore = File.ReadAllBytes(manifestPath);
+        File.SetAttributes(manifestPath, FileAttributes.ReadOnly);
+        try
+        {
+            var (code, _, stderr) = Run("semantic", "promote", "--layer", "W-自定义", "--skill", _skillDir);
+            Assert.Equal(1, code);
+            Assert.NotEmpty(stderr);
+            Assert.Equal(manifestBefore, File.ReadAllBytes(manifestPath)); // 版本未升
+            Assert.Contains("Column", File.ReadAllText(Path.Combine(_skillDir, "aliases.yaml"))); // 第一 Move 已发生（不回滚，审计留痕）
+            var records = AuditRecords();
+            Assert.DoesNotContain(records, r => r.Entry.Kind == "semantic-promoted");
+            var failed = Assert.Single(records, r => r.Entry.Kind == "semantic-promote-failed");
+            Assert.Equal("semantic", failed.Entry.Source);
+            using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+            Assert.Equal("W-自定义", p.RootElement.GetProperty("layer").GetString());
+            Assert.Equal(_skillDir, p.RootElement.GetProperty("skill").GetString());
+            Assert.NotEmpty(p.RootElement.GetProperty("error").GetString()!);
+            Assert.Equal(new[] { "aliases.yaml" },
+                p.RootElement.GetProperty("movedFiles").EnumerateArray().Select(x => x.GetString()).ToList());
+        }
+        finally
+        {
+            File.SetAttributes(manifestPath, FileAttributes.Normal); // Dispose 递归删除需要可写
+        }
+    }
+
+    [Fact]
+    public void Scan_Audit_CarriesRulePackVersion_WithSkill()
+    {
+        // 审查 Important #2：semantic-scan 审计必须携带规则包溯源（别名命中改变 overlay，
+        // 审计员须能分辨是哪个 skill 版本产生的）。临时 skill：示例院标@1.0.0。
+        string sampleDir = Path.Combine(_project, "provenance-skill");
+        Directory.CreateDirectory(sampleDir);
+        File.WriteAllText(Path.Combine(sampleDir, "skill.yaml"), """
+            name: 示例院标
+            version: "1.0.0"
+            discipline: architecture
+            drawingType: any
+            description: 溯源测试 skill
+            """);
+        File.WriteAllText(Path.Combine(sampleDir, "aliases.yaml"), "aliases:\n  - layerName: W-自定义\n    class: Wall\n");
+        var (code, _, _) = Run("semantic", "scan", "--drawing", _drawing, "--skill", sampleDir);
+        Assert.Equal(0, code);
+        var rec = Assert.Single(AuditRecords(), r => r.Entry.Kind == "semantic-scan");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        string pack = p.RootElement.GetProperty("rulePackVersion").GetString()!;
+        Assert.Contains("示例院标@1.0.0", pack);
+        Assert.StartsWith("gb50001-2017.r1|", pack);
+    }
+
+    [Fact]
+    public void Scan_Audit_CarriesBuiltinRulePackVersion_WithoutSkill()
+    {
+        // 无 --skill→builtin 常量（与 check/run-regression 同口径）。
+        var (code, _, _) = Run("semantic", "scan", "--drawing", _drawing);
+        Assert.Equal(0, code);
+        var rec = Assert.Single(AuditRecords(), r => r.Entry.Kind == "semantic-scan");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.Equal("gb50001-2017.r1", p.RootElement.GetProperty("rulePackVersion").GetString());
     }
 }

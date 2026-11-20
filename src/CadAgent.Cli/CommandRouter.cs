@@ -399,6 +399,8 @@ public static class CommandRouter
     /// --skill 接线（2b-ii-a T7）：与 check/adjudicate 同一 LoadRuleSet 加载路径，
     /// MergedAliases→Scan overload（别名命中层不再不明确）；包非法/Id 冲突→用法错误
     /// 先于任何副作用（不审计，Run 兜底 stderr + exit 1）。无 --skill→空别名表，行为不变。
+    /// 审计加性（最终审查裁定）：paramsJson 增 rulePackVersion=SkillSet.RulePackVersion
+    /// （规则包溯源，与 check 同口径；扫描行为本身不变）。
     /// </summary>
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -432,7 +434,11 @@ public static class CommandRouter
             {
                 annotationCount = result.Overlay.Annotations.Count,
                 ambiguousCount = result.Ambiguous.Count,
-                version = result.Overlay.Version
+                version = result.Overlay.Version,
+                // 规则包溯源（最终审查裁定 Important #2，加性）：别名命中改变 overlay，
+                // 审计员须能分辨哪个 skill 版本产生——与 check/run-regression 同口径
+                // （无 --skill→builtin 常量 "gb50001-2017.r1"）。
+                rulePackVersion = ruleSet.RulePackVersion
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -526,7 +532,10 @@ public static class CommandRouter
     /// manifest version patch+1（正则仅命中列 0 version 行末位数字组，保留引号）→
     /// 审计 semantic-promoted（Source="semantic"，paramsJson={layer,class,skill,newVersion}；
     /// promote 不改图纸，哈希不可得→空串，adjudicate 先例）→exit 0。
-    /// 两文件原子写（tmp+Move，SemanticOverlay.Save 先例）；写入后审计，SemanticMap 先例。
+    /// 两阶段提交（最终审查裁定）：先完整暂存 aliases.yaml.tmp + skill.yaml.tmp，两者都
+    /// 成功后才顺序 Move——任何 Move 之前的序列化/写入失败→零变更；中途 Move 失败→
+    /// semantic-promote-failed 审计（paramsJson={layer,skill,error,movedFiles}，嵌套守卫
+    /// 尽力留痕）+ stderr + exit 1。成功路径写入后审计，SemanticMap 先例。
     /// </summary>
     private static int SemanticPromote(string[] args, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -548,7 +557,7 @@ public static class CommandRouter
         var package = LoadOrReject(() => SkillLoader.LoadDirectory(skillDir), skillDir, session, audit, op, stderr);
         if (package is null) return 1;
 
-        // 校验先于任何 AtomicWriteAllText：先读 manifest、匹配列 0 version 行、算出
+        // 校验先于任何暂存/Move：先读 manifest、匹配列 0 version 行、算出
         // newVersion/bumped 文本。flow-style 等无 version 行的 manifest（loader 可加载）
         // 在此抛 InvalidSkillException→stderr + exit 1，aliases/manifest/审计零变更。
         string manifestPath = Path.Combine(skillDir, "skill.yaml");
@@ -574,8 +583,42 @@ public static class CommandRouter
         {
             aliases = aliases.Select(a => new { layerName = a.LayerName, @class = a.Class.ToString() }).ToList()
         });
-        AtomicWriteAllText(Path.Combine(skillDir, "aliases.yaml"), aliasesYaml);
-        AtomicWriteAllText(manifestPath, bumped);
+
+        // 两阶段提交（最终审查裁定 Important #1）：先把两个 .tmp 完整暂存（序列化/写入
+        // 错误发生在任何 Move 之前→零变更），全部成功后再顺序 Move。中途 Move 失败
+        // （Windows 文件锁/磁盘满等）→尽力追加 semantic-promote-failed 审计
+        // （movedFiles 如实记录已 Move 的文件——已变更未升版的状态可追溯）+ stderr + exit 1。
+        string aliasesPath = Path.Combine(skillDir, "aliases.yaml");
+        var movedFiles = new List<string>();
+        try
+        {
+            // 阶段 1：完整暂存两个 .tmp（保证末尾换行），此阶段失败不得有任何 Move。
+            File.WriteAllText(aliasesPath + ".tmp", EnsureTrailingNewline(aliasesYaml));
+            File.WriteAllText(manifestPath + ".tmp", EnsureTrailingNewline(bumped));
+            // 阶段 2：顺序 Move（tmp+Move 覆盖，SemanticOverlay.Save 先例）。
+            File.Move(aliasesPath + ".tmp", aliasesPath, overwrite: true);
+            movedFiles.Add("aliases.yaml");
+            File.Move(manifestPath + ".tmp", manifestPath, overwrite: true);
+            movedFiles.Add("skill.yaml");
+        }
+        catch (Exception ex)
+        {
+            // 嵌套守卫（run-regression 先例）：失败审计写入自身再抛异常时降级为仅 stderr
+            // 留痕，绝不重抛——promote 失败路径必须以 stderr + exit 1 收场。
+            try
+            {
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "semantic", "semantic-promote-failed", layer,
+                    JsonSerializer.Serialize(new { layer, skill = skillDir, error = ex.Message, movedFiles }),
+                    "", "", "", ""));
+            }
+            catch (Exception auditEx)
+            {
+                stderr.WriteLine($"promote 失败审计写入失败: {auditEx.Message}");
+            }
+            stderr.WriteLine(ex.Message);
+            return 1;
+        }
 
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "semantic", "semantic-promoted", layer,
@@ -925,14 +968,9 @@ public static class CommandRouter
         @"(?m)^(?<prefix>version:[ \t]*[""']?)(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?<suffix>[""']?)",
         RegexOptions.Compiled);
 
-    /// <summary>原子写文本（tmp+Move 覆盖，SemanticOverlay.Save 先例）；保证末尾换行。</summary>
-    private static void AtomicWriteAllText(string path, string content)
-    {
-        if (!content.EndsWith('\n')) content += "\n";
-        string tmp = path + ".tmp";
-        File.WriteAllText(tmp, content);
-        File.Move(tmp, path, overwrite: true);
-    }
+    /// <summary>保证末尾换行（promote 暂存写入约定，原 AtomicWriteAllText 的换行语义）。</summary>
+    private static string EnsureTrailingNewline(string content) =>
+        content.EndsWith('\n') ? content : content + "\n";
 
     private static int Usage(TextWriter stderr)
     {
