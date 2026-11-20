@@ -901,7 +901,7 @@ public class SemanticE2ETests : IDisposable
         var (rescanCode, rescanOut, _) = Run("semantic", "scan", "--drawing", _drawing);
         Assert.Equal(0, rescanCode);
         using var rescanDoc = System.Text.Json.JsonDocument.Parse(rescanOut);
-        Assert.Equal(2, rescanDoc.RootElement.GetProperty("version").GetInt32());
+        Assert.Equal(3, rescanDoc.RootElement.GetProperty("version").GetInt32()); // scan=1, map=2, rescan=3（Save 每次+1）
         var ambiguous = rescanDoc.RootElement.GetProperty("ambiguous").EnumerateArray()
             .Select(a => a.GetProperty("layerName").GetString()).ToList();
         Assert.DoesNotContain("W-自定义", ambiguous);
