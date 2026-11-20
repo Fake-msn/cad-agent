@@ -428,13 +428,15 @@ public static class CommandRouter
     }
 
     /// <summary>
-    /// check：LoadOrReject 图纸→overlay 存在则 Load（损坏→audited refusal）→裁定 Load→
+    /// check：LoadOrReject 图纸→overlay 存在则 Load（损坏→audited refusal）→裁定
+    /// LoadOrReject（损坏→audited refusal，与图纸/overlay 同一守卫）→
     /// RuleEngine.Evaluate(内置规则)→审计 check-run→stdout {issues, summary}（camelCase）。
     /// 退出码：0=无 mandatory 违规；2=有 mandatory 违规（recommended/informational 不影响
     /// 退出码——决策权归人）。check 只读不改图纸：前后哈希一致。
     /// stdout summary 仅含计数（rulesRun/rulesSkipped/issueCount/mandatoryViolations）：
-    /// SkippedReasons 含豁免规则 Id，若输出会破坏豁免规则的展示移除契约（T3 遗留的报告层
-    /// 结构化留 T8）。
+    /// SkippedReasons 含豁免规则 Id，若输出会破坏豁免规则的展示移除契约。
+    /// 跳过不静默（spec §6.2/§9，评审裁定）：跳过原因逐条写 stderr（"跳过: " 前缀），
+    /// 并以 skippedReasons 数组加性入审计 paramsJson（stdout 契约不变）。
     /// </summary>
     private static int Check(string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -450,9 +452,18 @@ public static class CommandRouter
                 session, audit, op, stderr, source: "check")
             : new SemanticOverlay();
         if (overlay is null) return 1;
-        var adjudications = AdjudicationSet.Load(AdjudicationsPath(agentDir));
+        string adjPath = AdjudicationsPath(agentDir);
+        var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
+            session, audit, op, stderr, source: "check");
+        if (adjudications is null) return 1;
         var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, overlay, adjudications);
         int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
+        // 跳过不静默：原因走 stderr（含规则 Id），不进 stdout JSON（豁免展示移除契约）。
+        if (summary.RulesSkipped > 0)
+        {
+            foreach (string reason in summary.SkippedReasons)
+                stderr.WriteLine($"跳过: {reason}");
+        }
         string hash = drawing.ComputeHash();
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "check", "check-run", drawingPath,
@@ -461,7 +472,8 @@ public static class CommandRouter
                 rulesRun = summary.RulesRun,
                 rulesSkipped = summary.RulesSkipped,
                 issueCount = summary.Issues.Count,
-                mandatoryViolations
+                mandatoryViolations,
+                skippedReasons = summary.SkippedReasons
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -493,7 +505,7 @@ public static class CommandRouter
         return positional[1] switch
         {
             "adjudicate" => RuleAdjudicate(args, agentDir, session, stdout, stderr),
-            "list" => RuleList(agentDir, stdout),
+            "list" => RuleList(agentDir, session, stdout, stderr),
             _ => UnknownRuleSubcommand(positional[1], stderr)
         };
     }
@@ -506,7 +518,10 @@ public static class CommandRouter
 
     /// <summary>
     /// rule adjudicate：人工裁定（强制力覆盖／豁免，二选一互斥；reason 必填）。
-    /// Upsert（同 RuleId 最新裁定生效）+原子 Save+审计 rule-adjudicated→exit 0。
+    /// 裁定文件 LoadOrReject（损坏→audited refusal exit 1）→Upsert（同 RuleId 最新裁定
+    /// 生效）→审计 rule-adjudicated→原子 Save→exit 0。
+    /// 审计先行（评审裁定）：Append 先于 Save——若 Save 在审计后抛异常，记录仍保留裁定
+    /// 意图（可接受，不回滚审计）；异常由 Run 兜底→stderr + exit 1。
     /// 裁定只改 adjudications.json 不改图纸：哈希不可得→空串。
     /// </summary>
     private static int RuleAdjudicate(string[] args, string agentDir, string session,
@@ -545,14 +560,17 @@ public static class CommandRouter
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
         string path = AdjudicationsPath(agentDir);
-        var set = AdjudicationSet.Load(path);
+        var set = LoadOrReject(() => AdjudicationSet.Load(path), path,
+            session, audit, op, stderr, source: "rule");
+        if (set is null) return 1;
         set.Upsert(new Adjudication(ruleId, op.Account, DateTimeOffset.UtcNow, reason,
             forceOverride, exempt, interpretation));
-        set.Save(path);
+        // 审计先行：Append 先于 Save（见方法注释——Save 失败不回滚审计，记录保留意图）。
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "rule", AdjudicationSet.AuditKind, ruleId,
             JsonSerializer.Serialize(new { ruleId, forceOverride = forceOverride?.ToString(), exempt, reason }),
             "", "", "", ""));
+        set.Save(path);
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             ruleId,
@@ -566,11 +584,17 @@ public static class CommandRouter
 
     /// <summary>
     /// rule list：内置规则+当前裁定 JSON（camelCase）→exit 0。
-    /// 只读命令不入审计（沿用 roles show / semantic show 先例）。
+    /// 只读命令成功时不入审计（沿用 roles show / semantic show 先例）；裁定文件损坏
+    /// 则 LoadOrReject 审计拒绝（spec §9 错误处理全部入审计）+ stderr + exit 1。
     /// </summary>
-    private static int RuleList(string agentDir, TextWriter stdout)
+    private static int RuleList(string agentDir, string session, TextWriter stdout, TextWriter stderr)
     {
-        var adjudications = AdjudicationSet.Load(AdjudicationsPath(agentDir));
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        string path = AdjudicationsPath(agentDir);
+        var adjudications = LoadOrReject(() => AdjudicationSet.Load(path), path,
+            session, audit, op, stderr, source: "rule");
+        if (adjudications is null) return 1;
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             rules = BuiltinRules.Load(),

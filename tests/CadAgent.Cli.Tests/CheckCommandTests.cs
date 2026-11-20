@@ -91,4 +91,35 @@ public class CheckCommandTests : IDisposable
         Assert.Contains("R-50001-5.0.2", stdout);
         Assert.Contains("院标", stdout);
     }
+
+    // 评审修复 1（控制者裁定）：跳过原因走 stderr（"跳过: " 前缀），stdout JSON 契约不变；
+    // T3 引擎豁免跳过原因格式为 "规则 {ruleId} 已豁免"，含 ruleId，无需改引擎。
+    [Fact]
+    public void Check_SkippedReasons_OnStderr_NotStdout()
+    {
+        Run("rule", "adjudicate", "--rule", "R-50001-13.0.1", "--exempt", "--reason", "测试豁免");
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = CommandRouter.Run(new[] { "check", "--drawing", _drawing, "--project", _project }, outW, errW);
+        Assert.Equal(0, code);
+        Assert.Contains("跳过", errW.ToString());
+        Assert.Contains("R-50001-13.0.1", errW.ToString());
+        Assert.DoesNotContain("R-50001-13.0.1", outW.ToString()); // stdout 契约 intact
+    }
+
+    // 评审修复 2（控制者裁定）：损坏 adjudications.json → LoadOrReject 审计拒绝
+    // （intake-rejected，target=裁定文件路径）+ stderr + exit 1，审计链保持完整。
+    [Fact]
+    public void Check_CorruptAdjudications_AuditedRefusal()
+    {
+        string adjPath = Path.Combine(_project, ".cadagent", "adjudications.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(adjPath)!);
+        File.WriteAllText(adjPath, "{corrupt json!!");
+        var (code, _, stderr) = Run("check", "--drawing", _drawing);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        var (vc, _, _) = Run("audit", "verify");
+        Assert.Equal(0, vc); // 链完整且含 intake-rejected 记录
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "intake-rejected" && r.Entry.Target == adjPath);
+    }
 }
