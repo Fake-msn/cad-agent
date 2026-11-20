@@ -25,6 +25,13 @@ public class RuleEngineTests
             throw new InvalidOperationException("检查器爆炸");
     }
 
+    // 最终审查修复 4（控制者裁定）：检查器返回 null 不得逃出隔离边界（NRE 崩引擎）。
+    private sealed class NullReturningChecker : IRuleChecker
+    {
+        public string CheckType => "null";
+        public IReadOnlyList<Issue> Check(Rule r, IDrawingSession s, SemanticOverlay o) => null!;
+    }
+
     private static Rule MakeRule(string id, string type, RuleForce f = RuleForce.Recommended, string verification = "source-text") =>
         new(id, new RuleSource("GB/T 50001-2017", "1.0.1", "摘录", verification),
             "应", f, RuleSeverity.High, new RuleScope(), new CheckSpec(type, new()), "建议");
@@ -70,6 +77,19 @@ public class RuleEngineTests
         Assert.Empty(summary.Issues);
         Assert.Equal(1, summary.RulesSkipped);
         Assert.Contains(summary.SkippedReasons, r => r.Contains("检查器爆炸"));
+    }
+
+    // 最终审查修复 4（控制者裁定）：null 返回视为检查器故障——跳过该规则并记账原因，
+    // 引擎不崩溃（与异常隔离同一通道）。
+    [Fact]
+    public void Evaluate_CheckerReturnsNull_SkipsNotCrash()
+    {
+        var engine = new RuleEngine(new[] { new NullReturningChecker() });
+        var summary = engine.Evaluate(new[] { MakeRule("R1", "null") }, new FakeSession(), new SemanticOverlay(), new AdjudicationSet());
+        Assert.Empty(summary.Issues);
+        Assert.Equal(1, summary.RulesSkipped);
+        Assert.Equal(0, summary.RulesRun);
+        Assert.Contains(summary.SkippedReasons, r => r.Contains("null"));
     }
 
     [Fact]

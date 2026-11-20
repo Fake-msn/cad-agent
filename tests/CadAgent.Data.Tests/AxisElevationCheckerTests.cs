@@ -119,6 +119,40 @@ public class AxisElevationCheckerTests : IDisposable
         }
     }
 
+    // 最终审查修复 1（控制者裁定）：8.0.4 摘录限定"英文字母作为轴线号时"——
+    // 纯数字（8.0.3 阿拉伯数字）、附加轴分数（8.0.6：1/A、分母 0A）、分区编号（8.0.5：1-A）
+    // 不是字母轴线号 → 跳过不算违规；含字母的轴线号值仍查（I 禁用、a 小写 → issue）。
+    [Fact]
+    public void AxisLetter_NumericFractionZoneForms_Skipped_LetterValuesStillChecked()
+    {
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(0, 0), Value = "1", Height = 5 });    // 8.0.3 数字 → 不查
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(10, 0), Value = "10", Height = 5 });  // 8.0.3 数字 → 不查
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(20, 0), Value = "1/A", Height = 5 }); // 8.0.6 附加轴分数 → 不查
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(30, 0), Value = "0A", Height = 5 });  // 8.0.6 前轴分母形式 → 不查
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(40, 0), Value = "1-A", Height = 5 }); // 8.0.5 分区编号 → 不查
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(50, 0), Value = "I", Height = 5 });   // 禁用字母 → issue
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(60, 0), Value = "a", Height = 5 });   // 小写 → issue
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            var es = session.Summarize().Entities;
+            var overlay = new SemanticOverlay();
+            foreach (var e in es)
+                overlay.UpsertAnnotation(new SemanticAnnotation(e.Handle, SemanticClass.Axis, Provenance.HumanConfirmed, 1.0, "t"));
+            var issues = new AxisLetterChecker().Check(Make("R-50001-8.0.4", "axis-letter", "8.0.4"), session, overlay);
+            Assert.Equal(2, issues.Count);
+            Assert.Contains(issues, i => i.Message.Contains("\"I\""));
+            Assert.Contains(issues, i => i.Message.Contains("\"a\""));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public void AxisLetter_DoubleFootnote_Valid_Lowercase_Flagged_LowConfidenceIgnored()
     {

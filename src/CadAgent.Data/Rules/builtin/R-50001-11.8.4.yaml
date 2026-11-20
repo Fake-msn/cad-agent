@@ -11,5 +11,6 @@ severity: high
 scope: { discipline: any, drawingType: any }
 check:
   type: elevation-format
+  # allowSitePlan2: reserved——图类判定后续消费，当前2位小数无条件降Low
   params: { mode: decimals, allowSitePlan2: true }
 suggestion: "标高注写到小数点后 3 位（总平面图可 2 位，需确认图类）"

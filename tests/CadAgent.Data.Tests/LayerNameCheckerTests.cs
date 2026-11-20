@@ -84,6 +84,25 @@ public class LayerNameCheckerTests : IDisposable
         finally { File.Delete(path); }
     }
 
+    // 捆绑小修（最终审查）：Defpoints（大小写不敏感，AutoCAD 非打印定义点系统层）与
+    // 含 '|' 的 xref 依赖层（XREF|LAYER，命名随宿主图纸）两模式均跳过，与 "0" 并列。
+    // 注：ACadSharp DXF 写/读会丢弃含 '|' 的层名（探针证实）——xref 层直接注入内存文档，
+    // 检查器读 Doc.Layers，不依赖 DXF 往返。
+    [Fact]
+    public void Defpoints_AndXrefLayers_Skipped_BothModes()
+    {
+        string path = DxfFixture.CreateTempDxf(doc => doc.Layers.Add(new Layer("defpoints"))); // 大小写变体：OrdinalIgnoreCase 跳过
+        try
+        {
+            var session = DrawingSession.Load(path);
+            session.Doc.Layers.Add(new Layer("XREF|LAYER")); // xref 依赖层：structure 下 '|' 非法字符/1段，须跳过
+            session.Doc.Layers.Add(new Layer("XREF|墙体"));  // 汉英混用：charset 下若不跳过会被误报
+            Assert.Empty(new LayerNameChecker().Check(Make("charset"), session, new SemanticOverlay()));
+            Assert.Empty(new LayerNameChecker().Check(Make("structure"), session, new SemanticOverlay()));
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void UnknownMode_ReturnsEmpty()
     {

@@ -182,7 +182,7 @@ public static class CommandRouter
         }
         var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
-        else RunRegressionCheck(drawing, overlay ?? new SemanticOverlay(), agentDir, session, audit, op, stderr);
+        else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
@@ -197,17 +197,23 @@ public static class CommandRouter
     /// 观察性检查不得改变 run 结果：裁定文件损坏→LoadOrReject 审计拒绝后跳过回归；
     /// 其余异常→审计留痕（spec §9）+ stderr 提示，退出码仍由事务结果决定。
     /// 跳过原因沿用 check 的 stderr 通道（跳过不静默）。
+    /// 无 overlay 观察性（最终审查裁定，interim；结构化跳过报告=2b-ii）：overlay 为 null/空
+    /// →stderr"未评估"提示 + paramsJson 加性字段 overlayPresent（引擎计数不变）。
     /// </summary>
-    private static void RunRegressionCheck(DrawingSession drawing, SemanticOverlay overlay,
+    private static void RunRegressionCheck(DrawingSession drawing, SemanticOverlay? overlay,
         string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
     {
         try
         {
+            var effectiveOverlay = overlay ?? new SemanticOverlay();
+            bool overlayPresent = effectiveOverlay.Annotations.Count > 0;
+            if (!overlayPresent)
+                stderr.WriteLine("提示: 无语义标注，轴号/标高规则未评估（请先 semantic scan/map）");
             string adjPath = AdjudicationsPath(agentDir);
             var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
                 session, audit, op, stderr, source: "run-regression");
             if (adjudications is null) return; // 已审计拒绝；已提交事务不受影响
-            var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, overlay, adjudications);
+            var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, effectiveOverlay, adjudications);
             int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
             foreach (string reason in summary.SkippedReasons)
                 stderr.WriteLine($"跳过: {reason}");
@@ -220,7 +226,8 @@ public static class CommandRouter
                     rulesSkipped = summary.RulesSkipped,
                     issueCount = summary.Issues.Count,
                     mandatoryViolations,
-                    skippedReasons = summary.SkippedReasons
+                    skippedReasons = summary.SkippedReasons,
+                    overlayPresent
                 }),
                 hash, hash, "", ""));
             if (mandatoryViolations > 0)
@@ -233,9 +240,20 @@ public static class CommandRouter
         catch (Exception ex)
         {
             // 回归检查自身故障也入审计（spec §9），但不影响已提交事务。
-            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-                session, "run-regression", "check-run", drawing.SourcePath,
-                JsonSerializer.Serialize(new { Error = ex.Message }), "", "", "", ""));
+            // 嵌套守卫（最终审查裁定）：catch 路径的 audit.Append 若再抛异常，不得让异常逃出——
+            // 否则 run 将以 exit 1 无 stdout 收场，尽管事务已提交。写入失败降级为仅 stderr 留痕，
+            // 绝不重抛。（无注入缝隙可模拟审计写入失败——以代码审查+既有损坏裁定测试覆盖。）
+            try
+            {
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "run-regression", "check-run", drawing.SourcePath,
+                    JsonSerializer.Serialize(new { Error = ex.Message, overlayPresent = overlay is { Annotations.Count: > 0 } }),
+                    "", "", "", ""));
+            }
+            catch (Exception auditEx)
+            {
+                stderr.WriteLine($"回归审计写入失败: {auditEx.Message}");
+            }
             stderr.WriteLine($"回归检查未完成: {ex.Message}（事务已提交，不受影响）");
         }
     }
@@ -489,6 +507,9 @@ public static class CommandRouter
     /// SkippedReasons 含豁免规则 Id，若输出会破坏豁免规则的展示移除契约。
     /// 跳过不静默（spec §6.2/§9，评审裁定）：跳过原因逐条写 stderr（"跳过: " 前缀），
     /// 并以 skippedReasons 数组加性入审计 paramsJson（stdout 契约不变）。
+    /// 无 overlay 观察性（最终审查裁定，interim；结构化跳过报告=2b-ii）：无语义标注时
+    /// overlay 驱动规则（轴号/标高）实际未评估，不得与"已查且干净"不可区分——stderr 提示
+    /// + paramsJson 加性字段 overlayPresent（引擎计数与 stdout 契约不变）。
     /// </summary>
     private static int Check(string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -504,6 +525,9 @@ public static class CommandRouter
                 session, audit, op, stderr, source: "check")
             : new SemanticOverlay();
         if (overlay is null) return 1;
+        bool overlayPresent = overlay.Annotations.Count > 0;
+        if (!overlayPresent)
+            stderr.WriteLine("提示: 无语义标注，轴号/标高规则未评估（请先 semantic scan/map）");
         string adjPath = AdjudicationsPath(agentDir);
         var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
             session, audit, op, stderr, source: "check");
@@ -525,7 +549,8 @@ public static class CommandRouter
                 rulesSkipped = summary.RulesSkipped,
                 issueCount = summary.Issues.Count,
                 mandatoryViolations,
-                skippedReasons = summary.SkippedReasons
+                skippedReasons = summary.SkippedReasons,
+                overlayPresent
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new

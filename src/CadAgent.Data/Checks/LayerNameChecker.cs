@@ -8,7 +8,8 @@ namespace CadAgent.Data.Checks;
 /// charset（13.0.1）：层名同时含汉字 [\u4e00-\u9fff] 与 A-Za-z → 汉英混用违规；
 /// structure（13.0.2）：按 "-" 分段，段数∈[2,5]，每段非空且字符集∈[汉字A-Za-z0-9]
 /// （汉字层与英文层同一字符集校验；专业代码白名单/附录B推荐名 deferred——视觉依赖表，消息注明）。
-/// 图层 "0" 跳过（默认层）；未知 mode → 空列表（检查器隔离，不抛异常）。
+/// 图层 "0"（默认层）、"Defpoints"（大小写不敏感，AutoCAD 非打印定义点系统层）与含 '|' 的
+/// xref 依赖层（XREF|LAYER，命名随宿主图纸）两模式均跳过；未知 mode → 空列表（检查器隔离，不抛异常）。
 /// </summary>
 public sealed class LayerNameChecker : IRuleChecker
 {
@@ -31,6 +32,9 @@ public sealed class LayerNameChecker : IRuleChecker
         {
             string name = layer.Name ?? "";
             if (name == "0") continue; // 默认层跳过
+            // 捆绑小修（最终审查）：Defpoints 系统层与 xref 依赖层（含 '|'）两模式均跳过，与 "0" 并列。
+            if (string.Equals(name, "Defpoints", StringComparison.OrdinalIgnoreCase)) continue;
+            if (name.Contains('|')) continue;
 
             string? violation = mode == "charset" ? CharsetViolation(name) : StructureViolation(name);
             if (violation is null) continue;

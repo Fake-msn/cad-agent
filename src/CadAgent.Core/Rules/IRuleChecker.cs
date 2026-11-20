@@ -61,6 +61,14 @@ public sealed class RuleEngine
                 continue;
             }
 
+            // 隔离守卫（最终审查裁定）：检查器返回 null 不得在 try 外枚举时以 NRE 逃出隔离边界——
+            // 视为检查器故障，跳过该规则并记账原因（与异常隔离同一通道）。
+            if (produced is null)
+            {
+                Skip($"规则 {rule.Id} 检查器返回 null");
+                continue;
+            }
+
             // Informational 规则同样评估；issue.Force 一律覆写为生效强制力（展示用）。
             foreach (var issue in produced) issues.Add(issue with { Force = force.Value });
             run++;

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CadAgent.Data.Tests;
 using CSMath;
 using ACadSharp.Entities;
@@ -104,6 +105,54 @@ public class CheckCommandTests : IDisposable
         Assert.Contains("跳过", errW.ToString());
         Assert.Contains("R-50001-13.0.1", errW.ToString());
         Assert.DoesNotContain("R-50001-13.0.1", outW.ToString()); // stdout 契约 intact
+    }
+
+    // 最终审查修复 2（控制者裁定， interim 观察性；结构化跳过报告=2b-ii）：无语义标注时
+    // overlay 驱动规则（轴号/标高）实际未评估——不得与"已查且干净"不可区分：stderr 提示
+    // + 审计 check-run paramsJson 加性字段 overlayPresent=false；引擎计数与 stdout 契约不变。
+    [Fact]
+    public void Check_NoOverlay_StderrNote_AuditOverlayPresentFalse()
+    {
+        var (code, stdout, stderr) = Run("check", "--drawing", _drawing);
+        Assert.Equal(0, code);
+        Assert.Contains("未评估", stderr);
+        Assert.Contains("semantic scan", stderr);
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Source == "check" && r.Entry.Kind == "check-run");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.False(p.RootElement.GetProperty("overlayPresent").GetBoolean());
+        // stdout summary 契约不变：不含 overlayPresent 字段。
+        using var outDoc = JsonDocument.Parse(stdout);
+        Assert.False(outDoc.RootElement.GetProperty("summary").TryGetProperty("overlayPresent", out _));
+    }
+
+    // 最终审查修复 2（控制者裁定）：有语义标注（scan 命中约定图层"墙体"→LayerInference 标注）
+    // → 无"未评估"提示，审计 overlayPresent=true。
+    [Fact]
+    public void Check_WithScanAnnotations_AuditOverlayPresentTrue_NoNote()
+    {
+        string drawing = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Layers.Add(new ACadSharp.Tables.Layer("墙体"));
+            var wall = doc.Layers.First(l => l.Name == "墙体");
+            doc.Entities.Add(new Line { StartPoint = (XYZ)new XY(0, 0), EndPoint = (XYZ)new XY(1000, 0), Layer = wall });
+        });
+        try
+        {
+            var (sc, _, _) = Run("semantic", "scan", "--drawing", drawing);
+            Assert.Equal(0, sc);
+            var (code, _, stderr) = Run("check", "--drawing", drawing);
+            Assert.Equal(0, code); // 无裁定→全 recommended→exit 0
+            Assert.DoesNotContain("未评估", stderr);
+            using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+            var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Source == "check" && r.Entry.Kind == "check-run");
+            using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+            Assert.True(p.RootElement.GetProperty("overlayPresent").GetBoolean());
+        }
+        finally
+        {
+            File.Delete(drawing);
+        }
     }
 
     // 评审修复 2（控制者裁定）：损坏 adjudications.json → LoadOrReject 审计拒绝

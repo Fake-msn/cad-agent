@@ -250,6 +250,24 @@ public class RunRegressionTests : IDisposable
         Assert.True(audit.VerifyChain(out _));
     }
 
+    // 最终审查修复 2（控制者裁定）：回归检查同等待遇——无 overlay（未 scan）→
+    // stderr"未评估"提示 + run-regression check-run paramsJson overlayPresent=false；
+    // 事务结果不受影响（exit 0、ok:true）。
+    [Fact]
+    public void Run_NoOverlay_RegressionStderrNote_AuditOverlayPresentFalse()
+    {
+        var (code, stdout, stderr) = Run("run", _plan, "--drawing", _drawing);
+        Assert.Equal(0, code);
+        Assert.Contains("\"ok\":true", stdout.Replace(" ", ""));
+        Assert.Contains("未评估", stderr);
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var regression = Assert.Single(audit.ReadAll(),
+            r => r.Entry.Source == "run-regression" && r.Entry.Kind == "check-run");
+        using var regParams = JsonDocument.Parse(regression.Entry.ParamsJson);
+        Assert.False(regParams.RootElement.GetProperty("overlayPresent").GetBoolean());
+        Assert.True(audit.VerifyChain(out _));
+    }
+
     [Fact]
     public void Run_CorruptAdjudications_RegressionRefusedAudited_RunStillSucceeds()
     {
