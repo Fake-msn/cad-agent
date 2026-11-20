@@ -69,15 +69,17 @@ public sealed class StepEngine
     private readonly IIdentityProvider _identity;
     private readonly RoleChecker _roles;
     private readonly Dictionary<string, IStepHandler> _handlers;
+    private readonly ISemanticGate? _semanticGate;
 
     public StepEngine(IAuditStore audit, SnapshotStore snapshots, IIdentityProvider identity,
-        RoleChecker roles, IEnumerable<IStepHandler> handlers)
+        RoleChecker roles, IEnumerable<IStepHandler> handlers, ISemanticGate? semanticGate = null)
     {
         _audit = audit;
         _snapshots = snapshots;
         _identity = identity;
         _roles = roles;
         _handlers = handlers.ToDictionary(h => h.Kind);
+        _semanticGate = semanticGate;
     }
 
     public TxResult Run(StepPlan plan, IDrawingSession session, string sessionId)
@@ -97,6 +99,23 @@ public sealed class StepEngine
                 string err = $"未注册的步骤类型: {step.Kind}";
                 Append(op, sessionId, "step-failed", step.Kind, err, beforeHash, session.ComputeHash(), snapshot, plan.PlanId);
                 return new TxResult(txId, false, done, err);
+            }
+            // 操作语义闸口（加性）：仅当注入了闸口且处理器声明了语义需求才检查；
+            // 拒绝→留痕后立即终止，不执行该步、不 SaveWorking。
+            if (_semanticGate != null && handler is ISemanticAware aware && aware.RequiredSemantics.Count > 0)
+            {
+                GateDecision decision = _semanticGate.Check(aware.RequiredSemantics);
+                if (!decision.Allowed)
+                {
+                    Append(op, sessionId, "semantic-gate-refused", step.Kind,
+                        JsonSerializer.Serialize(new
+                        {
+                            required = aware.RequiredSemantics.Select(c => c.ToString()).ToArray(),
+                            reason = decision.Reason
+                        }),
+                        beforeHash, beforeHash, snapshot, plan.PlanId);
+                    return new TxResult(txId, false, done, decision.Reason);
+                }
             }
             StepResult result;
             string afterHash = beforeHash;

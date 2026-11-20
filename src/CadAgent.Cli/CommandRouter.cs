@@ -122,9 +122,9 @@ public static class CommandRouter
         return report.Level switch { GateLevel.Green => 0, GateLevel.Yellow => 2, _ => 3 };
     }
 
-    private static StepEngine Engine(string agentDir, IAuditStore audit) =>
+    private static StepEngine Engine(string agentDir, IAuditStore audit, ISemanticGate? semanticGate = null) =>
         new(audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
-            Identity(agentDir), new RoleChecker(), HandlerRegistry.All());
+            Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate);
 
     private static int RunPlan(string planPath, string drawingPath, string agentDir,
         string session, TextWriter stdout, TextWriter stderr)
@@ -165,7 +165,12 @@ public static class CommandRouter
             // Yellow 放行+警示（语义级拦截属计划2的既定策略）。
             stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
         }
-        var result = Engine(agentDir, audit).Run(plan, drawing, session);
+        // 语义闸口接线：overlay 存在→加载注入；不存在→null（几何级流程不受影响，诚实降级）。
+        string overlayPath = SemanticOverlayPath(agentDir);
+        ISemanticGate? semanticGate = File.Exists(overlayPath)
+            ? new SemanticGate(SemanticOverlay.Load(overlayPath))
+            : null;
+        var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
