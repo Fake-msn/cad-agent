@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -24,9 +25,12 @@ public static class HashChain
     public const string GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
     public static string Canonical(AuditEntry e, long seq, string prevHash) =>
-        string.Join("|", seq, e.Ts.ToString("O"), e.Operator, e.Role, e.Session,
-            e.Source, e.Kind, e.Target, e.ParamsJson, e.BeforeHash, e.AfterHash,
-            e.SnapshotRef, e.PlanRef, prevHash);
+        string.Join("|", seq.ToString(CultureInfo.InvariantCulture), e.Ts.ToString("O"),
+            Esc(e.Operator), Esc(e.Role), Esc(e.Session), Esc(e.Source), Esc(e.Kind),
+            Esc(e.Target), Esc(e.ParamsJson), Esc(e.BeforeHash), Esc(e.AfterHash),
+            Esc(e.SnapshotRef), Esc(e.PlanRef), prevHash);
+
+    private static string Esc(string s) => s.Replace("\\", "\\\\").Replace("|", "\\p");
 
     public static string Compute(AuditEntry e, long seq, string prevHash) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(e, seq, prevHash))));
