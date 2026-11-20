@@ -17,8 +17,9 @@ namespace CadAgent.Data.Checks;
 ///   文本上不可区分，天然满足）；± 仅用于零点。整数值同样查 +/± 前缀（T4 控制者裁定：
 ///   "+3" 违规；"-3" 带负号合规；"3" 正数无符号合规）。
 /// DetectionBasis 注明正则模式 + 检查模式 + overlay 来源。
+/// IOverlayDependent（2b-ii-a T5）：overlay 空时引擎记 NotEvaluable 跳过，不跑空。
 /// </summary>
-public sealed class ElevationChecker : IRuleChecker
+public sealed class ElevationChecker : IRuleChecker, IOverlayDependent
 {
     public string CheckType => "elevation-format";
 

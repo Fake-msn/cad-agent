@@ -16,9 +16,20 @@ public sealed record Issue(
     string Suggestion,
     string DetectionBasis);
 
-/// <summary>一次规则评估的汇总：发现列表 + 执行/跳过计数 + 去重后的跳过原因。</summary>
+/// <summary>一次规则评估的汇总：发现列表 + 执行/跳过计数 + 结构化跳过（2b-ii-a T5）。</summary>
+/// <param name="LegacySkippedReasons">旧式字符串原因（第 4 参；StructuredSkips 为 null 的遗留构造回退用）。
+/// 位置记录不能同名共存存储参数与计算属性，故第 4 参更名——既有调用方均按位置传参，源码兼容。</param>
+/// <param name="StructuredSkips">结构化跳过列表（加性第 5 参，默认 null 兼容遗留构造）。</param>
 public sealed record CheckSummary(
     IReadOnlyList<Issue> Issues,
     int RulesRun,
     int RulesSkipped,
-    IReadOnlyList<string> SkippedReasons);
+    IReadOnlyList<string> LegacySkippedReasons,
+    IReadOnlyList<SkipReason>? StructuredSkips = null)
+{
+    /// <summary>投影兼容（T5 关键契约）："{RuleId}: {Message}"——Message 保留旧 reason 文案子串
+    /// （已豁免/待原件核验/无匹配检查器/检查器异常/检查器返回 null），既有字符串断言投影后仍成立。</summary>
+    public IReadOnlyList<string> SkippedReasons => StructuredSkips is not null
+        ? StructuredSkips.Select(s => $"{s.RuleId}: {s.Message}").ToList()
+        : LegacySkippedReasons;
+}

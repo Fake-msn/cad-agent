@@ -196,9 +196,9 @@ public static class CommandRouter
     /// 无论有无违规均审计 check-run（Source="run-regression"，只读检查前后哈希一致）。
     /// 观察性检查不得改变 run 结果：裁定文件损坏→LoadOrReject 审计拒绝后跳过回归；
     /// 其余异常→审计留痕（spec §9）+ stderr 提示，退出码仍由事务结果决定。
-    /// 跳过原因沿用 check 的 stderr 通道（跳过不静默）。
-    /// 无 overlay 观察性（最终审查裁定，interim；结构化跳过报告=2b-ii）：overlay 为 null/空
-    /// →stderr"未评估"提示 + paramsJson 加性字段 overlayPresent（引擎计数不变）。
+    /// 跳过原因沿用 check 的结构化 stderr 通道（跳过不静默）。
+    /// 无 overlay 观察性：overlay 为 null/空→引擎记 NotEvaluable 结构化跳过（2b-ii-a T5）；
+    /// 2b-i interim 的 stderr"未评估"提示与 paramsJson overlayPresent 字段保留（既有测试兼容）。
     /// </summary>
     private static void RunRegressionCheck(DrawingSession drawing, SemanticOverlay? overlay,
         string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
@@ -215,8 +215,7 @@ public static class CommandRouter
             if (adjudications is null) return; // 已审计拒绝；已提交事务不受影响
             var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, effectiveOverlay, adjudications);
             int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
-            foreach (string reason in summary.SkippedReasons)
-                stderr.WriteLine($"跳过: {reason}");
+            WriteStructuredSkips(summary, stderr);
             string hash = drawing.ComputeHash();
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "run-regression", "check-run", drawing.SourcePath,
@@ -226,7 +225,7 @@ public static class CommandRouter
                     rulesSkipped = summary.RulesSkipped,
                     issueCount = summary.Issues.Count,
                     mandatoryViolations,
-                    skippedReasons = summary.SkippedReasons,
+                    skippedReasons = StructuredSkipAuditArray(summary),
                     overlayPresent
                 }),
                 hash, hash, "", ""));
@@ -498,18 +497,39 @@ public static class CommandRouter
     }
 
     /// <summary>
+    /// 结构化跳过 stderr 通道（2b-ii-a T5，check/run-regression 共用）：
+    /// "跳过: [{Category}] {RuleId}: {Message}"——保留旧 "跳过: " 前缀与规则 Id
+    /// （既有测试子串兼容）；Message 保留旧 reason 文案子串。
+    /// </summary>
+    private static void WriteStructuredSkips(CheckSummary summary, TextWriter stderr)
+    {
+        foreach (var skip in summary.StructuredSkips ?? Array.Empty<SkipReason>())
+            stderr.WriteLine($"跳过: [{skip.Category}] {skip.RuleId}: {skip.Message}");
+    }
+
+    /// <summary>
+    /// 审计 paramsJson skippedReasons 结构化数组（2b-ii-a T5）：[{category, ruleId, message}]
+    /// （camelCase 匿名投影，与 paramsJson 其余字段命名一致；stdout 契约不变）。
+    /// </summary>
+    private static object StructuredSkipAuditArray(CheckSummary summary) =>
+        (summary.StructuredSkips ?? Array.Empty<SkipReason>())
+            .Select(s => new { category = s.Category, ruleId = s.RuleId, message = s.Message })
+            .ToList();
+
+    /// <summary>
     /// check：LoadOrReject 图纸→overlay 存在则 Load（损坏→audited refusal）→裁定
     /// LoadOrReject（损坏→audited refusal，与图纸/overlay 同一守卫）→
     /// RuleEngine.Evaluate(内置规则)→审计 check-run→stdout {issues, summary}（camelCase）。
     /// 退出码：0=无 mandatory 违规；2=有 mandatory 违规（recommended/informational 不影响
     /// 退出码——决策权归人）。check 只读不改图纸：前后哈希一致。
     /// stdout summary 仅含计数（rulesRun/rulesSkipped/issueCount/mandatoryViolations）：
-    /// SkippedReasons 含豁免规则 Id，若输出会破坏豁免规则的展示移除契约。
-    /// 跳过不静默（spec §6.2/§9，评审裁定）：跳过原因逐条写 stderr（"跳过: " 前缀），
-    /// 并以 skippedReasons 数组加性入审计 paramsJson（stdout 契约不变）。
-    /// 无 overlay 观察性（最终审查裁定，interim；结构化跳过报告=2b-ii）：无语义标注时
-    /// overlay 驱动规则（轴号/标高）实际未评估，不得与"已查且干净"不可区分——stderr 提示
-    /// + paramsJson 加性字段 overlayPresent（引擎计数与 stdout 契约不变）。
+    /// 跳过原因含豁免规则 Id，若输出会破坏豁免规则的展示移除契约。
+    /// 跳过不静默（spec §6.2/§9，评审裁定；2b-ii-a T5 结构化）：跳过逐条写 stderr
+    /// （"跳过: [{Category}] {RuleId}: {Message}"），并以结构化 skippedReasons 数组
+    /// [{category, ruleId, message}] 加性入审计 paramsJson（stdout 契约不变）。
+    /// 无 overlay 观察性：无语义标注时 overlay 驱动规则（轴号/标高）由引擎记 NotEvaluable
+    /// 结构化跳过（T5）；2b-i interim 的 stderr 提示与 paramsJson overlayPresent 字段保留
+    /// （既有测试兼容）。
     /// </summary>
     private static int Check(string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -534,12 +554,8 @@ public static class CommandRouter
         if (adjudications is null) return 1;
         var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, overlay, adjudications);
         int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
-        // 跳过不静默：原因走 stderr（含规则 Id），不进 stdout JSON（豁免展示移除契约）。
-        if (summary.RulesSkipped > 0)
-        {
-            foreach (string reason in summary.SkippedReasons)
-                stderr.WriteLine($"跳过: {reason}");
-        }
+        // 跳过不静默：结构化原因走 stderr（含类别+规则 Id），不进 stdout JSON（豁免展示移除契约）。
+        WriteStructuredSkips(summary, stderr);
         string hash = drawing.ComputeHash();
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "check", "check-run", drawingPath,
@@ -549,7 +565,7 @@ public static class CommandRouter
                 rulesSkipped = summary.RulesSkipped,
                 issueCount = summary.Issues.Count,
                 mandatoryViolations,
-                skippedReasons = summary.SkippedReasons,
+                skippedReasons = StructuredSkipAuditArray(summary),
                 overlayPresent
             }),
             hash, hash, "", ""));

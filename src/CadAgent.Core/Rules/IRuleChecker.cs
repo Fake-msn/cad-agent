@@ -7,6 +7,24 @@ public interface IRuleChecker
     IReadOnlyList<Issue> Check(Rule rule, IDrawingSession session, SemanticOverlay overlay);
 }
 
+/// <summary>标记接口（2b-ii-a T5）：检查器依赖语义叠加层标注——overlay 无任何标注时
+/// 引擎记 NotEvaluable 结构化跳过（不跑空），不得与"已查且干净"不可区分。</summary>
+public interface IOverlayDependent { }
+
+/// <summary>结构化跳过原因（2b-ii-a T5）：类别常量 + 规则 Id + 人读消息。
+/// Message 保留旧 reason 文案子串——CheckSummary.SkippedReasons 投影后既有字符串断言兼容。</summary>
+public sealed record SkipReason(string Category, string RuleId, string Message);
+
+/// <summary>跳过类别常量（值=名称原样，供 stderr "[Category]" 与审计 category 字段）。</summary>
+public static class SkipCategories
+{
+    public const string Exempt = "Exempt";
+    public const string PendingOriginal = "PendingOriginal";
+    public const string NoChecker = "NoChecker";
+    public const string CheckerError = "CheckerError";
+    public const string NotEvaluable = "NotEvaluable";
+}
+
 /// <summary>规则引擎：逐规则应用裁定→跳过记账→调 checker→覆写 issue.Force。
 /// checker 不感知裁定（收到 rule 原样）；checker 异常只跳过该规则，不崩引擎。</summary>
 public sealed class RuleEngine
@@ -25,7 +43,7 @@ public sealed class RuleEngine
         AdjudicationSet adjudications)
     {
         var issues = new List<Issue>();
-        var reasons = new List<string>();
+        var skips = new List<SkipReason>();
         int run = 0, skipped = 0;
 
         foreach (var rule in rules)
@@ -34,19 +52,27 @@ public sealed class RuleEngine
             var force = adjudications.EffectiveForce(rule);
             if (force is null)
             {
-                Skip($"规则 {rule.Id} 已豁免");
+                Skip(SkipCategories.Exempt, rule.Id, $"规则 {rule.Id} 已豁免");
                 continue;
             }
 
             if (rule.Source.Verification == "pending-original")
             {
-                Skip($"规则 {rule.Id} 待原件核验");
+                Skip(SkipCategories.PendingOriginal, rule.Id, $"规则 {rule.Id} 待原件核验");
                 continue;
             }
 
             if (!_checkers.TryGetValue(rule.Check.Type, out var checker))
             {
-                Skip($"规则 {rule.Id} 无匹配检查器（{rule.Check.Type}）");
+                Skip(SkipCategories.NoChecker, rule.Id, $"规则 {rule.Id} 无匹配检查器（{rule.Check.Type}）");
+                continue;
+            }
+
+            // NotEvaluable（2b-ii-a T5）：overlay 依赖检查器在无语义标注时不跑空——
+            // 结构化跳过记账，不得与"已查且干净"不可区分（先于 checker 执行判定）。
+            if (overlay.Annotations.Count == 0 && checker is IOverlayDependent)
+            {
+                Skip(SkipCategories.NotEvaluable, rule.Id, $"规则 {rule.Id} 无语义标注，未评估");
                 continue;
             }
 
@@ -57,7 +83,7 @@ public sealed class RuleEngine
             }
             catch (Exception ex)
             {
-                Skip($"规则 {rule.Id} 检查器异常：{ex.Message}");
+                Skip(SkipCategories.CheckerError, rule.Id, $"规则 {rule.Id} 检查器异常：{ex.Message}");
                 continue;
             }
 
@@ -65,7 +91,7 @@ public sealed class RuleEngine
             // 视为检查器故障，跳过该规则并记账原因（与异常隔离同一通道）。
             if (produced is null)
             {
-                Skip($"规则 {rule.Id} 检查器返回 null");
+                Skip(SkipCategories.CheckerError, rule.Id, $"规则 {rule.Id} 检查器返回 null");
                 continue;
             }
 
@@ -74,12 +100,16 @@ public sealed class RuleEngine
             run++;
         }
 
-        return new CheckSummary(issues, run, skipped, reasons.Distinct().ToList());
+        // 结构化跳过为唯一事实源；第 4 参传同内容投影（StructuredSkips 非 null 时
+        // CheckSummary.SkippedReasons 以投影属性重算，二者一致）。去重沿用旧 Distinct 语义。
+        var structured = skips.Distinct().ToList();
+        return new CheckSummary(issues, run, skipped,
+            structured.Select(s => $"{s.RuleId}: {s.Message}").ToList(), structured);
 
-        void Skip(string reason)
+        void Skip(string category, string ruleId, string message)
         {
             skipped++;
-            reasons.Add(reason);
+            skips.Add(new SkipReason(category, ruleId, message));
         }
     }
 }
