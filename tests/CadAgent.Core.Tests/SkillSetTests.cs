@@ -28,6 +28,7 @@ public class SkillSetTests
         var ex = Assert.Throws<InvalidSkillException>(() =>
             SkillSet.Compose(new[] { R("DUP") }, new[] { Pkg("院标A", "1.0.0", R("DUP")) }));
         Assert.Contains("DUP", ex.Message);
+        Assert.Contains("院标A", ex.Message);
     }
 
     [Fact]
