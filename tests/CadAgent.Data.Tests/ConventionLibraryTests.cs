@@ -63,4 +63,36 @@ public class ConventionLibraryTests : IDisposable
         Assert.Equal(Provenance.HumanConfirmed, a.Provenance);
         Assert.Equal(1.0, a.Confidence);
     }
+
+    [Fact]
+    public void LayerInference_SkipsEntityAlreadyHumanConfirmed()
+    {
+        var session = DrawingSession.Load(_path);
+        var overlay = new SemanticOverlay();
+        var wallEntity = session.Summarize().Entities.First(e => e.Layer == "WALL");
+        overlay.UpsertAnnotation(new SemanticAnnotation(wallEntity.Handle, SemanticClass.Column, Provenance.HumanConfirmed, 1.0, "人工改判柱"));
+        LayerInference.Annotate(session, overlay);
+        var a = overlay.Annotations.Single(x => x.TargetHandle == wallEntity.Handle);
+        Assert.Equal(SemanticClass.Column, a.Class); // 未被约定库 Wall 覆盖
+        Assert.Equal(Provenance.HumanConfirmed, a.Provenance);
+    }
+
+    [Fact]
+    public void LayerInference_MappingOverride_RemovesStaleInference_OnReAnnotate()
+    {
+        var session = DrawingSession.Load(_path);
+        var overlay = new SemanticOverlay();
+        // 第一轮：WALL 约定层→LayerInference Wall
+        LayerInference.Annotate(session, overlay);
+        var wallEntity = session.Summarize().Entities.First(e => e.Layer == "WALL");
+        Assert.Contains(overlay.Annotations, a => a.TargetHandle == wallEntity.Handle && a.Provenance == Provenance.LayerInference);
+        // 人工把 WALL 层改判为 Column
+        overlay.ConfirmMapping(new LayerMapping("WALL", SemanticClass.Column, "u", DateTimeOffset.UnixEpoch));
+        LayerInference.Annotate(session, overlay);
+        var forHandle = overlay.Annotations.Where(a => a.TargetHandle == wallEntity.Handle).ToList();
+        Assert.Single(forHandle);
+        Assert.Equal(SemanticClass.Column, forHandle[0].Class);
+        Assert.Equal(Provenance.HumanConfirmed, forHandle[0].Provenance);
+        Assert.Equal(1.0, forHandle[0].Confidence);
+    }
 }

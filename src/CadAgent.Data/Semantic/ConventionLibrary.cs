@@ -34,7 +34,8 @@ public static class ConventionLibrary
         ["家具"] = SemanticClass.Auxiliary,
     };
 
-    public static IReadOnlyDictionary<string, SemanticClass> KnownLayers => Layers;
+    public static IReadOnlyDictionary<string, SemanticClass> KnownLayers =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<string, SemanticClass>(Layers);
 
     public static SemanticClass ClassForLayer(string layerName) =>
         !string.IsNullOrEmpty(layerName) && Layers.TryGetValue(layerName, out var cls)
@@ -94,6 +95,9 @@ public static class LayerInference
                 string.Equals(m.LayerName, layer, StringComparison.OrdinalIgnoreCase));
             if (mapping is not null)
             {
+                // Mirror Task 1 ApplyMappingToAnnotations: a human mapping override
+                // clears any stale inference annotation for this handle first.
+                overlay.Annotations.RemoveAll(x => x.TargetHandle == handle);
                 overlay.UpsertAnnotation(new SemanticAnnotation(
                     handle, mapping.Class, Provenance.HumanConfirmed, 1.0, $"人工确认图层映射: {layer}"));
                 continue;
