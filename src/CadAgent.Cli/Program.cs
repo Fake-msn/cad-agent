@@ -1,2 +1,5 @@
-﻿// See https://aka.ms/new-console-template for more information
-Console.WriteLine("Hello, World!");
+﻿using System.Text;
+using CadAgent.Cli;
+
+Console.OutputEncoding = Encoding.UTF8;
+return CommandRouter.Run(args, Console.Out, Console.Error);

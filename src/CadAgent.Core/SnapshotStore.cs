@@ -40,5 +40,7 @@ public sealed class SnapshotStore
             throw new ArgumentException("事务 ID 不得为根路径", nameof(txId));
         if (txId.Contains('\\') || txId.Contains('/') || txId.Contains(".."))
             throw new ArgumentException("事务 ID 不得含路径分隔符或 ..", nameof(txId));
+        if (txId.Contains(':'))
+            throw new ArgumentException("事务 ID 不得含冒号（驱动器相对路径）", nameof(txId));
     }
 }

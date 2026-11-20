@@ -46,6 +46,7 @@ public class SnapshotStoreTests : IDisposable
     [InlineData("..")]
     [InlineData("..\\..\\x")]
     [InlineData("C:\\x")]
+    [InlineData("C:x")]
     [InlineData("a/b")]
     [InlineData("a\\b")]
     [InlineData("")]
