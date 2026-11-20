@@ -171,4 +171,20 @@ public class AdjudicationFingerprintTests
         }
         finally { File.Delete(path); }
     }
+
+    // 黄金向量（独立推导：Node crypto 对精确规范化 JSON 的 UTF8 字节做一次 SHA256，钉死字面量）：
+    // 单条固定裁定 RuleId=R1 / Operator=alice / Ts=UnixEpoch / Reason="golden vector" /
+    // ForceOverride=Mandatory / Exempt=false / Interpretation="按 5.0.2 条执行"。
+    // 规范化契约：固定字段序、Ts "O"、枚举 PascalCase、compact JSON、STJ 默认转义
+    // （'+'→\u002B、非 ASCII→\uXXXX 大写 hex）。canonical 精确串：
+    // [{"RuleId":"R1","Operator":"alice","Ts":"1970-01-01T00:00:00.0000000\u002B00:00","Reason":"golden vector","ForceOverride":"Mandatory","Exempt":false,"Interpretation":"\u6309 5.0.2 \u6761\u6267\u884C"}]
+    [Fact]
+    public void Fingerprint_SingleItem_GoldenVector_Pinned()
+    {
+        var set = new AdjudicationSet();
+        set.Upsert(new Adjudication("R1", "alice", DateTimeOffset.UnixEpoch, "golden vector",
+            RuleForce.Mandatory, false, "按 5.0.2 条执行"));
+        Assert.Equal("64B72BEF51D5215AE3EC6A80D8663033E7325C4B106BF0F809F7BC0DF7310ED4",
+            set.Fingerprint());
+    }
 }
