@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using ACadSharp;
 using ACadSharp.Entities;
 using ACadSharp.IO;
@@ -17,16 +19,34 @@ public sealed class DrawingSession : IDrawingSession
         Doc = doc;
     }
 
+    /// <summary>
+    /// Maps a source path to THE WORKING FILE the engine snapshots/restores.
+    /// A .dwg source gets a sidecar ".working.dxf"; the original .dwg is never written.
+    /// Any other extension is used unchanged.
+    /// </summary>
+    public static string WorkingPathFor(string sourcePath)
+    {
+        return Path.GetExtension(sourcePath).ToLowerInvariant() == ".dwg"
+            ? sourcePath + ".working.dxf"
+            : sourcePath;
+    }
+
     public static DrawingSession Load(string path)
     {
         string ext = Path.GetExtension(path).ToLowerInvariant();
         CadDocument doc = ext switch
         {
             ".dxf" => LoadDxf(path),
-            ".dwg" => DwgReader.Read(path),
+            ".dwg" => LoadDwg(path),
             _ => throw new NotSupportedException($"不支持的图纸格式: {ext}")
         };
-        return new DrawingSession(path, doc);
+        var session = new DrawingSession(WorkingPathFor(path), doc);
+        if (ext == ".dwg")
+        {
+            // Materialize the working DXF copy immediately so it exists for snapshotting.
+            session.SaveWorking();
+        }
+        return session;
     }
 
     private static CadDocument LoadDxf(string path)
@@ -35,11 +55,49 @@ public sealed class DrawingSession : IDrawingSession
         return reader.Read();
     }
 
+    private static CadDocument LoadDwg(string path)
+    {
+        using var reader = new DwgReader(path);
+        return reader.Read();
+    }
+
+    /// <summary>
+    /// SHA-256 over a canonical content projection of the in-memory document.
+    /// Excludes volatile header fields ($HANDSEED, Julian-date doubles) so the hash
+    /// is stable across no-change SaveWorking/Reload cycles and reflects real
+    /// content changes only. Doubles use round-trip "R" format, invariant culture.
+    /// </summary>
     public string ComputeHash()
     {
-        using var ms = new MemoryStream();
-        DxfWriter.Write(ms, Doc);
-        return Convert.ToHexString(SHA256.HashData(ms.ToArray()));
+        var sb = new StringBuilder();
+        foreach (var layer in Doc.Layers.OrderBy(l => l.Name, StringComparer.Ordinal))
+        {
+            sb.Append(FormattableString.Invariant($"L|{layer.Name}|{layer.Color}")).Append('\n');
+        }
+        foreach (var e in Doc.Entities.OrderBy(e => e.Handle))
+        {
+            sb.Append(FormattableString.Invariant($"E|{e.Handle}|{e.GetType().Name}|{e.Layer?.Name ?? "0"}|{e.Color}"));
+            switch (e)
+            {
+                case Line line:
+                    sb.Append(FormattableString.Invariant(
+                        $"|{line.StartPoint.X:R}|{line.StartPoint.Y:R}|{line.StartPoint.Z:R}|{line.EndPoint.X:R}|{line.EndPoint.Y:R}|{line.EndPoint.Z:R}"));
+                    break;
+                case TextEntity text: // covers MText (MText : TextEntity)
+                    sb.Append(FormattableString.Invariant(
+                        $"|{text.InsertPoint.X:R}|{text.InsertPoint.Y:R}|{text.InsertPoint.Z:R}|{text.Value}|{text.Height:R}"));
+                    break;
+                case UnknownEntity unknown:
+                    sb.Append(FormattableString.Invariant($"|{unknown.ObjectName}|{unknown.DxfClass?.CppClassName}"));
+                    break;
+                case ProxyEntity proxy:
+                    sb.Append(FormattableString.Invariant($"|{proxy.ObjectName}|{proxy.DxfClass?.CppClassName}"));
+                    break;
+                // Other entity types: base fields only (documented limitation; extend as handlers grow).
+            }
+            sb.Append('\n');
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
     }
 
     public void SaveWorking()

@@ -43,4 +43,34 @@ public class DrawingSessionTests : IDisposable
     {
         Assert.Throws<NotSupportedException>(() => DrawingSession.Load("foo.pdf"));
     }
+
+    [Fact]
+    public void ComputeHash_StableAcrossNoChangeSaveReload()
+    {
+        var session = DrawingSession.Load(_path);
+        string before = session.ComputeHash();
+        session.SaveWorking();
+        session.Reload();
+        Assert.Equal(before, session.ComputeHash());
+        session.SaveWorking();
+        session.Reload();
+        Assert.Equal(before, session.ComputeHash()); // twice: never converges was the bug
+    }
+
+    [Fact]
+    public void ComputeHash_ChangesWhenContentChanges()
+    {
+        var session = DrawingSession.Load(_path);
+        string before = session.ComputeHash();
+        session.Doc.Entities.Add(new Line { StartPoint = (XYZ)new XY(9, 9), EndPoint = (XYZ)new XY(10, 10) });
+        Assert.NotEqual(before, session.ComputeHash());
+    }
+
+    [Fact]
+    public void WorkingPathFor_Dwg_ReturnsSidecar_Dxf_ReturnsSame()
+    {
+        Assert.Equal(@"C:\x\a.dwg.working.dxf", DrawingSession.WorkingPathFor(@"C:\x\a.dwg"));
+        Assert.Equal(@"C:\x\a.DWG.working.dxf", DrawingSession.WorkingPathFor(@"C:\x\a.DWG"));
+        Assert.Equal(@"C:\x\a.dxf", DrawingSession.WorkingPathFor(@"C:\x\a.dxf"));
+    }
 }
