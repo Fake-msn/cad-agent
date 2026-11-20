@@ -173,19 +173,71 @@ public static class CommandRouter
         // 存在但损坏→审计拒绝、不执行（最终审查裁定：不得静默降级为 null 闸口）。
         string overlayPath = SemanticOverlayPath(agentDir);
         ISemanticGate? semanticGate = null;
+        SemanticOverlay? overlay = null;
         if (File.Exists(overlayPath))
         {
-            var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+            overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
             if (overlay is null) return 1;
             semanticGate = new SemanticGate(overlay);
         }
         var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
+        else RunRegressionCheck(drawing, overlay ?? new SemanticOverlay(), agentDir, session, audit, op, stderr);
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
         }, JsonOpts));
         return result.Ok ? 0 : 1;
+    }
+
+    /// <summary>
+    /// run 回归检查（2b-i T8 加性）：tx 成功后对运行后图纸评估内置规则——存在生效
+    /// mandatory 违规（含运行未修复的既有违规）→stderr 警告，**不自动回滚，决策权归人**；
+    /// 无论有无违规均审计 check-run（Source="run-regression"，只读检查前后哈希一致）。
+    /// 观察性检查不得改变 run 结果：裁定文件损坏→LoadOrReject 审计拒绝后跳过回归；
+    /// 其余异常→审计留痕（spec §9）+ stderr 提示，退出码仍由事务结果决定。
+    /// 跳过原因沿用 check 的 stderr 通道（跳过不静默）。
+    /// </summary>
+    private static void RunRegressionCheck(DrawingSession drawing, SemanticOverlay overlay,
+        string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
+    {
+        try
+        {
+            string adjPath = AdjudicationsPath(agentDir);
+            var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
+                session, audit, op, stderr, source: "run-regression");
+            if (adjudications is null) return; // 已审计拒绝；已提交事务不受影响
+            var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, overlay, adjudications);
+            int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
+            foreach (string reason in summary.SkippedReasons)
+                stderr.WriteLine($"跳过: {reason}");
+            string hash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "run-regression", "check-run", drawing.SourcePath,
+                JsonSerializer.Serialize(new
+                {
+                    rulesRun = summary.RulesRun,
+                    rulesSkipped = summary.RulesSkipped,
+                    issueCount = summary.Issues.Count,
+                    mandatoryViolations,
+                    skippedReasons = summary.SkippedReasons
+                }),
+                hash, hash, "", ""));
+            if (mandatoryViolations > 0)
+            {
+                string ruleIds = string.Join(", ", summary.Issues
+                    .Where(i => i.Force == RuleForce.Mandatory).Select(i => i.RuleId).Distinct());
+                stderr.WriteLine($"警告: 运行后图纸存在 {mandatoryViolations} 项强制(mandatory)规范违规（规则: {ruleIds}）。事务已提交，不自动回滚——决策权归人，请执行 check 复核并人工裁定或修正。");
+            }
+        }
+        catch (Exception ex)
+        {
+            // 回归检查自身故障也入审计（spec §9），但不影响已提交事务。
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "run-regression", "check-run", drawing.SourcePath,
+                JsonSerializer.Serialize(new { Error = ex.Message }), "", "", "", ""));
+            stderr.WriteLine($"回归检查未完成: {ex.Message}（事务已提交，不受影响）");
+        }
     }
 
     private static int Rollback(string txId, string drawingPath, string agentDir,

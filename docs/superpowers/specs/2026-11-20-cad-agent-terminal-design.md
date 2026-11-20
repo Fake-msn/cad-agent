@@ -335,6 +335,16 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **Upsert 守卫随 LLM caller 落地**：HumanConfirmed=1.0/证据必填等 Upsert 守卫当前无调用侧强制；计划3 LLM 推断路径接入时一并落地。
 - **map 空图层静默成功在 LLM 建议映射时升级为拒绝**：人工 CLI map 空图层暂容忍；计划3 LLM 建议映射路径必须拒绝不存在/无实体的图层（防幻影映射）。
 
+**计划2b-i完成（规范引擎与裁定，2026-11-20 记录；端到端闭环测试 scan→map→check→adjudicate 升级/豁免→run+回归警告→audit verify→裁定持久化复用 全绿，全套件 162 测试）**：
+
+- 已交付：规则模型+YAML 加载校验（Rule/RuleSource/CheckSpec）、裁定模型与原子持久化（AdjudicationSet，同 RuleId 最新裁定生效）、规则引擎（豁免优先→pending-original 跳过→检查器隔离→生效强制力覆写）、5 个检查器（字高系列/线宽组/轴号字母/标高格式/图层命名）、7 条 GB/T 50001-2017 内置规则（嵌入资源分发）、CLI check / rule adjudicate / rule list（审计先行+LoadOrReject 守卫）、run 回归检查（tx 成功后评估内置规则，mandatory 违规→stderr 警告+审计 check-run Source="run-regression"，**不自动回滚——决策权归人**；回归自身故障不影响已提交事务）。
+- **效力映射裁定**：GB/T 推荐性国标条文默认 recommended（必须/严禁→mandatory、应/不得→recommended/high、宜→recommended/medium；本批 7 条无 mandatory），默认零拦截；升级为 mandatory 的权力归院标 skill/人工裁定（rule adjudicate --force），豁免权同归人（--exempt，理由必填入审计）。check 退出码：0=无 mandatory 违规，2=有 mandatory 违规，recommended/informational 不影响退出码。
+- **7 条规则来源与核验状态**：R-50001-4.0.1/5.0.2/8.0.4/11.8.4/11.8.5/13.0.1/13.0.2，条文逐字摘录自 extraction-50001.md（控制者已 grep 核对原文行），verification 全为 source-text（条文级核验）；标准身份（GB/T 50001-2017 现行有效性）为 external-corroborated，待原件确认。pending-original 数值（视觉依赖表：表 4.0.1 线宽组明细之外的附录B推荐层名、专业代码白名单等）未入库，不假装已检。
+- **检测启发式边界（诚实降级，消息注明）**：轴号/标高检查依赖 overlay 语义标注（Axis/Annotation 类，人工 map 或推断），无标注不检；字高按 hanVector/other 两系列并集判定，字体归属细化留后续；出图比例换算（14.0.4）留计划3；11.8.4 allowSitePlan2 图类判定留后续（2 位小数降级 Low 提示人工确认总平面图）；13.0.2 专业代码白名单/附录B推荐名核验暂缓（视觉依赖表）。
+- **跳过原因 stderr 通道**：规则跳过（豁免/pending-original/无检查器/检查器异常）逐条写 stderr（"跳过: " 前缀）并以 skippedReasons 入审计 paramsJson，stdout JSON 契约不含跳过规则 Id（豁免展示移除契约）；结构化跳过报告留 2b-ii。
+- **电气/模型规则包+skill 机制=2b-ii**：本批仅建筑制图通则 7 条；电气/给排水/暖通等专业规则包与院标 skill 包机制（§6.3/§6.4）在 2b-ii 交付。
+- **MinerU API 录入=后续能力**：规范 PDF→结构化条文的 MinerU API 自动录入属后续能力；当前条文经人工摘录+控制者核对入库。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
