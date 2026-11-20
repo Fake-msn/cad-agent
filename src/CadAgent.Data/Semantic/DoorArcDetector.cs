@@ -9,8 +9,8 @@ namespace CadAgent.Data.Semantic;
 /// ACadSharp 3.8.35 Arc.StartAngle/EndAngle are in radians (verified against
 /// the package XML docs); sweep = (End - Start) normalized to [0,360), which
 /// handles arcs wrapping across 0° (e.g. 350°→80° yields 90°).
-/// Existing annotations with confidence &gt; 0.5 (GeometryInference 0.6/0.8,
-/// HumanConfirmed 1.0) are never overwritten.
+/// Existing annotations with confidence &gt; 0.5 (GeometryInference 0.6,
+/// LayerInference 0.8, HumanConfirmed 1.0) are never overwritten.
 /// </summary>
 public static class DoorArcDetector
 {

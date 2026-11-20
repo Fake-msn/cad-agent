@@ -42,4 +42,50 @@ public class SemanticScannerTests : IDisposable
         Assert.DoesNotContain("W-新墙", result.Ambiguous.Select(a => a.LayerName));
         Assert.Contains(result.Overlay.Annotations, a => a.Provenance == Provenance.HumanConfirmed);
     }
+
+    [Fact]
+    public void Scan_PrunesAnnotations_ForDeletedEntities_KeepsMappings()
+    {
+        var session = DrawingSession.Load(_path);
+        var first = SemanticScanner.Scan(session);
+        var wallLine = session.Doc.Entities.First(e => e.Layer?.Name == "WALL");
+        string deletedHandle = wallLine.Handle.ToString();
+        Assert.Contains(first.Overlay.Annotations, a => a.TargetHandle == deletedHandle);
+        // 图层级人工映射必须跨剪枝保留。
+        first.Overlay.ConfirmMapping(new LayerMapping("随便", SemanticClass.Auxiliary, "u", DateTimeOffset.UnixEpoch));
+
+        session.Doc.Entities.Remove(wallLine);
+        session.SaveWorking();
+        session.Reload();
+        var second = SemanticScanner.Scan(session, first.Overlay);
+
+        // 已删除实体的标注被剪枝；存活实体的标注保留（W-新墙 线的几何推断 Wall）。
+        Assert.DoesNotContain(second.Overlay.Annotations, a => a.TargetHandle == deletedHandle);
+        Assert.Contains(second.Overlay.Annotations, a => a.Class == SemanticClass.Wall);
+        Assert.Contains(second.Overlay.Mappings, m => m.LayerName == "随便");
+    }
+
+    [Fact]
+    public void Scan_PrunesPhantomHandle_GateNoLongerSatisfied()
+    {
+        // 无任何墙信号的图纸：幻影句柄的人工确认 Wall 不得满足操作级闸口。
+        string plain = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Layers.Add(new Layer("随便"));
+            doc.Entities.Add(new Line { StartPoint = (XYZ)new XY(0, 0), EndPoint = (XYZ)new XY(10, 10), Layer = doc.Layers.First(l => l.Name == "随便") });
+        });
+        try
+        {
+            var session = DrawingSession.Load(plain);
+            var overlay = new SemanticOverlay();
+            overlay.UpsertAnnotation(new SemanticAnnotation("ghost", SemanticClass.Wall, Provenance.HumanConfirmed, 1.0, "幻影实体"));
+            // 剪枝前：幻影标注确实能满足闸口（漏洞成立的前提）。
+            Assert.True(new CadAgent.Data.Semantic.SemanticGate(overlay).Check(new[] { SemanticClass.Wall }).Allowed);
+            var result = SemanticScanner.Scan(session, overlay);
+            Assert.DoesNotContain(result.Overlay.Annotations, a => a.TargetHandle == "ghost");
+            var gate = new CadAgent.Data.Semantic.SemanticGate(result.Overlay);
+            Assert.False(gate.Check(new[] { SemanticClass.Wall }).Allowed);
+        }
+        finally { File.Delete(plain); }
+    }
 }

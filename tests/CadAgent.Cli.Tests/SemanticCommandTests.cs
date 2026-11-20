@@ -73,4 +73,64 @@ public class SemanticCommandTests : IDisposable
         Assert.Equal(1, code);
         Assert.Contains("scan", stderr);
     }
+
+    private string OverlayPath => Path.Combine(_project, ".cadagent", "semantic.json");
+
+    private void WriteCorruptOverlay()
+    {
+        Directory.CreateDirectory(Path.Combine(_project, ".cadagent"));
+        File.WriteAllText(OverlayPath, "{ not valid json !!!");
+    }
+
+    private static string WriteCorruptDrawing(string project)
+    {
+        string corrupt = Path.Combine(project, "corrupt.dxf");
+        File.WriteAllBytes(corrupt, new byte[] { 0x00, 0x01, 0x02, 0xFF, 0xFE, 0x42, 0x42, 0x42, 0x0D, 0x0A });
+        return corrupt;
+    }
+
+    private CadAgent.Core.AuditRecord SingleIntakeRejected(string target)
+    {
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "intake-rejected");
+        Assert.Equal("semantic", rec.Entry.Source);
+        Assert.Equal(target, rec.Entry.Target);
+        Assert.Equal("", rec.Entry.BeforeHash);
+        Assert.Equal("", rec.Entry.AfterHash);
+        Assert.Contains("Error", rec.Entry.ParamsJson);
+        Assert.Contains("File", rec.Entry.ParamsJson);
+        Assert.True(audit.VerifyChain(out _));
+        return rec;
+    }
+
+    [Fact]
+    public void Scan_CorruptOverlay_AuditedRefusal()
+    {
+        WriteCorruptOverlay();
+        var (code, _, stderr) = Run("semantic", "scan", "--drawing", _drawing);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        SingleIntakeRejected(OverlayPath);
+    }
+
+    [Fact]
+    public void Map_CorruptOverlay_AuditedRefusal()
+    {
+        WriteCorruptOverlay();
+        var (code, _, stderr) = Run("semantic", "map", "--layer", "W-自定义", "--class", "Wall", "--drawing", _drawing);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        SingleIntakeRejected(OverlayPath);
+    }
+
+    [Fact]
+    public void Map_CorruptDrawing_AuditedRefusal()
+    {
+        Run("semantic", "scan", "--drawing", _drawing);
+        string corrupt = WriteCorruptDrawing(_project);
+        var (code, _, stderr) = Run("semantic", "map", "--layer", "W-自定义", "--class", "Wall", "--drawing", corrupt);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        SingleIntakeRejected(corrupt);
+    }
 }

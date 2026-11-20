@@ -319,7 +319,7 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 
 **计划2a完成（语义理解层，2026-11-20 记录；端到端闭环测试 scan→map→show→rescan→audit verify→run 全绿）**：
 
-- 已交付：语义叠加层（semantic.json，版本递增）、天正约定库+图层推断（LayerInference 0.8）、墙体平行线对/轴号圆+数字/门弧启发式（GeometryInference 0.6）、组合扫描器+不明确图层证据清单、CLI semantic scan/show/map（map 人工确认 HumanConfirmed 1.0，需 --drawing 取实体句柄）、操作级语义闸口（StepEngine 加性可选参数，计划1行为零改动）。
+- 已交付：语义叠加层（semantic.json，版本递增）、天正约定库+图层推断（LayerInference 0.8）、墙体平行线对/轴号圆+数字/门弧启发式（GeometryInference：墙对/轴号 0.6、门弧 0.5）、组合扫描器+不明确图层证据清单、CLI semantic scan/show/map（map 人工确认 HumanConfirmed 1.0，需 --drawing 取实体句柄）、操作级语义闸口（StepEngine 加性可选参数，计划1行为零改动）。
 - **操作级语义闸口已落地**：run 边界按操作语义需求检查叠加层；实体级区域覆盖检查（禁触区精确到实体/坐标范围）留计划3/4。
 - **LLM 推断留计划3**：Provenance.LlmInference 枚举已预留，当前无任何 LLM 推断路径。
 - **启发式 O(n²) 空间索引留后续**：墙对检测按角度分桶后两两比对，大图性能待空间索引优化。
@@ -327,6 +327,13 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **处理器语义需求声明随计划3布灯处理器引入**：当前处理器语义需求第一 slice 全空（机制先行，测试处理器验证闸口）。
 - **检测器守卫模式三处重复待共享 helper**：WallPair/Axis/DoorArc 各自实现"高置信度不降级"守卫，待提取共享。
 - **map 空图层静默成功待边界打磨**：对不存在/无实体的图层执行 map 当前静默成功（写入映射但无标注），错误提示留后续。
+
+**计划3设计承接（2a 最终 whole-branch 审查修复轮记录，2026-11-20）**：
+
+- **ISemanticGate 需上下文重载（实体级检查）**：当前 Check(required) 仅做叠加层存在性检查；计划3布灯处理器需实体级/区域级校验（禁触区精确到实体/坐标范围），接口须加带图纸上下文的重载。
+- **semantic.json 需独立 schema 版本**：现 Version 是写计数器（每次 Save +1），不是格式版本；计划3引入独立 schemaVersion 字段以支持格式演进/迁移。
+- **Upsert 守卫随 LLM caller 落地**：HumanConfirmed=1.0/证据必填等 Upsert 守卫当前无调用侧强制；计划3 LLM 推断路径接入时一并落地。
+- **map 空图层静默成功在 LLM 建议映射时升级为拒绝**：人工 CLI map 空图层暂容忍；计划3 LLM 建议映射路径必须拒绝不存在/无实体的图层（防幻影映射）。
 
 ## 附录：调查证据来源
 

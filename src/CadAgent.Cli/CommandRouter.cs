@@ -166,10 +166,15 @@ public static class CommandRouter
             stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
         }
         // 语义闸口接线：overlay 存在→加载注入；不存在→null（几何级流程不受影响，诚实降级）。
+        // 存在但损坏→审计拒绝、不执行（最终审查裁定：不得静默降级为 null 闸口）。
         string overlayPath = SemanticOverlayPath(agentDir);
-        ISemanticGate? semanticGate = File.Exists(overlayPath)
-            ? new SemanticGate(SemanticOverlay.Load(overlayPath))
-            : null;
+        ISemanticGate? semanticGate = null;
+        if (File.Exists(overlayPath))
+        {
+            var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+            if (overlay is null) return 1;
+            semanticGate = new SemanticGate(overlay);
+        }
         var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -231,6 +236,29 @@ public static class CommandRouter
         Path.Combine(agentDir, "semantic.json");
 
     /// <summary>
+    /// semantic 族加载守卫（spec §9 错误处理全部入审计；最终审查裁定）：
+    /// overlay/drawing Load 失败复用 intake-rejected 模式留痕（Source=semantic，
+    /// target=失败文件，哈希不可得→空串），stderr + 调用方 exit 1。
+    /// 返回 null 表示已审计拒绝。
+    /// </summary>
+    private static T? LoadOrReject<T>(Func<T> load, string file, string session,
+        SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr) where T : class
+    {
+        try
+        {
+            return load();
+        }
+        catch (Exception ex)
+        {
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "semantic", "intake-rejected", file,
+                JsonSerializer.Serialize(new { Error = ex.Message, File = file }), "", "", "", ""));
+            stderr.WriteLine(ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// semantic 命令族分发。子命令校验仅对本族落实（计划 1 遗留项的既定范围）：
     /// 缺失/未知子命令一律 stderr + exit 1，不落入 Usage 歧义。
     /// </summary>
@@ -281,7 +309,9 @@ public static class CommandRouter
             stderr.WriteLine(ex.Message);
             return 1;
         }
-        var result = SemanticScanner.Scan(drawing, SemanticOverlay.Load(overlayPath));
+        var existing = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+        if (existing is null) return 1;
+        var result = SemanticScanner.Scan(drawing, existing);
         result.Overlay.Save(overlayPath);
         // 扫描不改图纸：前后哈希一致（沿用 intake 的诚实留痕）。
         string hash = drawing.ComputeHash();
@@ -340,10 +370,13 @@ public static class CommandRouter
             stderr.WriteLine("未找到语义叠加层，请先执行 semantic scan");
             return 1;
         }
-        var overlay = SemanticOverlay.Load(overlayPath);
-        var drawing = DrawingSession.Load(drawingPath);
+        // 审计先行（最终审查裁定）：overlay/drawing Load 失败也必须留痕。
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
+        var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+        if (overlay is null) return 1;
+        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath, session, audit, op, stderr);
+        if (drawing is null) return 1;
 
         var handlesOnLayer = drawing.Doc.Entities
             .Where(e => string.Equals(e.Layer?.Name ?? "0", layer, StringComparison.OrdinalIgnoreCase))

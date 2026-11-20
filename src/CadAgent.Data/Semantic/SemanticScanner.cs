@@ -13,7 +13,9 @@ public sealed record ScanResult(SemanticOverlay Overlay, IReadOnlyList<Ambiguous
 /// Single entry point composing all deterministic reading signals:
 /// LayerInference (human mapping first) → WallPair → Axis → DoorArc, then the
 /// ambiguous-layer list. Passing an existing overlay preserves human mappings
-/// and prior annotations; detectors never downgrade higher-confidence entries.
+/// and prior annotations for living entities; detectors never downgrade
+/// higher-confidence entries. Annotations whose target handle no longer exists
+/// in the document are pruned (stale semantics must not satisfy the gate).
 /// </summary>
 public static class SemanticScanner
 {
@@ -25,6 +27,11 @@ public static class SemanticScanner
         WallPairDetector.Detect(session, overlay);
         AxisDetector.Detect(session, overlay);
         DoorArcDetector.Detect(session, overlay);
+
+        // 剪枝（最终审查裁定）：已删除实体（或换图后不存在）的标注必须移除，
+        // 否则操作级闸口的存在性检查会被幻影实体满足。图层级 Mappings 保留。
+        var liveHandles = new HashSet<string>(session.Doc.Entities.Select(e => e.Handle.ToString()));
+        overlay.Annotations.RemoveAll(a => !liveHandles.Contains(a.TargetHandle));
 
         return new ScanResult(overlay, CollectAmbiguousLayers(session, overlay));
     }

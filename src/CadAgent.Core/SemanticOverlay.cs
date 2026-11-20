@@ -22,9 +22,15 @@ public sealed class SemanticOverlay
 
     public void Save(string path)
     {
+        // 原子写（最终审查裁定：快照只覆盖图纸，semantic.json 须自保）：
+        // 先写同目录临时文件再 Move 覆盖——写入中途崩溃时磁盘旧文件完整，
+        // 人工确认不丢。失败时 tmp 可能残留（可接受）。Version++ 语义不变。
         Version++;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOpts));
+        string json = JsonSerializer.Serialize(this, JsonOpts);
+        string tmp = path + ".tmp";
+        File.WriteAllText(tmp, json);
+        File.Move(tmp, path, overwrite: true);
     }
 
     public void UpsertAnnotation(SemanticAnnotation a)
