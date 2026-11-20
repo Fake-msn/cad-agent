@@ -305,6 +305,18 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 中望授权：本机为试用版，正式开发/测试前确认期限或正式授权
 - 天正原生解析：跟踪 ACadSharp issue #1131 / PR #1337 进度，不赌时间表
 
+**计划1执行裁定遗留（后续计划必须承接，2026-11-20 基础内核完工时记录）**：
+
+- **审计链外部锚（计划3审计包设计约束）**：当前哈希链无外部锚——尾截断与全链重算伪造不可被 VerifyChain 检测；VerifyChain==true 仅意味着"未部分篡改"。计划3须 DB 外持久化头哈希/周期签名 checkpoints。
+- 审计边界残余：rollback 的 Load 失败（先于文件名匹配检查）与身份/roles.yaml 解析失败仍走通用 catch 无审计记录——计划2补全。
+- 损坏的已存在 .dwg 工作副本现在永久 Load 失败（持久状态裁定的有意后果）——再生/修复 UX 属计划2/3。
+- 哈希投影未含 MText 内容（MText : Entity，非 TextEntity）；投影外属性变更不入哈希——随处理器扩展补齐。
+- handle 契约：处理器仅接受数字 JSON，Summarize 暴露字符串——计划3 LLM 计划编写层统一。
+- 跨进程审计写入串行化（BEGIN IMMEDIATE 或项目级 mutex）——计划3；当前每实例锁+PK 显式冲突，无静默链分叉。
+- Yellow 闸口语义级拦截（禁触区/操作语义需求检查）——计划2；计划1仅 run 边界拒 Red + Yellow 警示。
+- CA1416 Windows 平台 API 构建警告——平台守卫或 TargetPlatform 标注，计划2顺带。
+- 真实 .dwg 夹具已验证可行（ACadSharp 3.8.35 DwgWriter→DwgReader 往返）——计划3保真库可直接用。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
