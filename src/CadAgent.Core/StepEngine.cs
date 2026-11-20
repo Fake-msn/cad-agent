@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace CadAgent.Core;
 
 public interface IDrawingSession
@@ -6,4 +8,120 @@ public interface IDrawingSession
     string ComputeHash();
     void SaveWorking();
     void Reload();
+}
+
+public sealed record StepSpec(string Kind, JsonElement Params);
+public sealed record StepPlan(string PlanId, IReadOnlyList<StepSpec> Steps);
+public sealed record StepResult(bool Ok, string Error, string TargetHandle);
+public sealed record TxResult(string TxId, bool Ok, int StepsDone, string Error);
+
+public sealed class InvalidPlanException : Exception
+{
+    public InvalidPlanException(string message) : base(message) { }
+}
+
+public static class StepPlanParser
+{
+    public static StepPlan Parse(string json)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch (JsonException ex) { throw new InvalidPlanException($"计划 JSON 非法: {ex.Message}"); }
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("planId", out var idEl) || idEl.ValueKind != JsonValueKind.String)
+                throw new InvalidPlanException("计划缺少 planId");
+            if (!root.TryGetProperty("steps", out var stepsEl) || stepsEl.ValueKind != JsonValueKind.Array)
+                throw new InvalidPlanException("计划缺少 steps 数组");
+            var steps = new List<StepSpec>();
+            foreach (var s in stepsEl.EnumerateArray())
+            {
+                if (!s.TryGetProperty("kind", out var kindEl) || kindEl.ValueKind != JsonValueKind.String)
+                    throw new InvalidPlanException("步骤缺少 kind");
+                var paramsEl = s.TryGetProperty("params", out var p) ? p.Clone() : JsonDocument.Parse("{}").RootElement;
+                steps.Add(new StepSpec(kindEl.GetString()!, paramsEl));
+            }
+            return new StepPlan(idEl.GetString()!, steps);
+        }
+    }
+}
+
+public interface IStepHandler
+{
+    string Kind { get; }
+    StepResult Apply(IDrawingSession session, JsonElement parameters);
+}
+
+public sealed class StepEngine
+{
+    private readonly IAuditStore _audit;
+    private readonly SnapshotStore _snapshots;
+    private readonly IIdentityProvider _identity;
+    private readonly RoleChecker _roles;
+    private readonly Dictionary<string, IStepHandler> _handlers;
+
+    public StepEngine(IAuditStore audit, SnapshotStore snapshots, IIdentityProvider identity,
+        RoleChecker roles, IEnumerable<IStepHandler> handlers)
+    {
+        _audit = audit;
+        _snapshots = snapshots;
+        _identity = identity;
+        _roles = roles;
+        _handlers = handlers.ToDictionary(h => h.Kind);
+    }
+
+    public TxResult Run(StepPlan plan, IDrawingSession session, string sessionId)
+    {
+        var op = _identity.Current;
+        _roles.Ensure(op, Role.Draw);
+        string txId = Guid.NewGuid().ToString("N");
+        string snapshot = _snapshots.Take(session.SourcePath, txId);
+        string beforeHash = session.ComputeHash();
+        Append(op, sessionId, "tx-start", session.SourcePath, plan.PlanId, beforeHash, beforeHash, snapshot, plan.PlanId);
+
+        int done = 0;
+        foreach (var step in plan.Steps)
+        {
+            if (!_handlers.TryGetValue(step.Kind, out var handler))
+            {
+                string err = $"未注册的步骤类型: {step.Kind}";
+                Append(op, sessionId, "step-failed", step.Kind, err, beforeHash, session.ComputeHash(), snapshot, plan.PlanId);
+                return new TxResult(txId, false, done, err);
+            }
+            StepResult result;
+            try { result = handler.Apply(session, step.Params); }
+            catch (Exception ex) { result = new StepResult(false, ex.Message, ""); }
+
+            string afterHash = session.ComputeHash();
+            if (!result.Ok)
+            {
+                Append(op, sessionId, "step-failed", result.TargetHandle,
+                    JsonSerializer.Serialize(new { step.Kind, result.Error }), beforeHash, afterHash, snapshot, plan.PlanId);
+                return new TxResult(txId, false, done, result.Error);
+            }
+            Append(op, sessionId, "step", result.TargetHandle,
+                JsonSerializer.Serialize(new { step.Kind, Params = step.Params }), beforeHash, afterHash, snapshot, plan.PlanId);
+            beforeHash = afterHash;
+            done++;
+        }
+        session.SaveWorking();
+        Append(op, sessionId, "tx-commit", session.SourcePath, plan.PlanId, beforeHash, session.ComputeHash(), snapshot, plan.PlanId);
+        return new TxResult(txId, true, done, "");
+    }
+
+    public void Rollback(string txId, IDrawingSession session, string sessionId)
+    {
+        var op = _identity.Current;
+        _roles.Ensure(op, Role.Draw);
+        string before = session.ComputeHash();
+        _snapshots.Restore(txId, session.SourcePath);
+        session.Reload();
+        Append(op, sessionId, "rollback", session.SourcePath, txId, before, session.ComputeHash(), txId, "");
+    }
+
+    private void Append(OperatorIdentity op, string session, string kind, string target,
+        string paramsJson, string before, string after, string snapshot, string plan) =>
+        _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            session, "plan", kind, target, paramsJson, before, after, snapshot, plan));
 }
