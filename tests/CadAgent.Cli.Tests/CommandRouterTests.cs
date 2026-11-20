@@ -95,6 +95,73 @@ public class CommandRouterTests : IDisposable
     }
 
     [Fact]
+    public void Intake_CorruptFile_ExitOne_IntakeRejectedAudited_ChainValid()
+    {
+        // Spec §9: error handling must all enter the audit. Load throws before any
+        // inspection; the rejection must still be recorded.
+        string corrupt = Path.Combine(_project, "corrupt.dxf");
+        File.WriteAllBytes(corrupt, new byte[] { 0x00, 0x01, 0x02, 0xFF, 0xFE, 0x42, 0x42, 0x42, 0x0D, 0x0A });
+        var (code, _, stderr) = Run("intake", corrupt);
+        Assert.Equal(1, code);
+        Assert.NotEqual("", stderr);
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll());
+        Assert.Equal("intake-rejected", rec.Entry.Kind);
+        Assert.Equal(corrupt, rec.Entry.Target);
+        Assert.Equal("", rec.Entry.BeforeHash);
+        Assert.Equal("", rec.Entry.AfterHash);
+        Assert.Contains("Error", rec.Entry.ParamsJson);
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Run_CorruptDrawing_ExitOne_RunRejectedAudited_EmptyHashes()
+    {
+        string planPath = Path.Combine(_project, "plan.json");
+        File.WriteAllText(planPath, """
+            {"planId":"p1","steps":[{"kind":"add-line","params":{"x1":0,"y1":0,"x2":5,"y2":5}}]}
+            """);
+        string corrupt = Path.Combine(_project, "corrupt.dxf");
+        File.WriteAllBytes(corrupt, new byte[] { 0x00, 0x01, 0x02, 0xFF, 0xFE, 0x42, 0x42, 0x42, 0x0D, 0x0A });
+        var (code, _, stderr) = Run("run", planPath, "--drawing", corrupt);
+        Assert.Equal(1, code);
+        Assert.NotEqual("", stderr);
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll());
+        Assert.Equal("run-rejected", rec.Entry.Kind);
+        Assert.Equal(corrupt, rec.Entry.Target);
+        Assert.Equal("", rec.Entry.BeforeHash);
+        Assert.Equal("", rec.Entry.AfterHash);
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Rollback_Mismatch_RecordsRollbackRejected_ChainValid()
+    {
+        // Same A-tx→B pattern as the target-unchanged test; the rejection itself
+        // must leave an audit trace (rollback-rejected), not just stderr.
+        string drawingB = Path.Combine(_project, "drawingB.dxf");
+        File.Move(DxfFixture.CreateTempDxf(DxfFixture.AddSampleLine), drawingB);
+        string planPath = Path.Combine(_project, "planA.json");
+        File.WriteAllText(planPath, """
+            {"planId":"p1","steps":[{"kind":"add-line","params":{"x1":0,"y1":0,"x2":5,"y2":5}}]}
+            """);
+        var (runCode, runOut, _) = Run("run", planPath, "--drawing", _drawing);
+        Assert.Equal(0, runCode);
+        string txId = System.Text.Json.JsonDocument.Parse(runOut).RootElement.GetProperty("txId").GetString()!;
+        var (code, _, stderr) = Run("rollback", txId, "--drawing", drawingB);
+        Assert.Equal(1, code);
+        Assert.NotEqual("", stderr);
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rej = audit.ReadAll().Single(r => r.Entry.Kind == "rollback-rejected");
+        Assert.Equal(txId, rej.Entry.Target);
+        Assert.Contains("Expected", rej.Entry.ParamsJson);
+        Assert.Contains("Actual", rej.Entry.ParamsJson);
+        Assert.Contains("drawingB.dxf", rej.Entry.ParamsJson);
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
     public void AuditVerify_TamperedDb_ExitOne()
     {
         Run("intake", _drawing);

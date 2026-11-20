@@ -73,4 +73,65 @@ public class DrawingSessionTests : IDisposable
         Assert.Equal(@"C:\x\a.DWG.working.dxf", DrawingSession.WorkingPathFor(@"C:\x\a.DWG"));
         Assert.Equal(@"C:\x\a.dxf", DrawingSession.WorkingPathFor(@"C:\x\a.dxf"));
     }
+
+    [Fact]
+    public void ShouldLoadWorkingCopy_ExistsTrue_AbsentFalse()
+    {
+        Assert.True(DrawingSession.ShouldLoadWorkingCopy(_path));
+        Assert.False(DrawingSession.ShouldLoadWorkingCopy(_path + ".missing"));
+    }
+
+    [Fact]
+    public void Load_Dwg_WorkingCopyExists_LoadsIt_CommittedEditsSurviveSecondInvocation()
+    {
+        // Critical fix: CLI commands are separate processes. After run commits to
+        // <source>.dwg.working.dxf, the next Load(a.dwg) must load THAT working copy,
+        // not re-derive it from the pristine .dwg (which would wipe committed edits).
+        string dwg = DxfFixture.CreateTempDwg(DxfFixture.AddSampleLine);
+        string working = DrawingSession.WorkingPathFor(dwg);
+        try
+        {
+            byte[] originalBytes = File.ReadAllBytes(dwg);
+
+            // Invocation 1: materialize working copy from the .dwg, then "commit" an edit.
+            var first = DrawingSession.Load(dwg);
+            Assert.Single(first.Summarize().Entities);
+            Assert.True(File.Exists(working));
+            first.Doc.Entities.Add(new Line { StartPoint = new XYZ(1, 2, 0), EndPoint = new XYZ(3, 4, 0) });
+            first.SaveWorking();
+
+            // Invocation 2: fresh Load of the same .dwg must see the committed edit.
+            var second = DrawingSession.Load(dwg);
+            Assert.Equal(2, second.Summarize().Entities.Count);
+            Assert.Equal(working, second.SourcePath);
+
+            // The read-only original .dwg is never written.
+            Assert.Equal(originalBytes, File.ReadAllBytes(dwg));
+        }
+        finally
+        {
+            File.Delete(dwg);
+            if (File.Exists(working)) File.Delete(working);
+        }
+    }
+
+    [Fact]
+    public void Load_Dwg_WorkingCopyAbsent_MaterializesFromSource()
+    {
+        string dwg = DxfFixture.CreateTempDwg(DxfFixture.AddSampleLine);
+        string working = DrawingSession.WorkingPathFor(dwg);
+        try
+        {
+            Assert.False(File.Exists(working));
+            var session = DrawingSession.Load(dwg);
+            Assert.True(File.Exists(working));
+            Assert.Single(session.Summarize().Entities);
+            Assert.Equal(working, session.SourcePath);
+        }
+        finally
+        {
+            File.Delete(dwg);
+            if (File.Exists(working)) File.Delete(working);
+        }
+    }
 }

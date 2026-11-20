@@ -31,11 +31,12 @@ public sealed class MoveEntityHandler : IStepHandler
         switch (entity)
         {
             case Line line:
-                line.StartPoint = (XYZ)new XY(line.StartPoint.X + dx, line.StartPoint.Y + dy);
-                line.EndPoint = (XYZ)new XY(line.EndPoint.X + dx, line.EndPoint.Y + dy);
+                // Preserve Z elevation: real drawings carry elevations; XY cast would flatten them.
+                line.StartPoint = new XYZ(line.StartPoint.X + dx, line.StartPoint.Y + dy, line.StartPoint.Z);
+                line.EndPoint = new XYZ(line.EndPoint.X + dx, line.EndPoint.Y + dy, line.EndPoint.Z);
                 break;
             case TextEntity text:
-                text.InsertPoint = (XYZ)new XY(text.InsertPoint.X + dx, text.InsertPoint.Y + dy);
+                text.InsertPoint = new XYZ(text.InsertPoint.X + dx, text.InsertPoint.Y + dy, text.InsertPoint.Z);
                 break;
             default:
                 return new StepResult(false, $"move 暂不支持实体类型 {entity.GetType().Name}", "");

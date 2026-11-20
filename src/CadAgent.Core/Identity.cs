@@ -20,8 +20,8 @@ public sealed class WindowsIdentityProvider : IIdentityProvider
     {
         get
         {
-            string account = WindowsIdentity.GetCurrent().Name;
-            return new OperatorIdentity(account, _config.RoleFor(account));
+            using var id = WindowsIdentity.GetCurrent();
+            return new OperatorIdentity(id.Name, _config.RoleFor(id.Name));
         }
     }
 }

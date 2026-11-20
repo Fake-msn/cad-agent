@@ -23,7 +23,7 @@ public static class CommandRouter
 
             switch (positional[0])
             {
-                case "intake": return Intake(positional[1], agentDir, session, stdout);
+                case "intake": return Intake(positional[1], agentDir, session, stdout, stderr);
                 case "run": return RunPlan(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rollback": return Rollback(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "audit": return AuditVerify(agentDir, stdout, stderr);
@@ -37,6 +37,13 @@ public static class CommandRouter
             return 1;
         }
     }
+
+    /// <summary>
+    /// Gate-at-run policy (spec hard-req 6): Red drawings are information-incomplete
+    /// and must not be operated on. Yellow proceeds with a warning (semantic-level
+    /// interception is Plan 2 policy).
+    /// </summary>
+    internal static bool GateRefusesRun(GateReport report) => report.Level == GateLevel.Red;
 
     private static string[] StripOptionValues(string[] args)
     {
@@ -64,13 +71,28 @@ public static class CommandRouter
     private static IIdentityProvider Identity(string agentDir) =>
         new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml")));
 
-    private static int Intake(string file, string agentDir, string session, TextWriter stdout)
+    private static int Intake(string file, string agentDir, string session, TextWriter stdout, TextWriter stderr)
     {
-        var drawing = DrawingSession.Load(file);
-        var summary = drawing.Summarize();
-        var report = GateDetector.Inspect(summary, new EmptySupportMatrix());
+        // 审计先行（spec §9 错误处理全部入审计）：Load/Inspect 失败也必须留痕。
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
+        DrawingSession drawing;
+        DrawingSummary summary;
+        GateReport report;
+        try
+        {
+            drawing = DrawingSession.Load(file);
+            summary = drawing.Summarize();
+            report = GateDetector.Inspect(summary, new EmptySupportMatrix());
+        }
+        catch (Exception ex)
+        {
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "intake", "intake-rejected", file,
+                JsonSerializer.Serialize(new { Error = ex.Message }), "", "", "", ""));
+            stderr.WriteLine(ex.Message);
+            return 1;
+        }
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "intake", "intake", file,
             JsonSerializer.Serialize(new { summary.Version, Entities = summary.Entities.Count, Unknowns = summary.Unknowns.Count }),
@@ -93,8 +115,41 @@ public static class CommandRouter
         string session, TextWriter stdout, TextWriter stderr)
     {
         var plan = StepPlanParser.Parse(File.ReadAllText(planPath));
-        var drawing = DrawingSession.Load(drawingPath);
         using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        DrawingSession drawing;
+        GateReport report;
+        try
+        {
+            drawing = DrawingSession.Load(drawingPath);
+            report = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
+        }
+        catch (Exception ex)
+        {
+            // 读图失败同样拒绝执行并留痕（哈希不可得→空串）。
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "run", "run-rejected", drawingPath,
+                JsonSerializer.Serialize(new { level = "LoadFailed", unsupportedCount = 0, error = ex.Message }),
+                "", "", "", ""));
+            stderr.WriteLine(ex.Message);
+            return 1;
+        }
+        if (GateRefusesRun(report))
+        {
+            // spec 硬要求6：信息不完整（Red）图纸禁止操作——不执行任何步骤。
+            string hash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "run", "run-rejected", drawingPath,
+                JsonSerializer.Serialize(new { level = report.Level.ToString(), unsupportedCount = report.Unsupported.Count }),
+                hash, hash, "", ""));
+            stderr.WriteLine(report.Guidance);
+            return 1;
+        }
+        if (report.Level == GateLevel.Yellow)
+        {
+            // Yellow 放行+警示（语义级拦截属计划2的既定策略）。
+            stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
+        }
         var result = Engine(agentDir, audit).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -113,6 +168,17 @@ public static class CommandRouter
         if (!string.Equals(Path.GetFileName(snapshotFile), Path.GetFileName(drawing.SourcePath),
                 StringComparison.OrdinalIgnoreCase))
         {
+            // 拒绝也必须入审计（spec §9）：谁、撤哪个事务、期望/实际图纸各是什么。
+            using var rejectedAudit = OpenAudit(agentDir);
+            var op = Identity(agentDir).Current;
+            rejectedAudit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "rollback", "rollback-rejected", txId,
+                JsonSerializer.Serialize(new
+                {
+                    Expected = Path.GetFileName(drawing.SourcePath),
+                    Actual = Path.GetFileName(snapshotFile)
+                }),
+                "", "", txId, ""));
             stderr.WriteLine($"事务 {txId} 的快照不属于图纸 {drawing.SourcePath}，已拒绝撤回");
             return 1;
         }

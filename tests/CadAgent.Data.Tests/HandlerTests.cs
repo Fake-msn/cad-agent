@@ -69,6 +69,49 @@ public class HandlerTests : IDisposable
     }
 
     [Fact]
+    public void MoveEntity_PreservesLineZ()
+    {
+        // Real drawings carry elevations; move must not flatten Z to 0.
+        var line = (ACadSharp.Entities.Line)_session.Doc.Entities.First();
+        line.StartPoint = new CSMath.XYZ(0, 0, 5);
+        line.EndPoint = new CSMath.XYZ(100, 100, 5);
+        var r = new MoveEntityHandler().Apply(_session, P($"{{\"handle\":{FirstHandle},\"dx\":10,\"dy\":20}}"));
+        Assert.True(r.Ok);
+        Assert.Equal(10, line.StartPoint.X, 3);
+        Assert.Equal(20, line.StartPoint.Y, 3);
+        Assert.Equal(5, line.StartPoint.Z, 3);
+        Assert.Equal(5, line.EndPoint.Z, 3);
+    }
+
+    [Fact]
+    public void MoveEntity_PreservesTextZ()
+    {
+        var add = new AddTextHandler().Apply(_session, P("""{"x":1,"y":2,"text":"标高","height":3.5}"""));
+        Assert.True(add.Ok);
+        var text = (ACadSharp.Entities.TextEntity)_session.Doc.Entities.First(e => e is ACadSharp.Entities.TextEntity);
+        text.InsertPoint = new CSMath.XYZ(1, 2, 5);
+        var r = new MoveEntityHandler().Apply(_session, P($"{{\"handle\":{text.Handle},\"dx\":3,\"dy\":4}}"));
+        Assert.True(r.Ok);
+        Assert.Equal(4, text.InsertPoint.X, 3);
+        Assert.Equal(6, text.InsertPoint.Y, 3);
+        Assert.Equal(5, text.InsertPoint.Z, 3);
+    }
+
+    [Fact]
+    public void ChangeLayer_NameMatchIsCaseInsensitive_NoDuplicateLayer()
+    {
+        // CAD layer names are case-insensitive: "e-lite" must resolve to existing "E-LITE".
+        var r1 = new ChangeLayerHandler().Apply(_session, P($"{{\"handle\":{FirstHandle},\"layer\":\"E-LITE\"}}"));
+        Assert.True(r1.Ok);
+        var add = new AddLineHandler().Apply(_session, P("""{"x1":0,"y1":0,"x2":1,"y2":1}"""));
+        Assert.True(add.Ok);
+        var r2 = new ChangeLayerHandler().Apply(_session, P($"{{\"handle\":{add.TargetHandle},\"layer\":\"e-lite\"}}"));
+        Assert.True(r2.Ok);
+        Assert.Equal(1, _session.Doc.Layers.Count(l => string.Equals(l.Name, "e-lite", StringComparison.OrdinalIgnoreCase)));
+        Assert.Equal("E-LITE", _session.Summarize().Entities.First(e => e.Handle == add.TargetHandle).Layer);
+    }
+
+    [Fact]
     public void Registry_ContainsAllFiveKinds()
     {
         var kinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet();

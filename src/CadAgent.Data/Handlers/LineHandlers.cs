@@ -18,7 +18,9 @@ internal static class HandlerHelpers
     public static Layer ResolveLayer(DrawingSession s, string? name)
     {
         if (string.IsNullOrEmpty(name)) return s.Doc.Layers.First(l => l.Name == "0");
-        var existing = s.Doc.Layers.FirstOrDefault(l => l.Name == name);
+        // CAD layer names are case-insensitive: match existing layers regardless of case
+        // so "e-lite" never creates a duplicate of "E-LITE".
+        var existing = s.Doc.Layers.FirstOrDefault(l => StringComparer.OrdinalIgnoreCase.Equals(l.Name, name));
         if (existing != null) return existing;
         var layer = new Layer(name);
         s.Doc.Layers.Add(layer);

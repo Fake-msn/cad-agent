@@ -5,6 +5,10 @@
     <ProjectReference Include="..\CadAgent.Data\CadAgent.Data.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CadAgent.Cli.Tests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
