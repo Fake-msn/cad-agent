@@ -518,9 +518,12 @@ public static class CommandRouter
     /// 项目 overlay.Mappings 须含该层（OrdinalIgnoreCase，与 ConfirmMapping 同口径），
     /// 无映射→stderr + exit 1（用法错误不审计——map"未找到叠加层"先例）；
     /// overlay 损坏→LoadOrReject 审计拒绝；skill 目录非法→LoadOrReject 审计拒绝。
-    /// 写入顺序（brief）：aliases.yaml upsert（YamlDotNet 序列化，保持
-    /// {aliases:[{layerName,class}]} 结构；同层名替换 class，否则追加）→
-    /// manifest version patch+1（正则仅命中 version 行末位数字组，保留引号/缩进）→
+    /// 校验先于任何写入（validation-before-side-effects）：先读 manifest 文本、匹配
+    /// 列 0 version 行并计算 newVersion；无 version 行（如 flow-style manifest，loader
+    /// 可加载）→InvalidSkillException→Run 兜底 stderr + exit 1，零变更（aliases/manifest
+    /// 不动、不审计）。随后写入顺序（brief）：aliases.yaml upsert（YamlDotNet 序列化，
+    /// 保持 {aliases:[{layerName,class}]} 结构；同层名替换 class，否则追加）→
+    /// manifest version patch+1（正则仅命中列 0 version 行末位数字组，保留引号）→
     /// 审计 semantic-promoted（Source="semantic"，paramsJson={layer,class,skill,newVersion}；
     /// promote 不改图纸，哈希不可得→空串，adjudicate 先例）→exit 0。
     /// 两文件原子写（tmp+Move，SemanticOverlay.Save 先例）；写入后审计，SemanticMap 先例。
@@ -545,7 +548,24 @@ public static class CommandRouter
         var package = LoadOrReject(() => SkillLoader.LoadDirectory(skillDir), skillDir, session, audit, op, stderr);
         if (package is null) return 1;
 
+        // 校验先于任何 AtomicWriteAllText：先读 manifest、匹配列 0 version 行、算出
+        // newVersion/bumped 文本。flow-style 等无 version 行的 manifest（loader 可加载）
+        // 在此抛 InvalidSkillException→stderr + exit 1，aliases/manifest/审计零变更。
+        string manifestPath = Path.Combine(skillDir, "skill.yaml");
+        string manifestText = File.ReadAllText(manifestPath);
+        var match = ManifestVersionLine.Match(manifestText);
+        if (!match.Success)
+            throw new InvalidSkillException("skill.yaml: version line not found, cannot patch bump");
+        string newVersion = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{match.Groups["major"].Value}.{match.Groups["minor"].Value}.{int.Parse(match.Groups["patch"].Value, System.Globalization.CultureInfo.InvariantCulture) + 1}");
+        // 正则仅替换列 0 version 行末位数字组（MatchEvaluator 避免替换串 $ 歧义），
+        // 其余字节原样保留；loader 已校验 digits.digits.digits。
+        string bumped = ManifestVersionLine.Replace(manifestText,
+            m => $"{m.Groups["prefix"].Value}{newVersion}{m.Groups["suffix"].Value}", 1);
+
         // aliases upsert：同层名（OrdinalIgnoreCase）替换 class，否则追加（保持原有序）。
+        // 注意：upsert 经 YamlDotNet 重新序列化整个文件——原文件的注释与额外未知键会被
+        // 丢弃（计划规定的 YamlDotNet 行为，非增量文本编辑）。
         var aliases = package.Aliases.ToList();
         int i = aliases.FindIndex(a => string.Equals(a.LayerName, layer, StringComparison.OrdinalIgnoreCase));
         var upserted = new SkillAlias(layer, mapping.Class);
@@ -555,18 +575,6 @@ public static class CommandRouter
             aliases = aliases.Select(a => new { layerName = a.LayerName, @class = a.Class.ToString() }).ToList()
         });
         AtomicWriteAllText(Path.Combine(skillDir, "aliases.yaml"), aliasesYaml);
-
-        // manifest patch+1：loader 已校验 digits.digits.digits；正则仅替换 version 行
-        // 末位数字组（MatchEvaluator 避免替换串 $ 歧义），其余字节原样保留。
-        string manifestPath = Path.Combine(skillDir, "skill.yaml");
-        string manifestText = File.ReadAllText(manifestPath);
-        var match = ManifestVersionLine.Match(manifestText);
-        if (!match.Success)
-            throw new InvalidSkillException("skill.yaml: version line not found, cannot patch bump");
-        string newVersion = string.Create(System.Globalization.CultureInfo.InvariantCulture,
-            $"{match.Groups["major"].Value}.{match.Groups["minor"].Value}.{int.Parse(match.Groups["patch"].Value, System.Globalization.CultureInfo.InvariantCulture) + 1}");
-        string bumped = ManifestVersionLine.Replace(manifestText,
-            m => $"{m.Groups["prefix"].Value}{newVersion}{m.Groups["suffix"].Value}", 1);
         AtomicWriteAllText(manifestPath, bumped);
 
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
@@ -911,9 +919,10 @@ public static class CommandRouter
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .Build();
 
-    /// <summary>promote manifest patch bump：仅命中 version 行（块式 YAML，引号可选），末位数字组即 patch。</summary>
+    /// <summary>promote manifest patch bump：仅命中列 0 顶层 version 行（块式 YAML，引号可选；
+    /// 锚定列 0 使缩进的嵌套 version 文本——如块标量内容——不被误命中），末位数字组即 patch。</summary>
     private static readonly Regex ManifestVersionLine = new(
-        @"(?m)^(?<prefix>[ \t]*version:[ \t]*[""']?)(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?<suffix>[""']?)",
+        @"(?m)^(?<prefix>version:[ \t]*[""']?)(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?<suffix>[""']?)",
         RegexOptions.Compiled);
 
     /// <summary>原子写文本（tmp+Move 覆盖，SemanticOverlay.Save 先例）；保证末尾换行。</summary>

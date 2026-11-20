@@ -152,6 +152,51 @@ public class SkillCommandTests : IDisposable
     }
 
     [Fact]
+    public void Promote_FlowStyleManifest_ExitOne_ZeroMutation()
+    {
+        // 回归（评审 Important）：flow-style manifest loader 可加载，但无列 0 version 行。
+        // promote 必须在任何写入之前校验 version 行→exit 1，aliases/manifest 字节不变、
+        // 无 semantic-promoted 审计（validation-before-side-effects）。
+        Run("semantic", "scan", "--drawing", _drawing);
+        Run("semantic", "map", "--layer", "W-自定义", "--class", "Column", "--drawing", _drawing);
+        File.WriteAllText(Path.Combine(_skillDir, "skill.yaml"),
+            "{name: 测试院标, version: \"1.0.0\", discipline: architecture, drawingType: any, description: 测试}\n");
+        byte[] aliasesBefore = File.ReadAllBytes(Path.Combine(_skillDir, "aliases.yaml"));
+        byte[] manifestBefore = File.ReadAllBytes(Path.Combine(_skillDir, "skill.yaml"));
+        var (code, _, stderr) = Run("semantic", "promote", "--layer", "W-自定义", "--skill", _skillDir);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        Assert.Equal(aliasesBefore, File.ReadAllBytes(Path.Combine(_skillDir, "aliases.yaml")));
+        Assert.Equal(manifestBefore, File.ReadAllBytes(Path.Combine(_skillDir, "skill.yaml")));
+        using var audit = new CadAgent.Core.SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "semantic-promoted");
+    }
+
+    [Fact]
+    public void Promote_NestedVersionLine_TopLevelBumpedOnly()
+    {
+        // 回归（评审 minor #2）：version 正则锚定列 0——缩进的嵌套 version 行不得被命中。
+        // loader 拒绝未知键（metadata 等），故用 description 块标量内的缩进 version 行构造。
+        Run("semantic", "scan", "--drawing", _drawing);
+        Run("semantic", "map", "--layer", "W-自定义", "--class", "Column", "--drawing", _drawing);
+        File.WriteAllText(Path.Combine(_skillDir, "skill.yaml"), """
+            name: 测试院标
+            description: |
+              测试
+              version: "9.9.9"
+            version: "1.0.0"
+            discipline: architecture
+            drawingType: any
+            """);
+        var (code, _, _) = Run("semantic", "promote", "--layer", "W-自定义", "--skill", _skillDir);
+        Assert.Equal(0, code);
+        string[] lines = File.ReadAllText(Path.Combine(_skillDir, "skill.yaml")).Split('\n');
+        Assert.Contains("version: \"1.0.1\"", lines); // 顶层 patch bump（列 0 整行匹配）
+        Assert.Contains("  version: \"9.9.9\"", lines); // 嵌套行原样保留
+        Assert.DoesNotContain("9.9.10", string.Join("\n", lines));
+    }
+
+    [Fact]
     public void SkillList_ProjectSkills_ShowsPackage()
     {
         string skillsRoot = Path.Combine(_project, ".cadagent", "skills", "测试院标");
