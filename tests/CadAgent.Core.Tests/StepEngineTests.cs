@@ -49,19 +49,40 @@ public class StepEngineTests : IDisposable
         public StepResult Apply(IDrawingSession s, JsonElement p) => new(false, "模拟失败", "");
     }
 
+    private sealed class ThrowingHandler : IStepHandler
+    {
+        public string Kind => "throw-op";
+        public StepResult Apply(IDrawingSession s, JsonElement p) => throw new InvalidOperationException("处理器爆炸");
+    }
+
     private sealed class FakeSession : IDrawingSession
     {
         public FakeSession(string path) { SourcePath = path; File.WriteAllText(path, "v0"); }
         public string SourcePath { get; }
         public int SaveCount { get; private set; }
+        public int ReloadCount { get; private set; }
+        public bool FailSave { get; set; }
+        public bool FailReload { get; set; }
         public string ComputeHash() => Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(SourcePath)));
-        public void SaveWorking() { SaveCount++; File.WriteAllText(SourcePath, "v" + SaveCount); }
-        public void Reload() { }
+        public void SaveWorking()
+        {
+            if (FailSave) throw new IOException("模拟磁盘锁");
+            SaveCount++; File.WriteAllText(SourcePath, "v" + SaveCount);
+        }
+        public void Reload()
+        {
+            ReloadCount++;
+            if (FailReload) throw new IOException("模拟 reload 失败");
+        }
     }
 
-    private static StepPlan Plan(params string[] kinds) =>
-        new("p1", kinds.Select(k => new StepSpec(k, JsonDocument.Parse("{}").RootElement)).ToList());
+    private static StepPlan Plan(params string[] kinds)
+    {
+        using var empty = JsonDocument.Parse("{}");
+        var paramsEl = empty.RootElement.Clone();
+        return new("p1", kinds.Select(k => new StepSpec(k, paramsEl)).ToList());
+    }
 
     [Fact]
     public void Parse_ValidPlan_Ok()
@@ -132,6 +153,45 @@ public class StepEngineTests : IDisposable
         _engine.Rollback(result.TxId, _session, "s1");
         Assert.Equal("v0", File.ReadAllText(_session.SourcePath));
         Assert.Equal("rollback", _audit.ReadAll()[^1].Entry.Kind);
+        Assert.True(_audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Run_HandlerThrows_RecordsStepFailed()
+    {
+        var engine = new StepEngine(_audit, _snapshots, new FixedIdentity(new OperatorIdentity("TEST\\drawer", Role.Draw)),
+            new RoleChecker(), new IStepHandler[] { new ThrowingHandler() });
+        var result = engine.Run(Plan("throw-op"), _session, "s1");
+        Assert.False(result.Ok);
+        Assert.Contains("处理器爆炸", result.Error);
+        Assert.Equal("step-failed", _audit.ReadAll()[^1].Entry.Kind);
+        Assert.True(_audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Run_SaveWorkingThrows_RecordsTxFailed_Terminal()
+    {
+        _session.FailSave = true;
+        var result = _engine.Run(Plan("add-line"), _session, "s1");
+        Assert.False(result.Ok);
+        Assert.Contains("模拟磁盘锁", result.Error);
+        var log = _audit.ReadAll();
+        Assert.Equal("tx-failed", log[^1].Entry.Kind);
+        Assert.True(_audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Rollback_CallsReload_AndRestoreFailureRecordsRollbackFailed()
+    {
+        var result = _engine.Run(Plan("add-line"), _session, "s1");
+        int reloadsBefore = _session.ReloadCount;
+        _engine.Rollback(result.TxId, _session, "s1");
+        Assert.Equal(reloadsBefore + 1, _session.ReloadCount);
+
+        // 同一 txId 二次回滚：快照仍在，Restore 成功，Reload 抛错 → rollback-failed 终结记录
+        _session.FailReload = true;
+        Assert.Throws<IOException>(() => _engine.Rollback(result.TxId, _session, "s1"));
+        Assert.Equal("rollback-failed", _audit.ReadAll()[^1].Entry.Kind);
         Assert.True(_audit.VerifyChain(out _));
     }
 }

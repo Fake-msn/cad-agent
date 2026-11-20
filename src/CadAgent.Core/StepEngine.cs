@@ -39,7 +39,16 @@ public static class StepPlanParser
             {
                 if (!s.TryGetProperty("kind", out var kindEl) || kindEl.ValueKind != JsonValueKind.String)
                     throw new InvalidPlanException("步骤缺少 kind");
-                var paramsEl = s.TryGetProperty("params", out var p) ? p.Clone() : JsonDocument.Parse("{}").RootElement;
+                JsonElement paramsEl;
+                if (s.TryGetProperty("params", out var p))
+                {
+                    paramsEl = p.Clone();
+                }
+                else
+                {
+                    using var empty = JsonDocument.Parse("{}");
+                    paramsEl = empty.RootElement.Clone();
+                }
                 steps.Add(new StepSpec(kindEl.GetString()!, paramsEl));
             }
             return new StepPlan(idEl.GetString()!, steps);
@@ -90,10 +99,14 @@ public sealed class StepEngine
                 return new TxResult(txId, false, done, err);
             }
             StepResult result;
-            try { result = handler.Apply(session, step.Params); }
+            string afterHash = beforeHash;
+            try
+            {
+                result = handler.Apply(session, step.Params);
+                afterHash = session.ComputeHash();
+            }
             catch (Exception ex) { result = new StepResult(false, ex.Message, ""); }
 
-            string afterHash = session.ComputeHash();
             if (!result.Ok)
             {
                 Append(op, sessionId, "step-failed", result.TargetHandle,
@@ -105,8 +118,18 @@ public sealed class StepEngine
             beforeHash = afterHash;
             done++;
         }
-        session.SaveWorking();
-        Append(op, sessionId, "tx-commit", session.SourcePath, plan.PlanId, beforeHash, session.ComputeHash(), snapshot, plan.PlanId);
+        try
+        {
+            session.SaveWorking();
+            Append(op, sessionId, "tx-commit", session.SourcePath, plan.PlanId, beforeHash, session.ComputeHash(), snapshot, plan.PlanId);
+        }
+        catch (Exception ex)
+        {
+            // 终结记录：落盘或 tx-commit 审计失败也必须留下失败形态（tx-failed 自身 Append 失败则任其传播——审计存储故障不可恢复）
+            Append(op, sessionId, "tx-failed", session.SourcePath,
+                JsonSerializer.Serialize(new { plan.PlanId, Error = ex.Message }), beforeHash, beforeHash, snapshot, plan.PlanId);
+            return new TxResult(txId, false, done, ex.Message);
+        }
         return new TxResult(txId, true, done, "");
     }
 
@@ -115,8 +138,18 @@ public sealed class StepEngine
         var op = _identity.Current;
         _roles.Ensure(op, Role.Draw);
         string before = session.ComputeHash();
-        _snapshots.Restore(txId, session.SourcePath);
-        session.Reload();
+        try
+        {
+            _snapshots.Restore(txId, session.SourcePath);
+            session.Reload();
+        }
+        catch (Exception ex)
+        {
+            // 无旁路：Restore/Reload 失败也须留下审计痕迹，再向上抛出
+            Append(op, sessionId, "rollback-failed", session.SourcePath,
+                JsonSerializer.Serialize(new { TxId = txId, Error = ex.Message }), before, before, txId, "");
+            throw;
+        }
         Append(op, sessionId, "rollback", session.SourcePath, txId, before, session.ComputeHash(), txId, "");
     }
 
