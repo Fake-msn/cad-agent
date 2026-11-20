@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -20,7 +22,7 @@ public sealed record Adjudication(
     bool Exempt = false,
     string Interpretation = "");
 
-/// <summary>裁定集合：Load 缺失→空；Save 原子写；Upsert 同 RuleId 替换（最新裁定生效）。</summary>
+/// <summary>裁定集合：Load 缺失→空、同 RuleId 去重保留末条；Save 原子写；Upsert 同 RuleId 替换（最新裁定生效）；Fingerprint 复现证据。</summary>
 public sealed class AdjudicationSet
 {
     /// <summary>审计 kind 常量（Cli 记录裁定操作用）。</summary>
@@ -34,10 +36,21 @@ public sealed class AdjudicationSet
 
     public List<Adjudication> Items { get; set; } = new();
 
-    public static AdjudicationSet Load(string path) =>
-        File.Exists(path)
-            ? JsonSerializer.Deserialize<AdjudicationSet>(File.ReadAllText(path), JsonOpts) ?? new AdjudicationSet()
-            : new AdjudicationSet();
+    public static AdjudicationSet Load(string path)
+    {
+        if (!File.Exists(path)) return new AdjudicationSet();
+        var set = JsonSerializer.Deserialize<AdjudicationSet>(File.ReadAllText(path), JsonOpts)
+                  ?? new AdjudicationSet();
+        // 去重（2b-ii-a T6）：同 RuleId 多条→保留最后一条（latest-wins，与 Upsert 一致）。
+        // 修复重复项下 EffectiveForce（Find 取首条）与 IsExempt（Exists 任一条）的语义分歧。
+        // GroupBy 保首现键序、取末条内容——确定性且与 Upsert 重放等价。
+        set.Items ??= new List<Adjudication>();
+        set.Items = set.Items
+            .GroupBy(x => x.RuleId, StringComparer.Ordinal)
+            .Select(g => g.Last())
+            .ToList();
+        return set;
+    }
 
     public void Save(string path)
     {
@@ -66,4 +79,29 @@ public sealed class AdjudicationSet
     }
 
     public bool IsExempt(string ruleId) => Items.Exists(x => x.RuleId == ruleId && x.Exempt);
+
+    /// <summary>
+    /// 裁定集指纹（2b-ii-a T6，复现证据）：Items 按 RuleId Ordinal 排序→规范化 JSON
+    /// （匿名投影固定字段序 RuleId/Operator/Ts/Reason/ForceOverride/Exempt/Interpretation；
+    /// Ts 往返格式 "O"；ForceOverride 为 PascalCase 枚举名或 null）→SHA256 大写 hex。
+    /// 空集→SHA256("[]" UTF8)。与存储顺序无关、对任一字段内容敏感；
+    /// 前提不变量：RuleId 唯一（Load 去重 + Upsert 保证）。
+    /// </summary>
+    public string Fingerprint()
+    {
+        var canonical = Items
+            .OrderBy(x => x.RuleId, StringComparer.Ordinal)
+            .Select(x => new
+            {
+                x.RuleId,
+                x.Operator,
+                Ts = x.Ts.ToString("O"),
+                x.Reason,
+                ForceOverride = x.ForceOverride?.ToString(),
+                x.Exempt,
+                x.Interpretation
+            });
+        string json = JsonSerializer.Serialize(canonical);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
+    }
 }

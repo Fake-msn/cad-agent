@@ -81,6 +81,27 @@ public static class CommandRouter
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
     }
 
+    /// <summary>可重复选项的全部值（按出现序）——--skill 可重复（2b-ii-a T6）。</summary>
+    private static List<string> GetOptionValues(string[] args, string name)
+    {
+        var values = new List<string>();
+        for (int i = 0; i + 1 < args.Length; i++)
+            if (args[i] == name) values.Add(args[i + 1]);
+        return values;
+    }
+
+    /// <summary>
+    /// 规则集装配（2b-ii-a T6）：builtin + --skill 包（可重复，显式目录路径，按出现序）
+    /// →SkillSet.Compose。adjudicate 孤儿校验消费 ContainsRule；T7 check/scan --skill
+    /// 接线复用同一加载路径。skill 目录非法/规则 Id 冲突→异常由 Run 兜底 stderr + exit 1
+    /// （用法错误不审计——与 adjudicate 互斥校验先例一致，校验先于任何副作用）。
+    /// </summary>
+    private static SkillSet LoadRuleSet(string[] args)
+    {
+        var packages = GetOptionValues(args, "--skill").Select(SkillLoader.LoadDirectory).ToList();
+        return SkillSet.Compose(BuiltinRules.Load(), packages);
+    }
+
     private static string RequireOption(string[] args, string name) =>
         GetOption(args, name) ?? throw new ArgumentException($"缺少必需选项 {name}");
 
@@ -199,6 +220,8 @@ public static class CommandRouter
     /// 跳过原因沿用 check 的结构化 stderr 通道（跳过不静默）。
     /// 无 overlay 观察性：overlay 为 null/空→引擎记 NotEvaluable 结构化跳过（2b-ii-a T5）；
     /// 2b-i interim 的 stderr"未评估"提示与 paramsJson overlayPresent 字段保留（既有测试兼容）。
+    /// 复现证据（2b-ii-a T6 加性）：paramsJson 增 adjudicationHash + rulePackVersion
+    /// （run 不带 --skill→builtin 常量；与 check 同口径）。
     /// </summary>
     private static void RunRegressionCheck(DrawingSession drawing, SemanticOverlay? overlay,
         string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
@@ -213,7 +236,10 @@ public static class CommandRouter
             var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
                 session, audit, op, stderr, source: "run-regression");
             if (adjudications is null) return; // 已审计拒绝；已提交事务不受影响
-            var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, effectiveOverlay, adjudications);
+            // 规则包版本（2b-ii-a T6 审计加性）：run 不带 --skill——builtin-only 合成，
+            // RulePackVersion 即内置常量；与 check 同一复现证据字段口径。
+            var ruleSet = SkillSet.Compose(BuiltinRules.Load(), Array.Empty<SkillPackage>());
+            var summary = StandardsEngine().Evaluate(ruleSet.AllRules, drawing, effectiveOverlay, adjudications);
             int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
             WriteStructuredSkips(summary, stderr);
             string hash = drawing.ComputeHash();
@@ -226,7 +252,9 @@ public static class CommandRouter
                     issueCount = summary.Issues.Count,
                     mandatoryViolations,
                     skippedReasons = StructuredSkipAuditArray(summary),
-                    overlayPresent
+                    overlayPresent,
+                    adjudicationHash = adjudications.Fingerprint(),
+                    rulePackVersion = ruleSet.RulePackVersion
                 }),
                 hash, hash, "", ""));
             if (mandatoryViolations > 0)
@@ -530,6 +558,8 @@ public static class CommandRouter
     /// 无 overlay 观察性：无语义标注时 overlay 驱动规则（轴号/标高）由引擎记 NotEvaluable
     /// 结构化跳过（T5）；2b-i interim 的 stderr 提示与 paramsJson overlayPresent 字段保留
     /// （既有测试兼容）。
+    /// 复现证据（2b-ii-a T6 加性）：paramsJson 增 adjudicationHash（裁定集 Fingerprint）
+    /// + rulePackVersion（SkillSet.RulePackVersion；check --skill 接线在 T7，当前 builtin 常量）。
     /// </summary>
     private static int Check(string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -552,7 +582,10 @@ public static class CommandRouter
         var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
             session, audit, op, stderr, source: "check");
         if (adjudications is null) return 1;
-        var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, overlay, adjudications);
+        // 规则包版本（2b-ii-a T6 审计加性）：check 的 --skill 接线在 T7——当前 builtin-only
+        // 合成，RulePackVersion 即内置常量 "gb50001-2017.r1"；AllRules 与 builtin 序一致。
+        var ruleSet = SkillSet.Compose(BuiltinRules.Load(), Array.Empty<SkillPackage>());
+        var summary = StandardsEngine().Evaluate(ruleSet.AllRules, drawing, overlay, adjudications);
         int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
         // 跳过不静默：结构化原因走 stderr（含类别+规则 Id），不进 stdout JSON（豁免展示移除契约）。
         WriteStructuredSkips(summary, stderr);
@@ -566,7 +599,9 @@ public static class CommandRouter
                 issueCount = summary.Issues.Count,
                 mandatoryViolations,
                 skippedReasons = StructuredSkipAuditArray(summary),
-                overlayPresent
+                overlayPresent,
+                adjudicationHash = adjudications.Fingerprint(),
+                rulePackVersion = ruleSet.RulePackVersion
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -611,6 +646,8 @@ public static class CommandRouter
 
     /// <summary>
     /// rule adjudicate：人工裁定（强制力覆盖／豁免，二选一互斥；reason 必填）。
+    /// 孤儿校验（2b-ii-a T6）：ruleId 必须在加载集（builtin + --skill 包，--skill 可重复，
+    /// 与 check 同一加载路径）；未知 Id→stderr + exit 1，不留审计、不落盘（校验先于副作用）。
     /// 裁定文件 LoadOrReject（损坏→audited refusal exit 1）→Upsert（同 RuleId 最新裁定
     /// 生效）→审计 rule-adjudicated→原子 Save→exit 0。
     /// 审计先行（评审裁定）：Append 先于 Save——若 Save 在审计后抛异常，记录仍保留裁定
@@ -648,6 +685,15 @@ public static class CommandRouter
                 return 1;
             }
             forceOverride = parsed;
+        }
+        // 孤儿裁定校验（2b-ii-a T6）：ruleId 必须在加载集（builtin + --skill 包）。
+        // 校验顺序契约：互斥→force/exempt 必填→reason 必填→force 合法性→孤儿——
+        // 先于 OpenAudit/Load/Upsert/Append/Save，未知 Id 不留审计、不落盘。
+        var ruleSet = LoadRuleSet(args);
+        if (!ruleSet.ContainsRule(ruleId))
+        {
+            stderr.WriteLine($"未知规则 Id: {ruleId}（不在 builtin+skill 规则集中，拒绝孤儿裁定）");
+            return 1;
         }
         string interpretation = GetOption(args, "--interpretation") ?? "";
         using var audit = OpenAudit(agentDir);
