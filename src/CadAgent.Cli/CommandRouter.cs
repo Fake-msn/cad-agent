@@ -2,7 +2,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CadAgent.Core;
 using CadAgent.Data;
+using CadAgent.Data.Checks;
 using CadAgent.Data.Handlers;
+using CadAgent.Data.Rules;
 using CadAgent.Data.Semantic;
 
 namespace CadAgent.Cli;
@@ -43,6 +45,8 @@ public static class CommandRouter
                 case "audit": return AuditVerify(agentDir, stdout, stderr);
                 case "roles": return RolesShow(agentDir, stdout);
                 case "semantic": return Semantic(args, positional, agentDir, session, stdout, stderr);
+                case "check": return Check(RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
+                case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
                 default: return Usage(stderr);
             }
         }
@@ -169,19 +173,89 @@ public static class CommandRouter
         // 存在但损坏→审计拒绝、不执行（最终审查裁定：不得静默降级为 null 闸口）。
         string overlayPath = SemanticOverlayPath(agentDir);
         ISemanticGate? semanticGate = null;
+        SemanticOverlay? overlay = null;
         if (File.Exists(overlayPath))
         {
-            var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+            overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
             if (overlay is null) return 1;
             semanticGate = new SemanticGate(overlay);
         }
         var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
+        else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
         }, JsonOpts));
         return result.Ok ? 0 : 1;
+    }
+
+    /// <summary>
+    /// run 回归检查（2b-i T8 加性）：tx 成功后对运行后图纸评估内置规则——存在生效
+    /// mandatory 违规（含运行未修复的既有违规）→stderr 警告，**不自动回滚，决策权归人**；
+    /// 无论有无违规均审计 check-run（Source="run-regression"，只读检查前后哈希一致）。
+    /// 观察性检查不得改变 run 结果：裁定文件损坏→LoadOrReject 审计拒绝后跳过回归；
+    /// 其余异常→审计留痕（spec §9）+ stderr 提示，退出码仍由事务结果决定。
+    /// 跳过原因沿用 check 的 stderr 通道（跳过不静默）。
+    /// 无 overlay 观察性（最终审查裁定，interim；结构化跳过报告=2b-ii）：overlay 为 null/空
+    /// →stderr"未评估"提示 + paramsJson 加性字段 overlayPresent（引擎计数不变）。
+    /// </summary>
+    private static void RunRegressionCheck(DrawingSession drawing, SemanticOverlay? overlay,
+        string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
+    {
+        try
+        {
+            var effectiveOverlay = overlay ?? new SemanticOverlay();
+            bool overlayPresent = effectiveOverlay.Annotations.Count > 0;
+            if (!overlayPresent)
+                stderr.WriteLine("提示: 无语义标注，轴号/标高规则未评估（请先 semantic scan/map）");
+            string adjPath = AdjudicationsPath(agentDir);
+            var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
+                session, audit, op, stderr, source: "run-regression");
+            if (adjudications is null) return; // 已审计拒绝；已提交事务不受影响
+            var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, effectiveOverlay, adjudications);
+            int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
+            foreach (string reason in summary.SkippedReasons)
+                stderr.WriteLine($"跳过: {reason}");
+            string hash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "run-regression", "check-run", drawing.SourcePath,
+                JsonSerializer.Serialize(new
+                {
+                    rulesRun = summary.RulesRun,
+                    rulesSkipped = summary.RulesSkipped,
+                    issueCount = summary.Issues.Count,
+                    mandatoryViolations,
+                    skippedReasons = summary.SkippedReasons,
+                    overlayPresent
+                }),
+                hash, hash, "", ""));
+            if (mandatoryViolations > 0)
+            {
+                string ruleIds = string.Join(", ", summary.Issues
+                    .Where(i => i.Force == RuleForce.Mandatory).Select(i => i.RuleId).Distinct());
+                stderr.WriteLine($"警告: 运行后图纸存在 {mandatoryViolations} 项强制(mandatory)规范违规（规则: {ruleIds}）。事务已提交，不自动回滚——决策权归人，请执行 check 复核并人工裁定或修正。");
+            }
+        }
+        catch (Exception ex)
+        {
+            // 回归检查自身故障也入审计（spec §9），但不影响已提交事务。
+            // 嵌套守卫（最终审查裁定）：catch 路径的 audit.Append 若再抛异常，不得让异常逃出——
+            // 否则 run 将以 exit 1 无 stdout 收场，尽管事务已提交。写入失败降级为仅 stderr 留痕，
+            // 绝不重抛。（无注入缝隙可模拟审计写入失败——以代码审查+既有损坏裁定测试覆盖。）
+            try
+            {
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "run-regression", "check-run", drawing.SourcePath,
+                    JsonSerializer.Serialize(new { Error = ex.Message, overlayPresent = overlay is { Annotations.Count: > 0 } }),
+                    "", "", "", ""));
+            }
+            catch (Exception auditEx)
+            {
+                stderr.WriteLine($"回归审计写入失败: {auditEx.Message}");
+            }
+            stderr.WriteLine($"回归检查未完成: {ex.Message}（事务已提交，不受影响）");
+        }
     }
 
     private static int Rollback(string txId, string drawingPath, string agentDir,
@@ -237,12 +311,12 @@ public static class CommandRouter
 
     /// <summary>
     /// semantic 族加载守卫（spec §9 错误处理全部入审计；最终审查裁定）：
-    /// overlay/drawing Load 失败复用 intake-rejected 模式留痕（Source=semantic，
-    /// target=失败文件，哈希不可得→空串），stderr + 调用方 exit 1。
+    /// overlay/drawing Load 失败复用 intake-rejected 模式留痕（Source 默认 semantic，
+    /// check 族传 "check"；target=失败文件，哈希不可得→空串），stderr + 调用方 exit 1。
     /// 返回 null 表示已审计拒绝。
     /// </summary>
     private static T? LoadOrReject<T>(Func<T> load, string file, string session,
-        SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr) where T : class
+        SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr, string source = "semantic") where T : class
     {
         try
         {
@@ -251,7 +325,7 @@ public static class CommandRouter
         catch (Exception ex)
         {
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-                session, "semantic", "intake-rejected", file,
+                session, source, "intake-rejected", file,
                 JsonSerializer.Serialize(new { Error = ex.Message, File = file }), "", "", "", ""));
             stderr.WriteLine(ex.Message);
             return null;
@@ -402,9 +476,213 @@ public static class CommandRouter
         return 0;
     }
 
+    private static string AdjudicationsPath(string agentDir) =>
+        Path.Combine(agentDir, "adjudications.json");
+
+    /// <summary>
+    /// 规范引擎装配（T3 评审裁定带入 T7 的装配守卫）：重复 CheckType 注册直接抛异常，
+    /// 防止 RuleEngine 字典 last-wins 静默丢失检查器。异常由 Run 兜底→stderr + exit 1。
+    /// </summary>
+    private static RuleEngine StandardsEngine()
+    {
+        IRuleChecker[] checkers =
+        {
+            new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
+            new ElevationChecker(), new LayerNameChecker()
+        };
+        var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
+            .FirstOrDefault(g => g.Count() > 1);
+        if (duplicate is not null)
+            throw new InvalidOperationException($"重复注册检查器 CheckType: {duplicate.Key}");
+        return new RuleEngine(checkers);
+    }
+
+    /// <summary>
+    /// check：LoadOrReject 图纸→overlay 存在则 Load（损坏→audited refusal）→裁定
+    /// LoadOrReject（损坏→audited refusal，与图纸/overlay 同一守卫）→
+    /// RuleEngine.Evaluate(内置规则)→审计 check-run→stdout {issues, summary}（camelCase）。
+    /// 退出码：0=无 mandatory 违规；2=有 mandatory 违规（recommended/informational 不影响
+    /// 退出码——决策权归人）。check 只读不改图纸：前后哈希一致。
+    /// stdout summary 仅含计数（rulesRun/rulesSkipped/issueCount/mandatoryViolations）：
+    /// SkippedReasons 含豁免规则 Id，若输出会破坏豁免规则的展示移除契约。
+    /// 跳过不静默（spec §6.2/§9，评审裁定）：跳过原因逐条写 stderr（"跳过: " 前缀），
+    /// 并以 skippedReasons 数组加性入审计 paramsJson（stdout 契约不变）。
+    /// 无 overlay 观察性（最终审查裁定，interim；结构化跳过报告=2b-ii）：无语义标注时
+    /// overlay 驱动规则（轴号/标高）实际未评估，不得与"已查且干净"不可区分——stderr 提示
+    /// + paramsJson 加性字段 overlayPresent（引擎计数与 stdout 契约不变）。
+    /// </summary>
+    private static int Check(string drawingPath, string agentDir, string session,
+        TextWriter stdout, TextWriter stderr)
+    {
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
+            session, audit, op, stderr, source: "check");
+        if (drawing is null) return 1;
+        string overlayPath = SemanticOverlayPath(agentDir);
+        var overlay = File.Exists(overlayPath)
+            ? LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath,
+                session, audit, op, stderr, source: "check")
+            : new SemanticOverlay();
+        if (overlay is null) return 1;
+        bool overlayPresent = overlay.Annotations.Count > 0;
+        if (!overlayPresent)
+            stderr.WriteLine("提示: 无语义标注，轴号/标高规则未评估（请先 semantic scan/map）");
+        string adjPath = AdjudicationsPath(agentDir);
+        var adjudications = LoadOrReject(() => AdjudicationSet.Load(adjPath), adjPath,
+            session, audit, op, stderr, source: "check");
+        if (adjudications is null) return 1;
+        var summary = StandardsEngine().Evaluate(BuiltinRules.Load(), drawing, overlay, adjudications);
+        int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
+        // 跳过不静默：原因走 stderr（含规则 Id），不进 stdout JSON（豁免展示移除契约）。
+        if (summary.RulesSkipped > 0)
+        {
+            foreach (string reason in summary.SkippedReasons)
+                stderr.WriteLine($"跳过: {reason}");
+        }
+        string hash = drawing.ComputeHash();
+        audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            session, "check", "check-run", drawingPath,
+            JsonSerializer.Serialize(new
+            {
+                rulesRun = summary.RulesRun,
+                rulesSkipped = summary.RulesSkipped,
+                issueCount = summary.Issues.Count,
+                mandatoryViolations,
+                skippedReasons = summary.SkippedReasons,
+                overlayPresent
+            }),
+            hash, hash, "", ""));
+        stdout.WriteLine(JsonSerializer.Serialize(new
+        {
+            issues = summary.Issues,
+            summary = new
+            {
+                rulesRun = summary.RulesRun,
+                rulesSkipped = summary.RulesSkipped,
+                issueCount = summary.Issues.Count,
+                mandatoryViolations
+            }
+        }, SemanticJsonOpts));
+        return mandatoryViolations > 0 ? 2 : 0;
+    }
+
+    /// <summary>
+    /// rule 命令族分发。子命令校验沿用 semantic 族模式：缺失/未知子命令一律
+    /// stderr + exit 1，不落入 Usage 歧义。
+    /// </summary>
+    private static int Rule(string[] args, string[] positional, string agentDir,
+        string session, TextWriter stdout, TextWriter stderr)
+    {
+        if (positional.Length < 2)
+        {
+            stderr.WriteLine("rule 需要子命令: adjudicate|list");
+            return 1;
+        }
+        return positional[1] switch
+        {
+            "adjudicate" => RuleAdjudicate(args, agentDir, session, stdout, stderr),
+            "list" => RuleList(agentDir, session, stdout, stderr),
+            _ => UnknownRuleSubcommand(positional[1], stderr)
+        };
+    }
+
+    private static int UnknownRuleSubcommand(string sub, TextWriter stderr)
+    {
+        stderr.WriteLine($"未知 rule 子命令: {sub}（可用: adjudicate|list）");
+        return 1;
+    }
+
+    /// <summary>
+    /// rule adjudicate：人工裁定（强制力覆盖／豁免，二选一互斥；reason 必填）。
+    /// 裁定文件 LoadOrReject（损坏→audited refusal exit 1）→Upsert（同 RuleId 最新裁定
+    /// 生效）→审计 rule-adjudicated→原子 Save→exit 0。
+    /// 审计先行（评审裁定）：Append 先于 Save——若 Save 在审计后抛异常，记录仍保留裁定
+    /// 意图（可接受，不回滚审计）；异常由 Run 兜底→stderr + exit 1。
+    /// 裁定只改 adjudications.json 不改图纸：哈希不可得→空串。
+    /// </summary>
+    private static int RuleAdjudicate(string[] args, string agentDir, string session,
+        TextWriter stdout, TextWriter stderr)
+    {
+        string ruleId = RequireOption(args, "--rule");
+        string? forceText = GetOption(args, "--force");
+        bool exempt = args.Contains("--exempt");
+        if (forceText is not null && exempt)
+        {
+            stderr.WriteLine("--force 与 --exempt 互斥，不能同时给定");
+            return 1;
+        }
+        if (forceText is null && !exempt)
+        {
+            stderr.WriteLine("rule adjudicate 需要 --force <mandatory|recommended|informational> 或 --exempt");
+            return 1;
+        }
+        string? reason = GetOption(args, "--reason");
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            stderr.WriteLine("rule adjudicate 需要 --reason（裁定理由，审计留痕）");
+            return 1;
+        }
+        RuleForce? forceOverride = null;
+        if (forceText is not null)
+        {
+            if (!Enum.TryParse<RuleForce>(forceText, ignoreCase: true, out var parsed) || !Enum.IsDefined(parsed))
+            {
+                stderr.WriteLine($"非法强制力值: {forceText}（可用: mandatory|recommended|informational）");
+                return 1;
+            }
+            forceOverride = parsed;
+        }
+        string interpretation = GetOption(args, "--interpretation") ?? "";
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        string path = AdjudicationsPath(agentDir);
+        var set = LoadOrReject(() => AdjudicationSet.Load(path), path,
+            session, audit, op, stderr, source: "rule");
+        if (set is null) return 1;
+        set.Upsert(new Adjudication(ruleId, op.Account, DateTimeOffset.UtcNow, reason,
+            forceOverride, exempt, interpretation));
+        // 审计先行：Append 先于 Save（见方法注释——Save 失败不回滚审计，记录保留意图）。
+        audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            session, "rule", AdjudicationSet.AuditKind, ruleId,
+            JsonSerializer.Serialize(new { ruleId, forceOverride = forceOverride?.ToString(), exempt, reason }),
+            "", "", "", ""));
+        set.Save(path);
+        stdout.WriteLine(JsonSerializer.Serialize(new
+        {
+            ruleId,
+            forceOverride = forceOverride?.ToString(),
+            exempt,
+            reason,
+            interpretation
+        }, SemanticJsonOpts));
+        return 0;
+    }
+
+    /// <summary>
+    /// rule list：内置规则+当前裁定 JSON（camelCase）→exit 0。
+    /// 只读命令成功时不入审计（沿用 roles show / semantic show 先例）；裁定文件损坏
+    /// 则 LoadOrReject 审计拒绝（spec §9 错误处理全部入审计）+ stderr + exit 1。
+    /// </summary>
+    private static int RuleList(string agentDir, string session, TextWriter stdout, TextWriter stderr)
+    {
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        string path = AdjudicationsPath(agentDir);
+        var adjudications = LoadOrReject(() => AdjudicationSet.Load(path), path,
+            session, audit, op, stderr, source: "rule");
+        if (adjudications is null) return 1;
+        stdout.WriteLine(JsonSerializer.Serialize(new
+        {
+            rules = BuiltinRules.Load(),
+            adjudications = adjudications.Items
+        }, SemanticJsonOpts));
+        return 0;
+    }
+
     private static int Usage(TextWriter stderr)
     {
-        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map> [参数] [--project <dir>]");
+        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|check|rule adjudicate|rule list> [参数] [--project <dir>]");
         return 1;
     }
 }

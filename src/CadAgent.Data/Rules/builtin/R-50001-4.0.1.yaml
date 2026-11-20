@@ -1,0 +1,16 @@
+# R-50001-4.0.1.yaml
+id: R-50001-4.0.1
+source:
+  standard: "GB/T 50001-2017"
+  clause: "4.0.1"
+  excerpt: "图线的基本线宽 b，宜按照图纸比例及图纸性质从 1.4mm、1.0mm、0.7mm、0.5mm 线宽系列中选取。每个图样，应根据复杂程度与比例大小，先选定基本线宽 b，再选用表 4.0.1 中相应的线宽组。"
+  verification: source-text
+modal: "宜／应"
+force: recommended
+severity: high
+scope: { discipline: any, drawingType: any }
+check:
+  type: lineweight-group
+  params:
+    groups: [1.4, 1.0, 0.7, 0.5, 0.35, 0.25, 0.18, 0.13]
+suggestion: "线宽改选所选线宽组 {b, 0.7b, 0.5b, 0.25b} 的值"

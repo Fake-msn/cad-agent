@@ -1,0 +1,15 @@
+# R-50001-11.8.5.yaml
+id: R-50001-11.8.5
+source:
+  standard: "GB/T 50001-2017"
+  clause: "11.8.5"
+  excerpt: "零点标高应注写成±0.000，正数标高不注'+'，负数标高应注'-'，例如3.000、-0.600。"
+  verification: source-text
+modal: "应"
+force: recommended
+severity: high
+scope: { discipline: any, drawingType: any }
+check:
+  type: elevation-format
+  params: { mode: sign }
+suggestion: "零点 ±0.000；正数去 +；负数带 -"
