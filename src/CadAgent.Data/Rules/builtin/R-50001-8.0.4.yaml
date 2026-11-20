@@ -1,0 +1,15 @@
+# R-50001-8.0.4.yaml
+id: R-50001-8.0.4
+source:
+  standard: "GB/T 50001-2017"
+  clause: "8.0.4"
+  excerpt: "英文字母作为轴线号时，应全部采用大写字母，不应用同一个字母的大小写来区分轴线号。英文字母的 I、O、Z 不得用作轴线编号。当字母数量不够使用时，可增用双字母或单字母加数字注脚。"
+  verification: source-text
+modal: "应／不应／不得／可"
+force: recommended
+severity: high
+scope: { discipline: any, drawingType: any }
+check:
+  type: axis-letter
+  params: {}
+suggestion: "轴号改用大写 A～Y（排除 I/O/Z）；溢出用双字母或字母+数字注脚"

@@ -1,0 +1,15 @@
+# R-50001-11.8.4.yaml
+id: R-50001-11.8.4
+source:
+  standard: "GB/T 50001-2017"
+  clause: "11.8.4"
+  excerpt: "标高数字应以米为单位，注写到小数点以后第三位。在总平面图中，可注写到小数点以后第二位。"
+  verification: source-text
+modal: "应／可"
+force: recommended
+severity: high
+scope: { discipline: any, drawingType: any }
+check:
+  type: elevation-format
+  params: { mode: decimals, allowSitePlan2: true }
+suggestion: "标高注写到小数点后 3 位（总平面图可 2 位，需确认图类）"

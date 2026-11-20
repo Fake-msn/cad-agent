@@ -1,0 +1,15 @@
+# R-50001-13.0.1.yaml
+id: R-50001-13.0.1
+source:
+  standard: "GB/T 50001-2017"
+  clause: "13.0.1"
+  excerpt: "图层名称宜使用汉字、英文字母、数字和连字符'-'的组合，但汉字与英文字母不得混用；在同一工程中，应使用统一的图层命名格式，图层名称应自始至终保持不变，且不应同时使用汉字和英文字母的命名格式。"
+  verification: source-text
+modal: "宜／不得／应／不应"
+force: recommended
+severity: high
+scope: { discipline: any, drawingType: any }
+check:
+  type: layer-name
+  params: { mode: charset }
+suggestion: "图层名汉字与英文字母不得混用；项目内统一一套命名格式"
