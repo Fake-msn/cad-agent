@@ -236,5 +236,21 @@ public sealed class ZwcadRuntime : ICadRuntime
         catch { /* 队列已关闭等 */ }
         _queue.CompleteAdding();
         _staThread.Join(TimeSpan.FromSeconds(10));
+        // Quit 返回≠进程退出：CUIX 回写发生在退出尾段；测试宿主若先退出会留下
+        // 不完整收尾（ZCR 残留簇证据）。等待进程退出闭合该窗口（2026-11-22 复现分析）。
+        WaitForProcessExit(ExitWait);
+    }
+
+    internal static TimeSpan ExitWait = TimeSpan.FromSeconds(15);
+
+    internal static void WaitForProcessExit(TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            if (!ProcessNames().Any(n => n.Equals("ZWCAD", StringComparison.OrdinalIgnoreCase)))
+                return;
+            Thread.Sleep(250);
+        }
     }
 }

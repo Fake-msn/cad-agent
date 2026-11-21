@@ -51,4 +51,30 @@ public class ForeignInstanceGuardTests : IDisposable
         ZwcadRuntime.GuardWait = TimeSpan.FromMilliseconds(300);
         Assert.Throws<CadRuntimeException>(() => ZwcadRuntime.EnsureNoForeignInstance());
     }
+
+    [Fact]
+    public void WaitForProcessExit_ClearsWithinWait_Returns()
+    {
+        int calls = 0;
+        ZwcadRuntime.ProcessNames = () => ++calls <= 2 ? new[] { "ZWCAD" } : Array.Empty<string>();
+        ZwcadRuntime.WaitForProcessExit(TimeSpan.FromSeconds(5));
+        Assert.True(calls >= 3);
+    }
+
+    [Fact]
+    public void WaitForProcessExit_Timeout_ReturnsSilently()
+    {
+        ZwcadRuntime.ProcessNames = () => new[] { "ZWCAD" };
+        ZwcadRuntime.WaitForProcessExit(TimeSpan.FromMilliseconds(300));
+    }
+
+    [Fact]
+    public void Dispose_WaitsForProcessExit()
+    {
+        int calls = 0;
+        ZwcadRuntime.ProcessNames = () => ++calls <= 2 ? new[] { "ZWCAD" } : Array.Empty<string>();
+        ZwcadRuntime.ExitWait = TimeSpan.FromSeconds(5);
+        using (var rt = new ZwcadRuntime()) { }
+        Assert.True(calls >= 3);
+    }
 }
