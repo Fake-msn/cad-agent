@@ -1,0 +1,15 @@
+# excerpt 逐字自 extraction-244.md D1（4.0.9，JSON页37）。
+# 图例几何 VISUAL deferred（MinerU effort medium 关闭图像分析）→无检查器，NoChecker 结构化跳过诚实登记。
+# 17 类灯具名称目录见 symbols/symbols.yaml（确定性数据已入库）。
+id: R-244-4.0.9
+source:
+  standard: "JGJ/T 244-2011"
+  clause: "4.0.9"
+  excerpt: "常用灯光照明图例应按表 4.0.9 所示图例画法绘制。"
+  verification: source-text
+modal: "应"
+force: recommended
+severity: medium
+scope: { discipline: interior, drawingType: any }
+check: { type: luminaire-legend, params: {} }
+suggestion: "灯具图例按表4.0.9（17类：艺术吊灯/吸顶灯/筒灯/射灯/轨道射灯/格栅射灯/格栅荧光灯/暗藏灯带/壁灯/台灯/落地灯/水下灯/踏步灯/荧光灯/投光灯/泛光灯/聚光灯）；图例几何待 MinerU effort high 重转+视觉关联（VISUAL deferred，检查器未建）"

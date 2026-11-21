@@ -1,0 +1,15 @@
+# excerpt 逐字自 extraction-244.md D3（A.4.12，JSON页55）。
+# 施工图深度清单：位置+定位尺寸+材料名称+编号+做法+顶棚设备协调——综合版面/语义判断，
+# 第一 slice 无检查器→NoChecker 结构化跳过（人工审查项清单在 suggestion）。
+id: R-244-A.4.12
+source:
+  standard: "JGJ/T 244-2011"
+  clause: "A.4.12"
+  excerpt: "施工图中顶棚装饰灯具布置图的绘制除应符合本标准第 A.3.5 条的规定外，还应标注所有明装和暗藏的灯具（包括火灾和事故照明灯具）、发光顶棚、空调风口、喷头、探测器、扬声器、挡烟垂壁、防火卷帘、防火挑檐、疏散和指示标志牌等的位置，标明定位尺寸、材料名称、编号及做法；"
+  verification: source-text
+modal: "应"
+force: recommended
+severity: high
+scope: { discipline: interior, drawingType: ceiling-luminaire-layout }
+check: { type: luminaire-layout-depth, params: {} }
+suggestion: "灯具布置图深度人工审查清单：①所有明装/暗藏灯具（含火灾/事故照明）位置②定位尺寸③材料名称④编号（label-luminaires 可生成）⑤做法⑥与风口/喷头/探测器/扬声器/挡烟垂壁/防火卷帘/疏散标志协调⑦A.3.5 轴线编号与原建筑图相符/总尺寸/顶棚标高；自动检查器 deferred"

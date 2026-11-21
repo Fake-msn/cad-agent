@@ -34,6 +34,7 @@ public static class SemanticScanner
         WallPairDetector.Detect(session, overlay);
         AxisDetector.Detect(session, overlay);
         DoorArcDetector.Detect(session, overlay);
+        RoomDetector.AnnotateRooms(session, overlay);
 
         // 剪枝（最终审查裁定）：已删除实体（或换图后不存在）的标注必须移除，
         // 否则操作级闸口的存在性检查会被幻影实体满足。图层级 Mappings 保留。

@@ -1,0 +1,4 @@
+# 示例别名（非真实院标）——灯具图层→Lighting 语义类（SemanticClass.Lighting 已存在）。
+aliases:
+  - layerName: E-LITE
+    class: Lighting

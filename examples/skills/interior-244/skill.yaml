@@ -1,0 +1,12 @@
+# JGJ/T 244-2011 房屋建筑室内装饰装修制图标准规则包（真实条文，用户提供 MinerU 转换+原件封面核验）。
+# 标准号确证：封面+住建部公告第1053号+备案号 J1216-2011，现行有效（2026-11-21 核验）。
+# 效力：正文零"必须/严禁"，全部条文 recommended/informational（项目裁定：推荐性标准软规则零拦截）。
+# 条文逐字来源：standards-src/extraction-244.md（D1-D12，gitignored 底稿）。
+# 图例几何 VISUAL deferred：MinerU hybrid 后端 effort=medium 自动关闭图像分析（_ocr_enable=true，
+# 非 OCR 缺失）；effort high 重转+视觉关联为用户动作/后续能力。
+# 灯具品种代号标准明示归院标（3.6.5 条文说明）——本包不编造代号白名单；图层名 244 未规定，别名空。
+name: 室内装饰装修制图（JGJ/T 244-2011）
+version: "1.0.0"
+discipline: interior
+drawingType: any
+description: 室内装饰装修制图真实条文规则包：房名标注（5.2.5 可查）+灯具图例/设备索引符号/灯具布置图深度/自编图例治理（VISUAL/深度 deferred，NoChecker 结构化跳过诚实登记）；17 类灯具符号目录（表4.0.9，几何待视觉关联）；灯具编号步骤模板（label-luminaires）。全 recommended，零拦截。

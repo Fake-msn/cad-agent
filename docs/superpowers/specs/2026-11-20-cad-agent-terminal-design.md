@@ -396,6 +396,31 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **3d 布灯基准就绪**；计划4 Avalonia 视图待写。
 - 诚实边界：锚密钥本机 DPAPI（跨机验锚需密钥分发留后续）；往返校验第一 slice 实体计数+文本抽样（几何逐点留后续）；SaveAs 默认格式（版本参数留后续）；AutoCAD 适配器未实现。
 
+**计划3d 完成（布灯基准——第二期场景泛化验证，2026-11-21 记录；全套件 492 测试含 3 真机）**：
+- RoomDetector（Data/Semantic）：房名文本精确匹配模式列表（客厅/卧室/厨房等13类）→锚点；区域=锚点 10m 半径内 Wall 类线（叠加层标注或图层约定）端点 bbox；无墙/退化 bbox→6m×6m 默认区域显式 Assumed=true；Room 标注 GeometryInference 0.6（低于闸口 0.8，须人工确认）；集成 SemanticScanner（剪枝前）+ DrawingSummarizer 房间段（LLM 规划依据）。
+- layout-lighting 第七处理器：确定性网格（x+spacing/2 起步、不越界），每点 Insert(block)，可选 layer；ISemanticAware 声明 RequiredSemantics=[Room]——**语义闸口首次实战**：scan 推断 0.6 拒执行（semantic-gate-refused 留痕→有界重规划一次仍拒→Escalated），人工 map 确认 1.0 放行；点位数上限 10000 防脏参数；块不存在/非正参数→失败结果。KindDocs agent/repl 共用更新。
+- 灯具 skill 包 examples/skills/lighting（示例院标，非真实）：layer-name 规则 + E-LITE→Lighting 别名（SemanticClass.Lighting 既有）；**GB 50034 未提供——间距/照度不编造可执行条款**，仅 suggestion 注记人工审查项。
+- 基准 E2E 全链（离线 fake LLM）：建筑底图→scan（Wall/Room 推断）→摘要房间段（6000×4000 非 assumed）→map 确认→agent 布灯 6 点位落 E-LITE→审查签认（职责分离）→降级导出读回 6 Insert→审计包 manifest chainVerified+anchorStatus Ok（无密钥泄漏）→验锚通过；第二链：驳回→事务回滚→灯具清零（要求③在布灯场景复验）。
+- **计划3 全部完成（3a/3b/3c/3d）→计划4 Avalonia 视图就绪**（渲染+基础手动编辑+审计回放+签认纠偏 GUI）。
+- 诚实边界：房间区域为 bbox 启发式（精确多边形重建留后续）；照度计算未做（设计标准缺失）；灯具符号跨文档导入仍未做（块须已在图纸内，既有 deferred）；房名模式列表为起点（真实图纸自定义房名走人工纠偏流程）；基准用 fake LLM（真实 API key 冒烟为用户动作）。
+
+**计划3e 完成（JGJ/T 244-2011 落地：真实条文规则包+灯具编号，2026-11-21 记录；全套件 512 测试含 3 真机）**：
+- **244 标准核验**：用户提供 MinerU JSON+原件 PDF；封面+住建部公告第1053号+备案号 J1216-2011 齐全（四份中首份封面齐全），74页与官方书目一致，现行有效未被替代。正文零"必须/严禁"→入库规则全 recommended/informational，零 mandatory。提取底稿 standards-src/extraction-244.md（D1-D12 逐字+页码）。
+- **MinerU 图例缺失根因核查（用户质疑触发）**：四份 JSON 元数据均 `_backend=hybrid, _ocr_enable=true, _effort=medium, v3.4.4`——hybrid=VLM+原生文本提取混合后端（多模态模型已参与），OCR 已启用；**根因＝effort medium 自动关闭图像分析**（MinerU 3.x 文档化行为），非"未选 VLM/未调 OCR"。补救＝effort high/xhigh 重转 244/50786 开启图像分析→图例视觉关联（用户侧 MinerU 服务动作；项目侧 MinerU API 后续能力）。
+- **label-luminaires 第八处理器**：设备索引符号（3.6.5/3.6.6-4）——正六边形+水平内径线、细实线 W25、长轴 8~12mm 参数校验、内注编号+品种代号；prefix 必填无默认（品种代号标准明示归院标，3.6.5 条文说明）；编号确定性（Insert Handle 升序）；字高≥2.5mm；**ISemanticAware=[Lighting]——Lighting 类首次闸口实战**（无确认拒/别名 0.8 放行）。
+- **room-name 检查器（5.2.5）**：房名/编号存在性（RoomDetector 同口径启发式）；编号圆圈6mm/字高比较/房间名称表 VISUAL deferred（DetectionBasis 注记）；StandardsEngine 注册。
+- **interior-244 skill 包（真实条文）**：R-244-5.2.5（room-name 可查）+ R-244-4.0.9/3.6.5/A.4.12/4.0.3（**NoChecker 结构化跳过诚实登记** VISUAL/深度 deferred，跳过不静默）；symbols 17 类灯具目录（表4.0.9 名称逐字，class Lighting，几何占位待重转）；steps/label-luminaires 模板；aliases 空（244 不规定图层名，不编造）。
+- **编号 E2E**：布灯→**再 scan**（时序关键：布灯前 scan 无 E-LITE Insert 可标）→skill run 编号 6 符号 L1..L6→签认→验链；闸口变体无 Lighting→Escalated+semantic-gate-refused。
+- **244 重新论证结论（用户要求）**：3d 控制性布点有标准依据（A.4.4-8"可"）；房名信号=5.2.5 要求；缺口＝生产灯具布置图属顶棚镜像视图（5.1.2）+A.4.12 深度余项（定位尺寸/材料/做法/设备协调）+图例几何（VISUAL）+顶棚标高 CH（3.10.8）。
+- 诚实边界：索引符号合规检查器未建（生成已有，校验 deferred）；文本近似居中（精确排版留视图层）；A.4.12 深度余项 deferred；灯具图例几何待 MinerU high 重转+视觉关联；跨文档符号导入仍 deferred。
+
+**3e 追加：灯具图例几何补齐（2026-11-21，MinerU vlm 重转后；全套件 513 测试含 3 真机）**：
+- 用户提供 API token（仅内存使用不落盘）→ v4 API model_version=vlm 重转 244/50786（图像分析启用）；CDN 下载 Python openssl 被阻断→curl schannel 绕过（无代理）；结果包+整表裁切入库 standards-src/_reparse/（gitignored）。
+- v2 content_list 表块 image_source 整表栅格＝图例几何载体（HTML 单元格仍空，视觉关联必需，预判证实）；行列线检测裁切 20 单格→**17 类灯具图例逐类目视核对**（名称↔图形映射确认，含变体）。
+- **矢量重建 17 类 DXF**（examples/skills/interior-244/symbols/luminaire-01..17.dxf，ACadSharp 生成+读回测试）；symbols.yaml 占位转真实文件+几何描述+来源链注记。近似边界：非精确描摹/涂黑与波浪折线近似/变体未单独建块/毫米级示意比例。
+- 50786 符号表裁切同批就绪（表4.1.2 等 60+ 表）——302 符号矢量化 deferred 独立切片。
+- MinerU API 录入能力首跑通（token 环境变量注入、批次上传/轮询/下载重试）——后续新标准录入可复用该管线。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm

@@ -557,7 +557,8 @@ public static partial class CommandRouter
             new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
             new ElevationChecker(), new LayerNameChecker(),
             new TextHeightMinChecker(), new CableFormatChecker(), new SlotCodeChecker(),
-            new LuminaireFormatChecker(), new FileNamingChecker()
+            new LuminaireFormatChecker(), new FileNamingChecker(),
+            new RoomNameChecker()
         };
         var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
             .FirstOrDefault(g => g.Count() > 1);

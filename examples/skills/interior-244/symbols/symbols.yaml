@@ -1,0 +1,23 @@
+# 表4.0.9 常用灯光照明图例（JGJ/T 244-2011，名称逐字，17类）。
+# 来源链：MinerU vlm 重转（图像分析启用）整表栅格裁切 → 逐类目视核对（2026-11-21）→
+# 矢量重建 DXF（近似几何，非精确描摹；证据裁切在 standards-src/_reparse/jgj244/legend-crops/，gitignored）。
+# 变体：01 周圈8小圆/05 粗基线/06 双头三头/07 长方形/14 双管多管 未单独建块（描述注记）。
+# class Lighting；跨文档符号导入仍 deferred（spec §12）——文件已就绪待导入能力。
+symbols:
+  - { name: 艺术吊灯, file: luminaire-01.dxf, class: Lighting, description: "圆+中心十字伸出+四斜向短tick（主变体）；变体b=圆周8小圆各带十字" }
+  - { name: 吸顶灯, file: luminaire-02.dxf, class: Lighting, description: "双同心圆+中心十字伸出" }
+  - { name: 筒灯, file: luminaire-03.dxf, class: Lighting, description: "小圆+十字贯穿" }
+  - { name: 射灯, file: luminaire-04.dxf, class: Lighting, description: "小圆+十字+右向带箭头射线" }
+  - { name: 轨道射灯, file: luminaire-05.dxf, class: Lighting, description: "轨道横线+3圆+各向上箭头（主变体）；变体b=粗基线承托" }
+  - { name: 格栅射灯, file: luminaire-06.dxf, class: Lighting, description: "矩形+内圆+向上箭头（单头）；双头=2圆2箭头/三头=3圆3箭头" }
+  - { name: 格栅荧光灯, file: luminaire-07.dxf, class: Lighting, description: "正方形+内3×3格栅（主变体）；长方形=横向三格格栅" }
+  - { name: 暗藏灯带, file: luminaire-08.dxf, class: Lighting, description: "水平虚线" }
+  - { name: 壁灯, file: luminaire-09.dxf, class: Lighting, description: "圆+水平直径线伸出+右上象限涂黑（矢量以密集竖线近似填充）" }
+  - { name: 台灯, file: luminaire-10.dxf, class: Lighting, description: "圆+内下小圆+顶部开口V形两线" }
+  - { name: 落地灯, file: luminaire-11.dxf, class: Lighting, description: "圆+内V形check+顶部外斜两线" }
+  - { name: 水下灯, file: luminaire-12.dxf, class: Lighting, description: "圆+十字贯穿+两侧波浪线（折线近似）" }
+  - { name: 踏步灯, file: luminaire-13.dxf, class: Lighting, description: "顶横杠+矩形+内下半圆弧+竖直中心线贯穿" }
+  - { name: 荧光灯, file: luminaire-14.dxf, class: Lighting, description: "单管横线+两端竖tick（主变体）；双管/多管=平行2/3线" }
+  - { name: 投光灯, file: luminaire-15.dxf, class: Lighting, description: "圆内×+左侧包弧" }
+  - { name: 泛光灯, file: luminaire-16.dxf, class: Lighting, description: "圆内×+左包弧+右上/右下发散两箭头" }
+  - { name: 聚光灯, file: luminaire-17.dxf, class: Lighting, description: "圆内×+左包弧+右向平行两箭头" }
