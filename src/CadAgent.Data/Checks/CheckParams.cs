@@ -27,6 +27,23 @@ internal static class CheckParams
     public static double Scalar(Dictionary<string, object> parameters, string key, double fallback) =>
         parameters.TryGetValue(key, out var raw) && raw is not null ? ToDouble(raw) : fallback;
 
+    /// <summary>
+    /// 2b-ii-b T4 增补：字符串白名单集合（layingMethods/layingPositions/luminaireMounts）。
+    /// 序列 null 元素跳过、空串剔除（不产生幻影成员）；缺键/null 按空集合
+    /// （无白名单→对应槽位不判，保守）；非序列类型抛 InvalidOperationException（与 ToDoubleList 一致）。
+    /// </summary>
+    public static HashSet<string> StringSet(Dictionary<string, object> parameters, string key) =>
+        parameters.TryGetValue(key, out var raw) && raw is not null
+            ? ToStringSet(raw)
+            : new HashSet<string>(StringComparer.Ordinal);
+
+    public static HashSet<string> ToStringSet(object value) => value is IEnumerable<object> seq
+        ? seq.Where(v => v is not null)
+            .Select(v => Convert.ToString(v, CultureInfo.InvariantCulture) ?? "")
+            .Where(s => s.Length > 0)
+            .ToHashSet(StringComparer.Ordinal)
+        : throw new InvalidOperationException($"期望字符串列表参数，实际类型 {value.GetType().Name}");
+
     public static bool AtLeast(double value, double min) => value >= min - Epsilon;
 
     public static bool InSeries(double value, double[] series) =>
