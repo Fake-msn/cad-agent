@@ -450,6 +450,13 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 几何导入不声明 ISemanticAware（语义确认仍 scan/map）；执行经 StepEngine 审计/快照管线无旁路。
 - **符号库 324+17 自此真正落图**；诚实边界：白名单四类之外类型拒收（随库扩展再扩）；重建克隆非精确 Clone（属性子集：几何+文本值/高/旋转）。
 
+**计划3i 完成（补核心 A：读回迭代环，2026-11-21 记录；全套件 546 测试含 3 真机）**：
+- **核心环闭合**："读图→决策→操作→**读回→迭代**"——执行成功后 post-summary+前后哈希 diff 喂回 LLM 验证（AgentOrchestrator.VerifyLoopAsync）；{"verdict":"ok"}→Executed；纠正计划→白名单+人工确认+执行→再验证；有界默认 2 轮（构造器可配）。
+- 诚实降级：验证轮预算耗尽→Executed+agent-verify budget-skipped 审计（执行已提交不谎报失败）；验证响应不可解析/纠正执行失败/轮耗尽→Escalated 交人工（不信任完成）；逐轮 llm-call（attempt 递增）+agent-verify（verdict/round）审计。
+- CLI seam：agent/repl 注入 postSummaryProvider=完整 DrawingSummarizer 摘要（Core 默认最小 diff 不引用 Data）；stdout 加 verificationRounds。
+- **契约变更 sanctioned**：Executed 含验证调用——旧一次性执行测试的 usage/Calls 断言同步更新；fake 客户端按 system prompt"验证智能体"识别验证请求回 verdict ok。
+- 缺口 B（活 CAD 执行）/C（生成式验证，并入 B 基准）→**计划 3j 待写**（用户裁定 A→B，C 并入 B）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm

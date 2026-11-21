@@ -55,4 +55,40 @@ public static class AgentPlanParser
                 throw new InvalidPlanException($"计划含未注册的步骤类型: {step.Kind}（可用: {string.Join(", ", allowedKinds.OrderBy(k => k, StringComparer.Ordinal))}）");
         return plan;
     }
+
+    /// <summary>
+    /// 3i 读回验证响应解析：{"verdict":"ok"}→(true,null)；纠正计划→(false,plan)；
+    /// 空 steps 计划视为 ok（无纠正动作）；verdict 非 ok 且无 steps→InvalidPlanException；
+    /// 不含 JSON→InvalidPlanException（验证不可解析不信任完成）。
+    /// </summary>
+    public static (bool Ok, StepPlan? Fix) ExtractVerification(string llmResponse, IReadOnlySet<string> allowedKinds)
+    {
+        string? json = ExtractJson(llmResponse);
+        if (json == null)
+            throw new InvalidPlanException("验证响应不含 JSON");
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("verdict", out var v)
+                && v.ValueKind == JsonValueKind.String
+                && string.Equals(v.GetString(), "ok", StringComparison.OrdinalIgnoreCase))
+                return (true, null);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidPlanException($"验证响应 JSON 非法: {ex.Message}");
+        }
+        var plan = ExtractPlan(llmResponse, allowedKinds);
+        return plan.Steps.Count == 0 ? (true, null) : (false, plan);
+    }
+
+    private static string? ExtractJson(string llmResponse)
+    {
+        var fence = FencePattern.Match(llmResponse);
+        if (fence.Success) return fence.Groups[1].Value.Trim();
+        int first = llmResponse.IndexOf('{');
+        int last = llmResponse.LastIndexOf('}');
+        return first >= 0 && last > first ? llmResponse[first..(last + 1)] : null;
+    }
 }

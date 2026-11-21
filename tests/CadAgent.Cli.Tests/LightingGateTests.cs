@@ -93,9 +93,7 @@ public class LightingGateTests : IDisposable
     private sealed class LightingPlanClient : ILlmClient
     {
         public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default) =>
-            Task.FromResult(new ChatResponse(
-                "{\"steps\":[{\"kind\":\"layout-lighting\",\"params\":{\"x\":0,\"y\":0,\"width\":6000,\"depth\":4000,\"spacing\":2000,\"block\":\"LUM\"}}]}",
-                new TokenUsage(10, 5), "m"));
+            Task.FromResult(new ChatResponse(request.Messages[0].Content.Contains("验证智能体") ? "{\"verdict\":\"ok\"}" : "{\"steps\":[{\"kind\":\"layout-lighting\",\"params\":{\"x\":0,\"y\":0,\"width\":6000,\"depth\":4000,\"spacing\":2000,\"block\":\"LUM\"}}]}", new TokenUsage(10, 5), "m"));
         public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<string>>(new[] { "m" });
     }

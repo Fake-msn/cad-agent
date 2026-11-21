@@ -38,6 +38,8 @@ public class OrchestrationE2ETests : IDisposable
         public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default)
         {
             Calls++;
+            if (request.Messages[0].Content.Contains("验证智能体"))
+                return Task.FromResult(new ChatResponse("{\"verdict\":\"ok\"}", new TokenUsage(20, 10), "m"));
             return Task.FromResult(new ChatResponse(
                 "{\"steps\":[{\"kind\":\"add-line\",\"params\":{\"x1\":0,\"y1\":0,\"x2\":10,\"y2\":10}}," +
                 "{\"kind\":\"add-text\",\"params\":{\"x\":5,\"y\":5,\"text\":\"标注\",\"height\":3.5}}]}",
@@ -62,7 +64,8 @@ public class OrchestrationE2ETests : IDisposable
         var (code1, out1, err1) = Run("agent", "--drawing", _drawing, "--intent", "画线并标注", "--yes");
         Assert.True(code1 == 0, $"code={code1} out={out1} err={err1}");
         Assert.Contains("Executed", out1);
-        Assert.Equal(1, client.Calls);
+        // 3i 契约变更（sanctioned）：计划+读回验证=2 次调用
+        Assert.Equal(2, client.Calls);
 
         // 图纸真的多了线+文字
         var session = CadAgent.Data.DrawingSession.Load(_drawing);
@@ -88,7 +91,7 @@ public class OrchestrationE2ETests : IDisposable
         var (code2, out2, _) = Run("agent", "--drawing", _drawing, "--intent", "再来一次", "--yes");
         Assert.Equal(0, code2);
         Assert.Contains("Executed", out2);
-        Assert.Equal(2, client.Calls);
+        Assert.Equal(4, client.Calls);
         using (var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db")))
         {
             Assert.Equal(1, audit.ReadAll().Count(r => r.Entry.Kind == "egress-consent"));
