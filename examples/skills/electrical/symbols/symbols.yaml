@@ -316,3 +316,20 @@ symbols:
   - { name: "水表", file: elec-306.dxf, class: Auxiliary, description: "Water meter；框+上隔线+WM" }
   - { name: "电动阀", file: elec-307.dxf, class: Auxiliary, description: "Electrical valve；圆M+领结阀体" }
   - { name: "电磁阀", file: elec-308.dxf, class: Auxiliary, description: "Solenoid valve；方框M+领结阀体" }
+# --- 表4.1.4 电气线路线型符号（3g W6）---
+  - { name: "信号线路", file: elec-309.dxf, class: Auxiliary, description: "Signal line；表4.1.4#1；形式1=实线+上标S；形式2=—S—嵌标" }
+  - { name: "控制线路", file: elec-310.dxf, class: Auxiliary, description: "Control line；表4.1.4#2；形式2=—C—" }
+  - { name: "应急照明线路", file: elec-311.dxf, class: Auxiliary, description: "Emergency lighting line；表4.1.4#3；形式2=—EL—" }
+  - { name: "保护接地线", file: elec-312.dxf, class: Auxiliary, description: "Protective earthing conductor；表4.1.4#4；形式2=—PE—" }
+  - { name: "接地线", file: elec-313.dxf, class: Auxiliary, description: "Earthing conductor；表4.1.4#5；形式2=—E—" }
+  - { name: "接闪线、接闪带、接闪网", file: elec-314.dxf, class: Auxiliary, description: "Air-termination line/strip/mesh；表4.1.4#6；形式2=—LP—" }
+  - { name: "电话线路", file: elec-315.dxf, class: Auxiliary, description: "Telephone line；表4.1.4#7；形式2=—TP—" }
+  - { name: "数据线路", file: elec-316.dxf, class: Auxiliary, description: "Data line；表4.1.4#8；形式2=—TD—" }
+  - { name: "有线电视线路", file: elec-317.dxf, class: Auxiliary, description: "Cable TV line；表4.1.4#9；形式2=—TV—" }
+  - { name: "广播线路", file: elec-318.dxf, class: Auxiliary, description: "Broadcast line；表4.1.4#10；形式2=—BC—" }
+  - { name: "视频线路", file: elec-319.dxf, class: Auxiliary, description: "Video line；表4.1.4#11；形式2=—V—" }
+  - { name: "综合布线系统线路", file: elec-320.dxf, class: Auxiliary, description: "Generic cabling system line；表4.1.4#12；形式2=—GCS—" }
+  - { name: "消防电话线路", file: elec-321.dxf, class: Auxiliary, description: "Fire telephone line；表4.1.4#13；形式2=—F—" }
+  - { name: "50V以下的电源线路", file: elec-322.dxf, class: Auxiliary, description: "Power line below 50V；表4.1.4#14；形式2=—D—" }
+  - { name: "直流电源线路", file: elec-323.dxf, class: Auxiliary, description: "DC power line；表4.1.4#15；形式2=—DC—" }
+  - { name: "光缆", file: elec-324.dxf, class: Auxiliary, description: "Optical cable, general symbol；表4.1.4#16；横线+中圆斜杠（∅近似）" }
