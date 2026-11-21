@@ -1,0 +1,31 @@
+# GB/T 50786-2012 表4.1.2 强电图样常用图形符号（164 编号，本文件随批增长）。
+# 来源链：MinerU vlm 重转整表裁切 → 逐页目视转录（忽略水印）→ 矢量重建 DXF（近似几何，非精确描摹）。
+# 形式2/复合简化在 description 注记；证据裁切 standards-src/_reparse/gb50786/images/（gitignored）。
+symbols:
+  - { name: "导线组", file: elec-001.dxf, class: Auxiliary, description: "Group of connections；形式1=三斜tick示导线数；形式2=斜杠+数字3" }
+  - { name: "软连接", file: elec-002.dxf, class: Auxiliary, description: "Flexible connection" }
+  - { name: "端子", file: elec-003.dxf, class: Auxiliary, description: "Terminal" }
+  - { name: "端子板", file: elec-004.dxf, class: Auxiliary, description: "Terminal strip" }
+  - { name: "T型连接", file: elec-005.dxf, class: Auxiliary, description: "T-connection；形式2=连接点加实心圆点" }
+  - { name: "导线的双T连接", file: elec-006.dxf, class: Auxiliary, description: "Double junction of conductors；形式2=十字加实心圆点" }
+  - { name: "跨接连接", file: elec-007.dxf, class: Auxiliary, description: "Bridge connection；跨越连接，无连接点" }
+  - { name: "阴接触件、插座", file: elec-008.dxf, class: Auxiliary, description: "Contact, female；连接器阴接触件" }
+  - { name: "阳接触件、插头", file: elec-009.dxf, class: Auxiliary, description: "Contact, male；连接器阳接触件，涂黑块以密集线近似" }
+  - { name: "定向连接", file: elec-010.dxf, class: Auxiliary, description: "Directed connection" }
+  - { name: "进入线束的点", file: elec-011.dxf, class: Auxiliary, description: "Point of access to a bundle；不适用于表示电气连接" }
+  - { name: "电阻器", file: elec-012.dxf, class: Auxiliary, description: "Resistor, general symbol" }
+  - { name: "电容器", file: elec-013.dxf, class: Auxiliary, description: "Capacitor, general symbol" }
+  - { name: "半导体二极管", file: elec-014.dxf, class: Auxiliary, description: "Semiconductor diode, general symbol" }
+  - { name: "发光二极管", file: elec-015.dxf, class: Lighting, description: "Light emitting diode (LED)；一般符号+外射双箭头" }
+  - { name: "双向三极闸流晶体管", file: elec-016.dxf, class: Auxiliary, description: "Bidirectional triode thyristor; Triac；反并联双三角+门极；简化主要素" }
+  - { name: "PNP晶体管", file: elec-017.dxf, class: Auxiliary, description: "PNP transistor；发射极箭头指向基极竖bar" }
+  - { name: "电机", file: elec-018.dxf, class: Auxiliary, description: "Machine, general symbol；圆内实心五角星（见注2）" }
+  - { name: "三相笼式感应电动机", file: elec-019.dxf, class: Auxiliary, description: "Three-phase cage induction motor；M 3~ + 三上引线" }
+  - { name: "单相笼式感应电动机", file: elec-020.dxf, class: Auxiliary, description: "Single-phase cage induction motor；M 1~ + 二上引线+二右引线（绕组分相端子）" }
+  - { name: "三相绕线式转子感应电动机", file: elec-021.dxf, class: Auxiliary, description: "Induction motor, three-phase, with wound rotor；双圆+M 3~+三上三下引线" }
+  - { name: "双绕组变压器", file: elec-022.dxf, class: Auxiliary, description: "Transformer with two windings, general symbol；形式1=双圆相交+上下引线；形式2=绕组scallop可示瞬时极性" }
+  - { name: "绕组间有屏蔽的双绕组变压器", file: elec-023.dxf, class: Auxiliary, description: "Transformer with two windings and screen；双圆+屏蔽横线+带tick引线" }
+  - { name: "一个绕组上有中间抽头的变压器", file: elec-024.dxf, class: Auxiliary, description: "Transformer with center tap on one winding；双圆+中心抽头右引线" }
+  - { name: "星形—三角形连接的三相变压器", file: elec-025.dxf, class: Auxiliary, description: "Three-phase transformer, connection star-delta；上圆Y下圆三角" }
+  - { name: "具有4个抽头的星形—星形连接的三相变压器", file: elec-026.dxf, class: Auxiliary, description: "Three-phase transformer with four taps, connection star-star；双圆各Y+抽头数4注记+实心点" }
+  - { name: "单相变压器组成的三相变压器", file: elec-027.dxf, class: Auxiliary, description: "Three-phase bank of single-phase transformers, connection star-delta；星形—三角形连接；右侧Y/3/三角注记列" }
