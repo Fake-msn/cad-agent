@@ -92,7 +92,7 @@ public class LightingLabelE2ETests : IDisposable
         public string Plan { get; set; } =
             "{\"steps\":[{\"kind\":\"layout-lighting\",\"params\":{\"x\":0,\"y\":0,\"width\":6000,\"depth\":4000,\"spacing\":2000,\"block\":\"LUM\",\"layer\":\"E-LITE\"}}]}";
         public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default) =>
-            Task.FromResult(new ChatResponse(Plan, new TokenUsage(20, 8), "m"));
+            Task.FromResult(new ChatResponse(request.Messages[0].Content.Contains("验证智能体") ? "{\"verdict\":\"ok\"}" : Plan, new TokenUsage(20, 8), "m"));
         public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<string>>(new[] { "m" });
     }

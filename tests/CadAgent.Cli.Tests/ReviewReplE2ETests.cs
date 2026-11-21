@@ -45,9 +45,7 @@ public class ReviewReplE2ETests : IDisposable
     private sealed class PlanClient : ILlmClient
     {
         public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default) =>
-            Task.FromResult(new ChatResponse(
-                "{\"steps\":[{\"kind\":\"add-line\",\"params\":{\"x1\":0,\"y1\":0,\"x2\":8,\"y2\":8}}]}",
-                new TokenUsage(5, 3), "m"));
+            Task.FromResult(new ChatResponse(request.Messages[0].Content.Contains("验证智能体") ? "{\"verdict\":\"ok\"}" : "{\"steps\":[{\"kind\":\"add-line\",\"params\":{\"x1\":0,\"y1\":0,\"x2\":8,\"y2\":8}}]}", new TokenUsage(5, 3), "m"));
         public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<string>>(new[] { "m" });
     }

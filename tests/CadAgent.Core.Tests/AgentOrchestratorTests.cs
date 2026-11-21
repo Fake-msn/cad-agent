@@ -90,7 +90,9 @@ public class AgentOrchestratorTests : IDisposable
             confirmPlan: _ => true, confirmCloudEgress: () => true);
         Assert.Equal(OrchestrationStatus.Executed, result.Status);
         Assert.NotNull(result.TxId);
-        Assert.Equal(15, result.TotalUsage!.PromptTokens + result.TotalUsage.CompletionTokens);
+        // 3i 契约变更（sanctioned）：Executed 含读回验证调用（计划15+验证15）
+        Assert.Equal(30, result.TotalUsage!.PromptTokens + result.TotalUsage.CompletionTokens);
+        Assert.Equal(1, result.VerificationRounds);
         var all = _audit.ReadAll();
         Assert.Contains(all, r => r.Entry.Kind == "llm-call");
         Assert.Contains(all, r => r.Entry.Kind == "agent-run");
@@ -142,9 +144,11 @@ public class AgentOrchestratorTests : IDisposable
         var result = await Make(client).RunAsync("意图", "摘要", _session, "s1", Kinds, "",
             confirmPlan: _ => true, confirmCloudEgress: () => true);
         Assert.Equal(OrchestrationStatus.Executed, result.Status);
-        Assert.Equal(2, client.Requests.Count);
+        // 3i 契约变更（sanctioned）：重规划成功后亦进读回验证环（3 次 LLM 调用）
+        Assert.Equal(3, client.Requests.Count);
         Assert.Contains("模拟执行失败", client.Requests[1].Messages[^1].Content);
-        Assert.Equal(2, _audit.ReadAll().Count(r => r.Entry.Kind == "llm-call"));
+        Assert.Equal(3, _audit.ReadAll().Count(r => r.Entry.Kind == "llm-call"));
+        Assert.Equal(1, result.VerificationRounds);
     }
 
     [Fact]
