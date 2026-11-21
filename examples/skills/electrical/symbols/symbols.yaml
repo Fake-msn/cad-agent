@@ -113,3 +113,34 @@ symbols:
   - { name: "手孔", file: elec-109.dxf, class: Auxiliary, description: "Hand hole for underground chamber；矩形+中竖线穿横线" }
   - { name: "电缆梯架、托盘和槽盒线路", file: elec-110.dxf, class: Auxiliary, description: "Line of cable ladder, cable tray, cable trunking；三平行实线+端tick" }
   - { name: "电缆沟线路", file: elec-111.dxf, class: Auxiliary, description: "Line of cable trench；三平行虚线+端tick" }
+  - { name: "中性线", file: elec-112.dxf, class: Auxiliary, description: "Neutral conductor；横线+斜tick+实心点" }
+  - { name: "保护线", file: elec-113.dxf, class: Auxiliary, description: "Protective conductor；横线+斜tick+顶bar" }
+  - { name: "保护线和中性线共用线", file: elec-114.dxf, class: Auxiliary, description: "Combined protective and neutral conductor；PEN：点+bar" }
+  - { name: "带中性线和保护线的三相线路", file: elec-115.dxf, class: Auxiliary, description: "Three-phase wiring with neutral conductor and protective conductor；三斜tick+N点+PE bar" }
+  - { name: "向上配线或布线", file: elec-116.dxf, class: Auxiliary, description: "Wiring going upwards；横线+端点+右上箭头" }
+  - { name: "向下配线或布线", file: elec-117.dxf, class: Auxiliary, description: "Wiring going downwards；横线+端点+左下箭头" }
+  - { name: "垂直通过配线或布线", file: elec-118.dxf, class: Auxiliary, description: "Wiring passing through vertically；点+双向斜箭头" }
+  - { name: "由下引来配线或布线", file: elec-119.dxf, class: Auxiliary, description: "Wiring from the below；横线+端点+左下引来箭头" }
+  - { name: "由上引来配线或布线", file: elec-120.dxf, class: Auxiliary, description: "Wiring from the above；横线+端点+右上引来箭头" }
+  - { name: "连接盒、接线盒", file: elec-121.dxf, class: Auxiliary, description: "Connection box; Junction box；圆+实心点" }
+  - { name: "电动机启动器", file: elec-122.dxf, class: Auxiliary, description: "Motor starter, general symbol；方框+顶V口；形式2=MS框（平面图）" }
+  - { name: "星-三角启动器", file: elec-123.dxf, class: Auxiliary, description: "Star-delta-starter；122+内三角；形式2=SDS框" }
+  - { name: "带自耦变压器的启动器", file: elec-124.dxf, class: Auxiliary, description: "Starter with auto-transformer；122+内圆+波浪穿线；形式2=SAT框" }
+  - { name: "带可控硅整流器的调节-启动器", file: elec-125.dxf, class: Auxiliary, description: "Starter-regulator with thyristors；122+内二极管+斜箭头；形式2=ST框" }
+  - { name: "电源插座、插孔", file: elec-126.dxf, class: Auxiliary, description: "Socket outlet (power), general symbol; Receptacle outlet (power), general symbol；不带保护极；半圆+顶茎（见注6）" }
+  - { name: "多个电源插座", file: elec-127.dxf, class: Auxiliary, description: "Multiple socket outlet (power)；符号表示三个插座；形式1=弧+斜杠+3；形式2=三叠弧+竖线" }
+  - { name: "带保护极的电源插座", file: elec-128.dxf, class: Auxiliary, description: "Socket outlet (power) with protective contact；半圆+顶横bar+茎" }
+  - { name: "单相二、三极电源插座", file: elec-129.dxf, class: Auxiliary, description: "Single phase two or three poles socket outlet (power)；半圆+横bar+竖茎" }
+  - { name: "带保护极和单极开关的电源插座", file: elec-130.dxf, class: Auxiliary, description: "Socket outlet (power) with protection pole and single pole switch；128+开关折角" }
+  - { name: "带隔离变压器的电源插座", file: elec-131.dxf, class: Auxiliary, description: "Socket outlet (power) with isolating transformer；剃须插座：半圆+上圆+茎" }
+  - { name: "开关(单联单控)", file: elec-132.dxf, class: Auxiliary, description: "Switch, general symbol；平面图一般符号：圆+斜blade" }
+  - { name: "双联单控开关", file: elec-133.dxf, class: Auxiliary, description: "Double single control switch；blade双tick" }
+  - { name: "三联单控开关", file: elec-134.dxf, class: Auxiliary, description: "Triple single control switch；blade三tick" }
+  - { name: "n联单控开关", file: elec-135.dxf, class: Auxiliary, description: "n single control switch, n>3；圆+blade单tick+n注记" }
+  - { name: "带指示灯的开关", file: elec-136.dxf, class: Auxiliary, description: "Switch with pilot light；带指示灯的单联单控开关：圆内×" }
+  - { name: "带指示灯双联单控开关", file: elec-137.dxf, class: Auxiliary, description: "Double single control switch with pilot light；136+双tick" }
+  - { name: "带指示灯的三联单控开关", file: elec-138.dxf, class: Auxiliary, description: "Triple single control switch with pilot light；136+三tick" }
+  - { name: "带指示灯的n联单控开关", file: elec-139.dxf, class: Auxiliary, description: "n single control switch with pilot light, n>3；136+单tick+n" }
+  - { name: "单极限时开关", file: elec-140.dxf, class: Auxiliary, description: "Period limiting switch, single pole；圆+折blade+t注记" }
+  - { name: "单极声光控开关", file: elec-141.dxf, class: Auxiliary, description: "Sound and light control switch, single pole；圆+折blade+SL注记" }
+  - { name: "双控单极开关", file: elec-142.dxf, class: Auxiliary, description: "Two-way single pole switch；圆+上下双折blade" }
