@@ -40,18 +40,10 @@ public sealed record RenderItem(
 public static class RenderModelBuilder
 {
     /// <summary>
-    /// Standard AutoCAD color index (ACI) table, first 10 entries (0=ByBlock/black,
-    /// 1 red, 2 yellow, 3 green, 4 cyan, 5 blue, 6 magenta, 7 white, 8 dark gray,
-    /// 9 light gray). Indices outside the table fall back to white (brief convention;
-    /// ACadSharp's Color.GetIndexRGB covers the full 256-entry table if richer
-    /// fidelity is needed later).
+    /// Fallback for ACI indices outside the valid 0..255 range (brief convention).
+    /// Valid indices are resolved through ACadSharp's Color.GetIndexRGB, which
+    /// covers the full 256-entry standard AutoCAD color index table.
     /// </summary>
-    private static readonly uint[] AciRgb =
-    {
-        0x000000, 0xFF0000, 0xFFFF00, 0x00FF00, 0x00FFFF,
-        0x0000FF, 0xFF00FF, 0xFFFFFF, 0x808080, 0xC0C0C0
-    };
-
     private const uint FallbackWhite = 0xFFFFFF;
 
     /// <summary>
@@ -244,7 +236,11 @@ public static class RenderModelBuilder
     {
         if (c.IsTrueColor) return ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
         int idx = c.Index;
-        return idx >= 0 && idx < AciRgb.Length ? AciRgb[idx] : FallbackWhite;
+        if (idx < 0 || idx > 255) return FallbackWhite;
+        // ACadSharp Color.GetIndexRGB(byte) returns ReadOnlySpan<byte> {R,G,B}
+        // from the full 256-entry standard ACI table (verified via package XML docs).
+        ReadOnlySpan<byte> rgb = Color.GetIndexRGB((byte)idx);
+        return ((uint)rgb[0] << 16) | ((uint)rgb[1] << 8) | rgb[2];
     }
 
     private static double ToDeg(double radians) => radians * 180.0 / Math.PI;

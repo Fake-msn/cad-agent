@@ -216,6 +216,40 @@ public class RenderModelTests
     }
 
     [Fact]
+    public void Build_Insert_NonUniformScaleWithRotation_PinsRSOrder()
+    {
+        // Pins transform order R*S (scale BEFORE rotation) with a case where the
+        // two orders differ: sx=2, sy=1, rotation=90deg, block line endpoint (1,1),
+        // basePoint (0,0), insertPoint (0,0).
+        //   R*S: S(1,1)=(2,1); R90(2,1)=(-1,2)  <- required
+        //   S*R: R90(1,1)=(-1,1); S(-1,1)=(-2,1) <- must NOT happen
+        // Uniform-scale rotation tests cannot distinguish the orders (commutative);
+        // this non-uniform + rotation combination can.
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("RS");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 1, 0) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block)
+            {
+                InsertPoint = new XYZ(0, 0, 0),
+                XScale = 2,
+                YScale = 1,
+                ZScale = 1,
+                Rotation = Math.PI / 2
+            });
+        }, s =>
+        {
+            var line = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Line, line.Kind);
+            Assert.Equal(0, line.Points[0].X, 3);
+            Assert.Equal(0, line.Points[0].Y, 3);
+            Assert.Equal(-1, line.Points[1].X, 3);  // R*S -> (-1,2), NOT S*R -> (-2,1)
+            Assert.Equal(2, line.Points[1].Y, 3);
+        });
+    }
+
+    [Fact]
     public void Build_Insert_BlockBasePointSubtracted()
     {
         WithSession(doc =>
@@ -372,6 +406,23 @@ public class RenderModelTests
             Assert.Equal(0xFF0000u, items[0].ColorRgb);  // RED layer, ACI 1
             Assert.Equal(0xFFFFFFu, items[1].ColorRgb);  // layer "0", ACI 7 -> white (non-zero)
             Assert.NotEqual(0u, items[2].ColorRgb);
+        });
+    }
+
+    [Fact]
+    public void Build_LayerIndexColor30_FullAciTableOrange()
+    {
+        // ACI 30 is outside the old first-10 table (used to fall back to white);
+        // Color.GetIndexRGB covers the full 256-entry ACI table -> orange 0xFF7F00.
+        WithSession(doc =>
+        {
+            var orange = new Layer("ORANGE") { Color = new Color(30) };
+            doc.Layers.Add(orange);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 1, 0), Layer = orange });
+        }, s =>
+        {
+            var line = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(0xFF7F00u, line.ColorRgb);
         });
     }
 
