@@ -130,7 +130,9 @@ public class MainWindowHeadlessTests
         {
             window.Layers!.Isolate("BETA");
             Dispatcher.UIThread.RunJobs();
-            Button showAll = window.GetVisualDescendants().OfType<Button>().First(b => b is not CheckBox);
+            // T6 起底部还有 Diff ToggleButton（也是 Button）——按内容精确定位 Show all。
+            Button showAll = window.GetVisualDescendants().OfType<Button>()
+                .First(b => b is not CheckBox && (b.Content as string) == "Show all");
             showAll.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
             Assert.Empty(window.Canvas!.HiddenLayers);

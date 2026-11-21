@@ -25,6 +25,11 @@ public sealed class DrawingCanvas : Control
     private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
     private static readonly Pen SelectionPen = new(Brushes.Yellow, 2);
 
+    // T6 对比叠加：before 灰幽灵 / added 绿 / removed 红 + 删除线。
+    private static readonly Pen DiffBeforePen = new(new SolidColorBrush(Color.FromRgb(0x80, 0x80, 0x80)), 1);
+    private static readonly Pen DiffAddedPen = new(new SolidColorBrush(Color.FromRgb(0x00, 0xC8, 0x53)), 2);
+    private static readonly Pen DiffRemovedPen = new(new SolidColorBrush(Color.FromRgb(0xE5, 0x39, 0x35)), 1);
+
     private readonly Dictionary<uint, Pen> _penCache = new();
     private readonly Dictionary<uint, IBrush> _brushCache = new();
     private bool _panning;
@@ -65,15 +70,54 @@ public sealed class DrawingCanvas : Control
         base.Render(context);
         context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
 
+        // T6 对比叠加：先画快照 before 幽灵层（灰；removed 红 + 删除线），
+        // 再画当前 after 层（added 绿优先于选中黄，其余正常/高亮）。
+        DiffOverlay? diff = ViewModel.DiffOverlay;
+        if (diff is not null)
+        {
+            foreach (RenderItem before in diff.BeforeItems)
+            {
+                bool removed = before.Handle.Length > 0 && diff.RemovedHandles.Contains(before.Handle);
+                Pen pen = removed ? DiffRemovedPen : DiffBeforePen;
+                DrawItem(context, before, pen);
+                if (removed) DrawStrike(context, before);
+            }
+        }
+
         RenderItem? selected = ViewModel.SelectedItem;
         foreach (RenderItem item in ViewModel.VisibleItems)
         {
             // T5：问题定位高亮集命中的图元与单选选中同样施加高亮（按真实句柄匹配）。
             bool highlight = IsSelected(item, selected)
                 || (item.Handle.Length > 0 && ViewModel.HighlightedHandles.Contains(item.Handle));
-            Pen pen = highlight ? SelectionPen : GetPen(item.ColorRgb);
+            bool added = diff is not null && item.Handle.Length > 0 && diff.AddedHandles.Contains(item.Handle);
+            Pen pen = added ? DiffAddedPen : highlight ? SelectionPen : GetPen(item.ColorRgb);
             DrawItem(context, item, pen);
         }
+    }
+
+    /// <summary>
+    /// T6 removed 删除线：文本按字盒中线横划（宽=字符数×字高×0.6，与命中盒一致）；
+    /// 其余图元沿包围盒对角线划叉（单线图元退化为端点连线时仍可见斜划）。
+    /// </summary>
+    private void DrawStrike(DrawingContext context, RenderItem item)
+    {
+        if (item.Kind == RenderKind.Text)
+        {
+            if (item.Points.Count < 1 || string.IsNullOrEmpty(item.Text)) return;
+            double fontSize = item.TextHeight * ViewModel.Scale;
+            double width = item.Text.Length * item.TextHeight * 0.6 * ViewModel.Scale;
+            if (fontSize <= 0 || width <= 0) return;
+            Point p = ScreenPoint(item.Points[0]);
+            double y = p.Y - fontSize / 2; // 基线上方半字高 ≈ 字形中线
+            context.DrawLine(DiffRemovedPen, new Point(p.X, y), new Point(p.X + width, y));
+            return;
+        }
+        (double minX, double minY, double maxX, double maxY) = RenderModelBuilder.Bounds(new[] { item });
+        if (maxX - minX <= 1e-12 && maxY - minY <= 1e-12) return; // 退化点无删除线
+        Point a = ScreenPoint((minX, minY));
+        Point b = ScreenPoint((maxX, maxY));
+        context.DrawLine(DiffRemovedPen, a, b);
     }
 
     /// <summary>T4：按真实 DXF 句柄匹配选中图元（句柄唯一）；空句柄退化为引用比较。</summary>
@@ -121,10 +165,11 @@ public sealed class DrawingCanvas : Control
                 double fontSize = item.TextHeight * ViewModel.Scale;
                 if (fontSize < MinTextFontSize) break; // 亚像素文本不可读，跳过
                 bool isSelected = ReferenceEquals(pen, SelectionPen);
+                // pen.Brush：普通 pen 即图元色；选中黄 / T6 对比灰/绿/红随 pen 传递。
                 var text = new FormattedText(
                     item.Text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
                     new Typeface(FontFamily.Default, FontStyle.Normal, isSelected ? FontWeight.Bold : FontWeight.Normal),
-                    fontSize, isSelected ? SelectionPen.Brush! : GetBrush(item.ColorRgb));
+                    fontSize, pen.Brush!);
                 Point p = ScreenPoint(item.Points[0]);
                 // CAD 插入点=基线左端；FormattedText 以左上角定位 → 上移文本高度。
                 context.DrawText(text, new Point(p.X, p.Y - text.Height));

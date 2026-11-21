@@ -3,6 +3,28 @@ using CadAgent.View.Rendering;
 namespace CadAgent.View.ViewModels;
 
 /// <summary>
+/// 事务对比叠加层（计划4 T6）：快照 before 图元 + 增/删句柄集。
+/// 画布渲染分支：before 灰幽灵；removed 红 + 删除线；after 正常，added 绿
+/// （added 绿优先于选中黄——对比模式下差异可视化优先）。纯数据，无 Avalonia 依赖。
+/// </summary>
+public sealed class DiffOverlay
+{
+    public DiffOverlay(IReadOnlyList<RenderItem> beforeItems,
+        IReadOnlyList<string> addedHandles, IReadOnlyList<string> removedHandles)
+    {
+        BeforeItems = beforeItems;
+        AddedHandles = new HashSet<string>(addedHandles.Where(h => h.Length > 0), StringComparer.Ordinal);
+        RemovedHandles = new HashSet<string>(removedHandles.Where(h => h.Length > 0), StringComparer.Ordinal);
+    }
+
+    /// <summary>快照（事务前）渲染图元——只读展示，不进入 Items/命中/选择。</summary>
+    public IReadOnlyList<RenderItem> BeforeItems { get; }
+
+    public IReadOnlyCollection<string> AddedHandles { get; }
+    public IReadOnlyCollection<string> RemovedHandles { get; }
+}
+
+/// <summary>
 /// 画布视图模型（计划4 T3）：纯 C#，无 Avalonia 依赖，可单测。
 /// 变换约定（brief）：
 /// screenX = (worldX-minX)*baseScale*Zoom + panX + offsetX；
@@ -67,6 +89,19 @@ public sealed class CanvasViewModel
 
     /// <summary>过滤 HiddenLayers 后的可见图元。</summary>
     public IEnumerable<RenderItem> VisibleItems => Items.Where(i => !HiddenLayers.Contains(i.Layer));
+
+    /// <summary>
+    /// 事务对比叠加层（T6）：null=关闭。SetDiffOverlay 设置并触发重绘；
+    /// 只读回放——不改变 Items/选择/视图变换。
+    /// </summary>
+    public DiffOverlay? DiffOverlay { get; private set; }
+
+    /// <summary>设置/清除对比叠加层（T6），触发一次重绘。</summary>
+    public void SetDiffOverlay(DiffOverlay? overlay)
+    {
+        DiffOverlay = overlay;
+        RenderInvalidated?.Invoke();
+    }
 
     /// <summary>视图状态变化（Fit/ZoomAt/PanBy/Select/Invalidate）→ 画布 InvalidateVisual。</summary>
     public event Action? RenderInvalidated;
