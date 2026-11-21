@@ -184,3 +184,42 @@ symbols:
   - { name: "信息插座", file: elec-179.dxf, class: Auxiliary, description: "Information socket；形式1=圆TO；形式2=开口框+茎TO" }
   - { name: "n孔信息插座", file: elec-180.dxf, class: Auxiliary, description: "Information socket with many outlets；n为孔数：TO单孔/2TO二孔；圆nTO" }
   - { name: "多用户信息插座", file: elec-181.dxf, class: Auxiliary, description: "Information socket for many users；圆+MUTO 文字" }
+# --- 表4.1.3-2 火灾自动报警系统（3g W2）---
+  - { name: "火灾报警控制器", file: elec-182.dxf, class: Auxiliary, description: "Fire alarm device；框+★（见注1：★可以C集中型/Z区域型/G通用/S可燃气体字母代替）" }
+  - { name: "控制和指示设备", file: elec-183.dxf, class: Auxiliary, description: "control and indicating equipment；框+★（见注2：★可以RS/RD/I/O/P/T/SI/M/SB/D/FI/CRT/FPA/MT/BO/TP字母代替）" }
+  - { name: "感温火灾探测器(点型)", file: elec-184.dxf, class: Auxiliary, description: "Heat detector (point type)；方框+点+上茎" }
+  - { name: "感温火灾探测器(点型、非地址码型)", file: elec-185.dxf, class: Auxiliary, description: "Heat detector (point, non-addressable)；184+N" }
+  - { name: "感温火灾探测器(点型、防爆型)", file: elec-186.dxf, class: Auxiliary, description: "Heat detector (point, explosion-proof)；184+EX" }
+  - { name: "感温火灾探测器(线型)", file: elec-187.dxf, class: Auxiliary, description: "Heat detector (line type)；方框+点+左右引线" }
+  - { name: "感烟火灾探测器(点型)", file: elec-188.dxf, class: Auxiliary, description: "Smoke detector (point type)；方框+S形" }
+  - { name: "感烟火灾探测器(点型、非地址码型)", file: elec-189.dxf, class: Auxiliary, description: "Smoke detector (point, non-addressable)；188+N" }
+  - { name: "感烟火灾探测器(点型、防爆型)", file: elec-190.dxf, class: Auxiliary, description: "Smoke detector (point, explosion-proof)；188+EX" }
+  - { name: "感光火灾探测器(点型)", file: elec-191.dxf, class: Auxiliary, description: "Optical flame detector (point type)；方框+∧" }
+  - { name: "红外感光火灾探测器(点型)", file: elec-192.dxf, class: Auxiliary, description: "Infra-red optical flame detector (point type)；方框+三角" }
+  - { name: "紫外感光火灾探测器(点型)", file: elec-193.dxf, class: Auxiliary, description: "UV optical flame detector (point type)；方框+∧+竖茎" }
+  - { name: "可燃气体探测器(点型)", file: elec-194.dxf, class: Auxiliary, description: "Combustible gas detector (point type)；方框+点+放射线" }
+  - { name: "复合式感光感烟火灾探测器(点型)", file: elec-195.dxf, class: Auxiliary, description: "Combination type optical flame and smoke detector (point type)；方框竖分：左∧右S" }
+  - { name: "复合式感光感温火灾探测器(点型)", file: elec-196.dxf, class: Auxiliary, description: "Combination type optical flame and heat detector (point type)；方框竖分：左∧右点茎" }
+  - { name: "线型差定温火灾探测器", file: elec-197.dxf, class: Auxiliary, description: "Line-type rate-of-rise and fixed temperature detector；方框+±+左右引线" }
+  - { name: "光束感烟火灾探测器(线型发射部分)", file: elec-198.dxf, class: Auxiliary, description: "Beam smoke detector (line type, the part of launch)；方框S+左引线+右外箭头" }
+  - { name: "光束感烟火灾探测器(线型接受部分)", file: elec-199.dxf, class: Auxiliary, description: "Beam smoke detector (line type, the part of reception)；方框S+左内箭头+右引线" }
+  - { name: "复合式感烟感温火灾探测器(点型)", file: elec-200.dxf, class: Auxiliary, description: "Combination type smoke and heat detector (point type)；方框竖分：左S右点" }
+  - { name: "光束感烟感温火灾探测器(线型发射部分)", file: elec-201.dxf, class: Auxiliary, description: "Infra-red beam line-type smoke and heat detector (emitter)；方框S|点+右外箭头" }
+  - { name: "光束感烟感温火灾探测器(线型接受部分)", file: elec-202.dxf, class: Auxiliary, description: "Infra-red beam line-type smoke and heat detector (receiver)；方框S|点+左内箭头" }
+  - { name: "手动火灾报警按钮", file: elec-203.dxf, class: Auxiliary, description: "Manual fire alarm call point；方框+Y漏斗" }
+  - { name: "消火栓启泵按钮", file: elec-204.dxf, class: Auxiliary, description: "Pump starting button in hydrant；203+下点" }
+  - { name: "火警电话", file: elec-205.dxf, class: Auxiliary, description: "Alarm telephone；方框+内听筒弧" }
+  - { name: "火警电话插孔", file: elec-206.dxf, class: Auxiliary, description: "Jack for two-way telephone；对讲电话插孔：双圆+点" }
+  - { name: "带火警电话插孔的手动报警按钮", file: elec-207.dxf, class: Auxiliary, description: "Manual station with jack for two-way telephone；方框+左Y+右◎" }
+  - { name: "火警电铃", file: elec-208.dxf, class: Auxiliary, description: "Fire bell；梯形+内铃弧" }
+  - { name: "火灾发声警报器", file: elec-209.dxf, class: Auxiliary, description: "Audible fire alarm；梯形+内喇叭+波弧" }
+  - { name: "火灾光警报器", file: elec-210.dxf, class: Auxiliary, description: "Visual fire alarm；梯形+内灯泡" }
+  - { name: "火灾声光警报器", file: elec-211.dxf, class: Auxiliary, description: "Audible and visual fire alarm；梯形竖分：左喇叭右灯" }
+  - { name: "火灾应急广播扬声器", file: elec-212.dxf, class: Auxiliary, description: "Fire emergency broadcast loud-speaker；梯形+内音箱锥" }
+  - { name: "水流指示器(组)", file: elec-213.dxf, class: Auxiliary, description: "Flow switch；形式1=方框+斜箭头；形式2=圆L" }
+  - { name: "压力开关", file: elec-214.dxf, class: Auxiliary, description: "Pressure switch；方框+P" }
+  - { name: "70℃动作的常开防火阀", file: elec-215.dxf, class: Auxiliary, description: "Normally open fire damper, 70℃ close；竖框+Θ+70℃" }
+  - { name: "280℃动作的常开排烟阀", file: elec-216.dxf, class: Auxiliary, description: "Normally open exhaust valve, 280℃ close；竖框+Θ+280℃" }
+  - { name: "280℃动作的常闭排烟阀", file: elec-217.dxf, class: Auxiliary, description: "Normally closed exhaust valve, 280℃ open；竖框+Φ+280℃" }
+  - { name: "加压送风口", file: elec-218.dxf, class: Auxiliary, description: "Pressurized air outlet；竖框+Φ" }
+  - { name: "排烟口", file: elec-219.dxf, class: Auxiliary, description: "Exhaust port；竖框+Φ+SE" }

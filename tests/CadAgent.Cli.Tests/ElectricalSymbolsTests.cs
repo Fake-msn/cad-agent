@@ -6,7 +6,7 @@ namespace CadAgent.Cli.Tests;
 /// </summary>
 public class ElectricalSymbolsTests
 {
-    private const int Expected = 181;
+    private const int Expected = 219;
 
     private static string RepoRoot()
     {
