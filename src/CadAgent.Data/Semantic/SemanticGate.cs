@@ -6,7 +6,7 @@ namespace CadAgent.Data.Semantic;
 /// 真实语义闸口：每个所需类须在叠加层存在 Confidence≥minConfidence 的标注，
 /// 否则拒绝并提示先 semantic scan/map 确认（诚实降级：低置信推断不放行）。
 /// </summary>
-public sealed class SemanticGate : ISemanticGate
+public sealed class SemanticGate : ISemanticContextGate
 {
     private readonly SemanticOverlay _overlay;
     private readonly double _minConfidence;
@@ -23,6 +23,20 @@ public sealed class SemanticGate : ISemanticGate
             if (!_overlay.Annotations.Any(a => a.Class == cls && a.Confidence >= _minConfidence))
                 return new GateDecision(false,
                     $"缺少语义 {cls}（需置信度≥{_minConfidence}，请先 semantic scan/map 确认）");
+        return new GateDecision(true, "");
+    }
+
+    /// <summary>
+    /// 实体级（计划 3a）：目标句柄须携带每个所需类的 ≥minConfidence 标注（禁触区精确到实体）；
+    /// targetHandle null → 操作级退化。
+    /// </summary>
+    public GateDecision CheckContext(IReadOnlyList<SemanticClass> required, string? targetHandle)
+    {
+        if (targetHandle == null) return Check(required);
+        foreach (var cls in required)
+            if (!_overlay.Annotations.Any(a => a.TargetHandle == targetHandle && a.Class == cls && a.Confidence >= _minConfidence))
+                return new GateDecision(false,
+                    $"实体 {targetHandle} 缺少语义 {cls}（需置信度≥{_minConfidence}，请先 semantic scan/map 确认）");
         return new GateDecision(true, "");
     }
 }

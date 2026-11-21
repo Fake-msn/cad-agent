@@ -42,10 +42,27 @@ public sealed class SqliteAuditStore : IAuditStore, IDisposable
 
     public AuditRecord Append(AuditEntry e)
     {
+        // 跨进程串行化（计划 3a）：BEGIN IMMEDIATE 提前取写锁 + BUSY/LOCKED 重试。
+        // 每实例锁保留（双保险）；重试间隔 50ms×attempt，最多 5 次。
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return AppendCore(e);
+            }
+            catch (SqliteException ex) when ((ex.SqliteErrorCode == 5 || ex.SqliteErrorCode == 6) && attempt < 5)
+            {
+                Thread.Sleep(50 * attempt);
+            }
+        }
+    }
+
+    private AuditRecord AppendCore(AuditEntry e)
+    {
         lock (_writeLock)
         {
             using var conn = Open();
-            using var tx = conn.BeginTransaction();
+            using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
             long seq;
             string prevHash;
             using (var head = conn.CreateCommand())
