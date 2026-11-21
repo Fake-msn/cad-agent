@@ -223,3 +223,25 @@ symbols:
   - { name: "280℃动作的常闭排烟阀", file: elec-217.dxf, class: Auxiliary, description: "Normally closed exhaust valve, 280℃ open；竖框+Φ+280℃" }
   - { name: "加压送风口", file: elec-218.dxf, class: Auxiliary, description: "Pressurized air outlet；竖框+Φ" }
   - { name: "排烟口", file: elec-219.dxf, class: Auxiliary, description: "Exhaust port；竖框+Φ+SE" }
+# --- 表4.1.3-3 有线电视及卫星电视接收系统（3g W3）---
+  - { name: "天线", file: elec-220.dxf, class: Auxiliary, description: "Antenna, general symbol；V+茎" }
+  - { name: "带馈线的抛物面天线", file: elec-221.dxf, class: Auxiliary, description: "Antenna, parabolic, with feeder；抛物弧+馈线盒+横线" }
+  - { name: "有本地天线引入的前端", file: elec-222.dxf, class: Auxiliary, description: "Head end with local antenna；圆+内▽+下茎（一条馈线支路）" }
+  - { name: "无本地天线引入的前端", file: elec-223.dxf, class: Auxiliary, description: "Head end without local antenna；圆+内▽+上下茎（一入一出）" }
+  - { name: "放大器、中继器", file: elec-224.dxf, class: Auxiliary, description: "Amplifier, general symbol；方框+三角指向传输方向" }
+  - { name: "双向分配放大器", file: elec-225.dxf, class: Auxiliary, description: "Dual way distribution amplifier；双三角对向" }
+  - { name: "均衡器", file: elec-226.dxf, class: Auxiliary, description: "Equalizer；横线+菱形" }
+  - { name: "可变均衡器", file: elec-227.dxf, class: Auxiliary, description: "Variable equalizer；226+斜箭头" }
+  - { name: "固定衰减器", file: elec-228.dxf, class: Auxiliary, description: "Attenuator, fixed loss；方框A+引线" }
+  - { name: "可变衰减器", file: elec-229.dxf, class: Auxiliary, description: "Attenuator, variable loss；228+斜箭头" }
+  - { name: "解调器", file: elec-230.dxf, class: Auxiliary, description: "Demodulator；框+三角+左箭头；形式2=DEM框" }
+  - { name: "调制器", file: elec-231.dxf, class: Auxiliary, description: "Modulator；框+三角+右箭头；形式2=MO框" }
+  - { name: "调制解调器", file: elec-232.dxf, class: Auxiliary, description: "Modem；框+三角+双向箭头；形式2=MOD框" }
+  - { name: "分配器(两路)", file: elec-233.dxf, class: Auxiliary, description: "Splitter, general symbol (2-way)；半圆+两出路" }
+  - { name: "分配器(三路)", file: elec-234.dxf, class: Auxiliary, description: "Splitter, general symbol (3-way)；半圆+三出路" }
+  - { name: "分配器(四路)", file: elec-235.dxf, class: Auxiliary, description: "Splitter, general symbol (4-way)；半圆+四出路" }
+  - { name: "分支器(一个信号分支)", file: elec-236.dxf, class: Auxiliary, description: "Tap-off, general symbol (1 branch)；横线+圆+下茎" }
+  - { name: "分支器(两个信号分支)", file: elec-237.dxf, class: Auxiliary, description: "Tap-off, general symbol (2 branches)；横线+圆+上下茎" }
+  - { name: "分支器(四个信号分支)", file: elec-238.dxf, class: Auxiliary, description: "Tap-off, general symbol (4 branches)；横线+圆+双上双下茎" }
+  - { name: "混合器(两路)", file: elec-239.dxf, class: Auxiliary, description: "Combiner, general symbol (2-way)；信息流左到右：左入两路+半圆+右出" }
+  - { name: "电视插座", file: elec-240.dxf, class: Auxiliary, description: "Television socket；形式1=圆TV；形式2=开口框+茎TV" }
