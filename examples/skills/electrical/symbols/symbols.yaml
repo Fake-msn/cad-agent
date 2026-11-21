@@ -166,3 +166,21 @@ symbols:
   - { name: "投光灯", file: elec-162.dxf, class: Lighting, description: "Projector, general symbol；圆内×+左包弧" }
   - { name: "聚光灯", file: elec-163.dxf, class: Lighting, description: "Spot light；162+右向平行双箭头" }
   - { name: "风扇、风机", file: elec-164.dxf, class: Auxiliary, description: "Fan；方框+圆+双叶弧" }
+# --- 表4.1.3-1 通信及综合布线系统（3g W1）---
+  - { name: "总配线架(柜)", file: elec-165.dxf, class: Auxiliary, description: "Main distribution frame；MDF 框" }
+  - { name: "光纤配线架(柜)", file: elec-166.dxf, class: Auxiliary, description: "Fiber distribution frame；ODF 框" }
+  - { name: "中间配线架(柜)", file: elec-167.dxf, class: Auxiliary, description: "Mid distribution frame；IDF 框" }
+  - { name: "建筑物配线架(柜)(有跳线连接)", file: elec-168.dxf, class: Auxiliary, description: "Building distributor (jumpered)；双竖框+X跳线+BD；形式2=单X+竖线" }
+  - { name: "楼层配线架(柜)(有跳线连接)", file: elec-169.dxf, class: Auxiliary, description: "Floor distributor (jumpered)；双竖框+X跳线+FD；形式2=单X+竖线" }
+  - { name: "建筑群配线架(柜)", file: elec-170.dxf, class: Auxiliary, description: "Campus distributor；CD 框" }
+  - { name: "建筑物配线架(柜)", file: elec-171.dxf, class: Auxiliary, description: "Building distributor；BD 框" }
+  - { name: "楼层配线架(柜)", file: elec-172.dxf, class: Auxiliary, description: "Floor distributor；FD 框" }
+  - { name: "集线器", file: elec-173.dxf, class: Auxiliary, description: "Hub；HUB 框" }
+  - { name: "交换机", file: elec-174.dxf, class: Auxiliary, description: "Switchboard；SW 框" }
+  - { name: "集合点", file: elec-175.dxf, class: Auxiliary, description: "Consolidation point；椭圆CP（圆近似）" }
+  - { name: "光纤连接盘", file: elec-176.dxf, class: Auxiliary, description: "Line interface unit；LIU 框" }
+  - { name: "电话插座", file: elec-177.dxf, class: Auxiliary, description: "Telephone socket；形式1=圆TP；形式2=开口框+茎TP" }
+  - { name: "数据插座", file: elec-178.dxf, class: Auxiliary, description: "Data socket；形式1=圆TD；形式2=开口框+茎TD" }
+  - { name: "信息插座", file: elec-179.dxf, class: Auxiliary, description: "Information socket；形式1=圆TO；形式2=开口框+茎TO" }
+  - { name: "n孔信息插座", file: elec-180.dxf, class: Auxiliary, description: "Information socket with many outlets；n为孔数：TO单孔/2TO二孔；圆nTO" }
+  - { name: "多用户信息插座", file: elec-181.dxf, class: Auxiliary, description: "Information socket for many users；圆+MUTO 文字" }
