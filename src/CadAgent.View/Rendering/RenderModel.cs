@@ -1,3 +1,4 @@
+using System.Globalization;
 using ACadSharp;
 using ACadSharp.Entities;
 using CadAgent.Data;
@@ -16,6 +17,10 @@ public enum RenderKind { Line, Circle, Arc, Polyline, Text }
 /// polylines repeat the first vertex at the end). Text: Points[0]=insertion point,
 /// plus <see cref="Text"/>, <see cref="TextHeight"/> and <see cref="RotationDeg"/>.
 /// <see cref="ColorRgb"/> is 0xRRGGBB (ByLayer resolved to the layer color).
+/// <see cref="Handle"/> is the source entity's DXF handle as the repo-wide decimal
+/// string (e.Handle.ToString(), same convention as audit/semantic TargetHandle).
+/// Insert-expanded children carry the parent Insert's handle plus a child-index
+/// suffix "{insertHandle}:{childIndex}" (nested: "{top}:{i}:{j}") for uniqueness.
 /// </summary>
 public sealed record RenderItem(
     RenderKind Kind,
@@ -24,7 +29,8 @@ public sealed record RenderItem(
     uint ColorRgb,
     string? Text,
     double TextHeight,
-    double RotationDeg);
+    double RotationDeg,
+    string Handle);
 
 /// <summary>
 /// DrawingSession -> flat render-item list (plan 4 task 2). Pure logic: no Avalonia
@@ -113,17 +119,21 @@ public static class RenderModelBuilder
 
     private static void Append(
         Entity e, List<RenderItem> items, ref int skipped,
-        Affine t, double rotationDeg, double heightScale, uint? byBlockColor, int depth)
+        Affine t, double rotationDeg, double heightScale, uint? byBlockColor, int depth,
+        string? handle = null)
     {
         string layer = e.Layer?.Name ?? "0";
         uint color = ResolveColor(e, byBlockColor);
+        // Top-level entities use their own DXF handle; insert children receive the
+        // parent insert's handle + child-index suffix (computed in the Insert case).
+        handle ??= e.Handle.ToString(CultureInfo.InvariantCulture);
 
         switch (e)
         {
             case Line line:
                 items.Add(new RenderItem(RenderKind.Line,
                     new[] { t.Apply(line.StartPoint.X, line.StartPoint.Y), t.Apply(line.EndPoint.X, line.EndPoint.Y) },
-                    layer, color, null, 0, 0));
+                    layer, color, null, 0, 0, handle));
                 break;
 
             // Arc : Circle — must precede the Circle case.
@@ -133,7 +143,7 @@ public static class RenderModelBuilder
                 double r = arc.Radius * t.RadiusScale;
                 items.Add(new RenderItem(RenderKind.Arc,
                     new[] { (cx, cy), (r, NormDeg(ToDeg(arc.StartAngle) + rotationDeg)), (NormDeg(ToDeg(arc.EndAngle) + rotationDeg), 0.0) },
-                    layer, color, null, 0, 0));
+                    layer, color, null, 0, 0, handle));
                 break;
             }
 
@@ -143,7 +153,7 @@ public static class RenderModelBuilder
                 double r = circle.Radius * t.RadiusScale;
                 items.Add(new RenderItem(RenderKind.Circle,
                     new[] { (cx, cy), (r, 0.0) },
-                    layer, color, null, 0, 0));
+                    layer, color, null, 0, 0, handle));
                 break;
             }
 
@@ -154,7 +164,7 @@ public static class RenderModelBuilder
                 if (lw.IsClosed && pts.Count > 0) pts.Add(pts[0]);
                 // Bulge (arc segments) approximated as straight chords — canvas task
                 // may tessellate later.
-                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0));
+                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle));
                 break;
             }
 
@@ -163,14 +173,14 @@ public static class RenderModelBuilder
                 var pts = new List<(double X, double Y)>(p2.Vertices.Count + 1);
                 foreach (Vertex2D v in p2.Vertices) pts.Add(t.Apply(v.Location.X, v.Location.Y));
                 if (p2.IsClosed && pts.Count > 0) pts.Add(pts[0]);
-                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0));
+                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle));
                 break;
             }
 
             case TextEntity text:
                 items.Add(new RenderItem(RenderKind.Text,
                     new[] { t.Apply(text.InsertPoint.X, text.InsertPoint.Y) },
-                    layer, color, text.Value, text.Height * heightScale, NormDeg(ToDeg(text.Rotation) + rotationDeg)));
+                    layer, color, text.Value, text.Height * heightScale, NormDeg(ToDeg(text.Rotation) + rotationDeg), handle));
                 break;
 
             case MText mtext:
@@ -178,7 +188,7 @@ public static class RenderModelBuilder
                 // is read-only (derived from the direction vector).
                 items.Add(new RenderItem(RenderKind.Text,
                     new[] { t.Apply(mtext.InsertPoint.X, mtext.InsertPoint.Y) },
-                    layer, color, mtext.PlainText, mtext.Height * heightScale, NormDeg(ToDeg(mtext.Rotation) + rotationDeg)));
+                    layer, color, mtext.PlainText, mtext.Height * heightScale, NormDeg(ToDeg(mtext.Rotation) + rotationDeg), handle));
                 break;
 
             case Insert insert:
@@ -191,8 +201,13 @@ public static class RenderModelBuilder
                 Affine composed = t.Compose(InsertTransform(insert));
                 double rot = rotationDeg + ToDeg(insert.Rotation);
                 double hs = heightScale * Math.Abs(insert.YScale);
+                int childIndex = 0;
                 foreach (Entity child in insert.Block.Entities)
-                    Append(child, items, ref skipped, composed, rot, hs, color, depth + 1);
+                {
+                    Append(child, items, ref skipped, composed, rot, hs, color, depth + 1,
+                        handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture));
+                    childIndex++;
+                }
                 break;
             }
 

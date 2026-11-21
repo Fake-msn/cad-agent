@@ -93,6 +93,7 @@ public class RenderModelTests
                 Assert.Equal(b[i].Text, a[i].Text);
                 Assert.Equal(b[i].TextHeight, a[i].TextHeight);
                 Assert.Equal(b[i].RotationDeg, a[i].RotationDeg);
+                Assert.Equal(b[i].Handle, a[i].Handle);
             }
         });
     }
@@ -533,6 +534,70 @@ public class RenderModelTests
     }
 
     [Fact]
+    public void Build_Handle_TopLevelEntities_MatchDxfEntityHandles()
+    {
+        // T4 contract extension: Handle is the source entity's DXF handle as the
+        // repo-wide decimal string (e.Handle.ToString(), same convention as the
+        // audit/semantic TargetHandle strings).
+        WithSession(Mixed, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            var entities = s.Doc.Entities.ToList();
+            // Mixed: line, circle, arc, lwpolyline, text are 1:1 with items[0..4].
+            for (int i = 0; i < 5; i++)
+                Assert.Equal(entities[i].Handle.ToString(), items[i].Handle);
+        });
+    }
+
+    [Fact]
+    public void Build_Handle_InsertChildren_ParentHandlePlusIndex_Unique()
+    {
+        // Two inserts of the same 2-line block -> 4 items. Children carry the
+        // parent Insert's handle + ":childIndex" so handles stay unique even
+        // though the block entities are shared.
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("B2");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 1, 0), EndPoint = new XYZ(1, 1, 0) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(0, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+            doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(10, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            Assert.Equal(4, items.Count);
+            var inserts = s.Doc.Entities.OfType<Insert>().ToList();
+            string h0 = inserts[0].Handle.ToString(), h1 = inserts[1].Handle.ToString();
+            Assert.Equal($"{h0}:0", items[0].Handle);
+            Assert.Equal($"{h0}:1", items[1].Handle);
+            Assert.Equal($"{h1}:0", items[2].Handle);
+            Assert.Equal($"{h1}:1", items[3].Handle);
+            Assert.Equal(4, items.Select(i => i.Handle).Distinct().Count());
+        });
+    }
+
+    [Fact]
+    public void Build_Handle_NestedInsert_ChainedIndicesUnique()
+    {
+        // Top Insert(NEST) -> Insert(SYM) -> line: handle chains the child
+        // indices "{top}:{i}:{j}" so nested expansions stay unique.
+        WithSession(doc =>
+        {
+            AddSymBlock(doc);
+            var nest = new BlockRecord("NEST");
+            nest.Entities.Add(new Insert(doc.BlockRecords["SYM"]) { InsertPoint = new XYZ(5, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+            doc.BlockRecords.Add(nest);
+            doc.Entities.Add(new Insert(nest) { InsertPoint = new XYZ(0, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            string top = s.Doc.Entities.Single().Handle.ToString();
+            Assert.Equal($"{top}:0:0", item.Handle);
+        });
+    }
+
+    [Fact]
     public void Bounds_MixedFixture_IncludesCircleAndArcExtents()
     {
         WithSession(Mixed, s =>
@@ -566,7 +631,7 @@ public class RenderModelTests
         // be center +/- radius, not the raw point list hull.
         var items = new[]
         {
-            new RenderItem(RenderKind.Circle, new (double, double)[] { (10, 10), (2, 0) }, "0", 0xFFFFFF, null, 0, 0)
+            new RenderItem(RenderKind.Circle, new (double, double)[] { (10, 10), (2, 0) }, "0", 0xFFFFFF, null, 0, 0, "C1")
         };
         Assert.Equal((8.0, 8.0, 12.0, 12.0), RenderModelBuilder.Bounds(items));
     }

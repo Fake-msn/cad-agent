@@ -1,4 +1,3 @@
-using System.Globalization;
 using CadAgent.View.Rendering;
 
 namespace CadAgent.View.ViewModels;
@@ -12,8 +11,8 @@ namespace CadAgent.View.ViewModels;
 /// ZoomAt：光标下的世界点在缩放前后保持不动（锚点不变式，调整 Pan 实现）。
 /// PanBy 接收屏幕空间增量（+dy 内容向下移动）；Pan 本身存储未翻转的内容偏移。
 /// HitTest 容差为世界单位；只命中可见图层，返回 Items 原始索引（首个命中）。
-/// 选择：RenderItem（T2 契约）无 Handle 字段，SelectedHandle 暂为选中索引的
-/// 不变文化字符串；T4 如需真实 DXF 句柄再扩展渲染模型。
+/// 选择（T4）：SelectedHandle 为选中图元的真实 DXF 句柄字符串（RenderItem.Handle，
+/// Insert 展开子图元为 "{insertHandle}:{childIndex}"），画布按句柄匹配高亮。
 /// </summary>
 public sealed class CanvasViewModel
 {
@@ -51,10 +50,10 @@ public sealed class CanvasViewModel
     /// <summary>选中图元索引；null=无选择。</summary>
     public int? SelectedIndex { get; private set; }
 
-    /// <summary>选中索引的字符串形式（RenderItem 无 Handle 字段，见类注释）。</summary>
-    public string? SelectedHandle => SelectedIndex?.ToString(CultureInfo.InvariantCulture);
+    /// <summary>选中图元的真实 DXF 句柄（RenderItem.Handle）；null=无选择。</summary>
+    public string? SelectedHandle => SelectedItem?.Handle;
 
-    /// <summary>选中图元（画布高亮用引用比较）。</summary>
+    /// <summary>选中图元（画布按 Handle 匹配高亮）。</summary>
     public RenderItem? SelectedItem => SelectedIndex is int i && i >= 0 && i < Items.Count ? Items[i] : null;
 
     /// <summary>过滤 HiddenLayers 后的可见图元。</summary>

@@ -13,20 +13,20 @@ namespace CadAgent.View.Tests;
 /// </summary>
 public class CanvasViewModelTests
 {
-    private static RenderItem Line(double x0, double y0, double x1, double y1, string layer = "0") =>
-        new(RenderKind.Line, new[] { (x0, y0), (x1, y1) }, layer, 0xFFFFFF, null, 0, 0);
+    private static RenderItem Line(double x0, double y0, double x1, double y1, string layer = "0", string handle = "1") =>
+        new(RenderKind.Line, new[] { (x0, y0), (x1, y1) }, layer, 0xFFFFFF, null, 0, 0, handle);
 
-    private static RenderItem Circle(double cx, double cy, double r, string layer = "0") =>
-        new(RenderKind.Circle, new[] { (cx, cy), (r, 0.0) }, layer, 0xFFFFFF, null, 0, 0);
+    private static RenderItem Circle(double cx, double cy, double r, string layer = "0", string handle = "1") =>
+        new(RenderKind.Circle, new[] { (cx, cy), (r, 0.0) }, layer, 0xFFFFFF, null, 0, 0, handle);
 
-    private static RenderItem Arc(double cx, double cy, double r, double startDeg, double endDeg, string layer = "0") =>
-        new(RenderKind.Arc, new[] { (cx, cy), (r, startDeg), (endDeg, 0.0) }, layer, 0xFFFFFF, null, 0, 0);
+    private static RenderItem Arc(double cx, double cy, double r, double startDeg, double endDeg, string layer = "0", string handle = "1") =>
+        new(RenderKind.Arc, new[] { (cx, cy), (r, startDeg), (endDeg, 0.0) }, layer, 0xFFFFFF, null, 0, 0, handle);
 
     private static RenderItem Poly(params (double X, double Y)[] pts) =>
-        new(RenderKind.Polyline, pts, "0", 0xFFFFFF, null, 0, 0);
+        new(RenderKind.Polyline, pts, "0", 0xFFFFFF, null, 0, 0, "1");
 
-    private static RenderItem Text(string value, double x, double y, double height, string layer = "0") =>
-        new(RenderKind.Text, new[] { (x, y) }, layer, 0xFFFFFF, value, height, 0);
+    private static RenderItem Text(string value, double x, double y, double height, string layer = "0", string handle = "1") =>
+        new(RenderKind.Text, new[] { (x, y) }, layer, 0xFFFFFF, value, height, 0, handle);
 
     private static CanvasViewModel Fitted(out (double X, double Y) anchorWorld)
     {
@@ -354,13 +354,14 @@ public class CanvasViewModelTests
     [Fact]
     public void Select_SetsIndexHandleAndItem_RaisesEvent()
     {
-        var items = new[] { Line(0, 0, 1, 1), Line(2, 2, 3, 3) };
+        // T4: SelectedHandle is the item's real DXF handle string, not the index.
+        var items = new[] { Line(0, 0, 1, 1, handle: "A1"), Line(2, 2, 3, 3, handle: "B2") };
         var vm = new CanvasViewModel(items);
         int raised = 0;
         vm.RenderInvalidated += () => raised++;
         vm.Select(1);
         Assert.Equal(1, vm.SelectedIndex);
-        Assert.Equal("1", vm.SelectedHandle);
+        Assert.Equal("B2", vm.SelectedHandle);
         Assert.Same(items[1], vm.SelectedItem);
         Assert.Equal(1, raised);
     }

@@ -22,16 +22,16 @@ namespace CadAgent.View.Tests;
 /// </summary>
 public class CanvasHeadlessTests
 {
-    private static RenderItem Line(double x0, double y0, double x1, double y1) =>
-        new(RenderKind.Line, new[] { (x0, y0), (x1, y1) }, "0", 0xFFFFFF, null, 0, 0);
+    private static RenderItem Line(double x0, double y0, double x1, double y1, string handle = "1") =>
+        new(RenderKind.Line, new[] { (x0, y0), (x1, y1) }, "0", 0xFFFFFF, null, 0, 0, handle);
 
     private static IReadOnlyList<RenderItem> MixedItems() => new[]
     {
         Line(0, 0, 10, 20),
-        new RenderItem(RenderKind.Circle, new[] { (5.0, 5.0), (3.0, 0.0) }, "0", 0xFF0000, null, 0, 0),
-        new RenderItem(RenderKind.Arc, new[] { (1.0, 2.0), (4.0, 30.0), (120.0, 0.0) }, "0", 0x00FF00, null, 0, 0),
-        new RenderItem(RenderKind.Polyline, new[] { (0.0, 0.0), (4.0, 0.0), (4.0, 3.0) }, "0", 0x00FFFF, null, 0, 0),
-        new RenderItem(RenderKind.Text, new[] { (7.0, 8.0) }, "0", 0xFFFFFF, "HELLO", 2.5, 0),
+        new RenderItem(RenderKind.Circle, new[] { (5.0, 5.0), (3.0, 0.0) }, "0", 0xFF0000, null, 0, 0, "2"),
+        new RenderItem(RenderKind.Arc, new[] { (1.0, 2.0), (4.0, 30.0), (120.0, 0.0) }, "0", 0x00FF00, null, 0, 0, "3"),
+        new RenderItem(RenderKind.Polyline, new[] { (0.0, 0.0), (4.0, 0.0), (4.0, 3.0) }, "0", 0x00FFFF, null, 0, 0, "4"),
+        new RenderItem(RenderKind.Text, new[] { (7.0, 8.0) }, "0", 0xFFFFFF, "HELLO", 2.5, 0, "5"),
     };
 
     private static (Window Window, DrawingCanvas Canvas, CanvasViewModel Vm) Show(
@@ -67,7 +67,7 @@ public class CanvasHeadlessTests
         // viewport -> scale 90, center screen (100,100). The 45 deg arc point is
         // world (+0.707,+0.707) -> screen UPPER right; the mirrored lower-left
         // point must stay background (Y flip + CounterClockwise sweep pinned).
-        var arc = new RenderItem(RenderKind.Arc, new[] { (0.0, 0.0), (1.0, 0.0), (90.0, 0.0) }, "0", 0xFFFFFF, null, 0, 0);
+        var arc = new RenderItem(RenderKind.Arc, new[] { (0.0, 0.0), (1.0, 0.0), (90.0, 0.0) }, "0", 0xFFFFFF, null, 0, 0, "A1");
         (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { arc }, 200, 200);
         try
         {
@@ -133,7 +133,7 @@ public class CanvasHeadlessTests
             window.MouseUp(onLine, MouseButton.Left);
             Dispatcher.UIThread.RunJobs();
             Assert.Equal(0, vm.SelectedIndex);
-            Assert.Equal("0", vm.SelectedHandle);
+            Assert.Equal("1", vm.SelectedHandle); // real handle string carried by the item (T4)
 
             var far = new Point(10, 10); // empty area
             window.MouseDown(far, MouseButton.Left);
@@ -152,7 +152,7 @@ public class CanvasHeadlessTests
         // screen point. Yellow highlight = high GREEN channel; red text on the
         // dark background keeps GREEN low. Probe 5x5 AA neighborhoods on a grid
         // across the glyph box (exact glyph metrics vary by font).
-        var text = new RenderItem(RenderKind.Text, new[] { (0.0, 0.0) }, "0", 0xFF0000, "MMMM", 100, 0);
+        var text = new RenderItem(RenderKind.Text, new[] { (0.0, 0.0) }, "0", 0xFF0000, "MMMM", 100, 0, "T1");
         (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { text });
         try
         {

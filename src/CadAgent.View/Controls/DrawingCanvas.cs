@@ -68,10 +68,15 @@ public sealed class DrawingCanvas : Control
         RenderItem? selected = ViewModel.SelectedItem;
         foreach (RenderItem item in ViewModel.VisibleItems)
         {
-            Pen pen = ReferenceEquals(item, selected) ? SelectionPen : GetPen(item.ColorRgb);
+            Pen pen = IsSelected(item, selected) ? SelectionPen : GetPen(item.ColorRgb);
             DrawItem(context, item, pen);
         }
     }
+
+    /// <summary>T4：按真实 DXF 句柄匹配选中图元（句柄唯一）；空句柄退化为引用比较。</summary>
+    private static bool IsSelected(RenderItem item, RenderItem? selected) =>
+        selected is not null
+        && ((selected.Handle.Length > 0 && item.Handle == selected.Handle) || ReferenceEquals(item, selected));
 
     private void DrawItem(DrawingContext context, RenderItem item, Pen pen)
     {
