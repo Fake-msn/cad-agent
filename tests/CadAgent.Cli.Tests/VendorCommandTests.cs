@@ -33,6 +33,13 @@ public class VendorCommandTests : IDisposable
 
     private sealed class UnverifiedRuntime : ICadRuntime
     {
+        public void AddLine(double x1, double y1, double x2, double y2, string? layer = null) => throw new NotSupportedException();
+        public void AddText(double x, double y, string text, double height, string? layer = null) => throw new NotSupportedException();
+        public void AddCircle(double x, double y, double radius, string? layer = null) => throw new NotSupportedException();
+        public void AddInsert(string blockName, double x, double y, double scale = 1, double rotation = 0, string? layer = null) => throw new NotSupportedException();
+        public void EnsureBlock(string blockName, IReadOnlyList<CadAgent.Core.Cad.BlockPrimitive> primitives) => throw new NotSupportedException();
+        public int EntityCount() => throw new NotSupportedException();
+
         public RuntimeInfo GetInfo() => new("AutoCAD", "2025", true);
         public void Open(string p) { }
         public void SaveAs(string p)

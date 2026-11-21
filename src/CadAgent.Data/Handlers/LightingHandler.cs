@@ -45,15 +45,12 @@ public sealed class LayoutLightingHandler : IStepHandler, ISemanticAware
             ? HandlerHelpers.ResolveLayer(s, lv.GetString()!)
             : null;
         string firstHandle = "";
-        for (double px = x + spacing / 2; px < x + width; px += spacing)
+        foreach (var (px, py) in GeometryKit.GridPoints(x, y, width, depth, spacing))
         {
-            for (double py = y + spacing / 2; py < y + depth; py += spacing)
-            {
-                var insert = new Insert(block) { InsertPoint = (XYZ)new XY(px, py) };
-                if (layer != null) insert.Layer = layer;
-                s.Doc.Entities.Add(insert);
-                if (firstHandle == "") firstHandle = insert.Handle.ToString();
-            }
+            var insert = new Insert(block) { InsertPoint = (XYZ)new XY(px, py) };
+            if (layer != null) insert.Layer = layer;
+            s.Doc.Entities.Add(insert);
+            if (firstHandle == "") firstHandle = insert.Handle.ToString();
         }
         return new StepResult(true, "", firstHandle);
     }

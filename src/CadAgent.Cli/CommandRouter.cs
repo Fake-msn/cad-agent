@@ -223,11 +223,25 @@ public static partial class CommandRouter
             ? new RulePackAuditDecorator(audit, ruleSet.RulePackVersion)
             : audit;
         var result = Engine(agentDir, engineAudit, semanticGate, null, SymbolImportHandler(args)).Run(plan, drawing, session);
+        string? liveOut = null;
         if (!result.Ok) drawing.Reload();
-        else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
+        else
+        {
+            RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
+            var live = LiveReplay(args, agentDir, session, audit, op, drawing, plan, LivePackages(args), stderr);
+            if (!live.Ok)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new
+                {
+                    txId = result.TxId, ok = false, stepsDone = result.StepsDone, error = live.Error
+                }, JsonOpts));
+                return 1;
+            }
+            liveOut = live.OutPath;
+        }
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
-            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
+            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error, liveOut
         }, JsonOpts));
         return result.Ok ? 0 : 1;
     }
@@ -358,6 +372,9 @@ public static partial class CommandRouter
                     return 0;
                 case CadAgent.Core.Audit.AnchorStatus.Missing:
                     stderr.WriteLine("警示: 外部锚未启用（anchor.json 缺失）");
+                    return 0;
+                case CadAgent.Core.Audit.AnchorStatus.Stale:
+                    stderr.WriteLine("警示: 外部锚滞后（db 超前锚，崩溃窗口尾记录无锚保护）；审计包 manifest 如实记 Stale");
                     return 0;
                 default:
                     stderr.WriteLine($"外部锚校验失败: {status}（尾截断或伪造）");

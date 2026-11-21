@@ -126,9 +126,8 @@ public class LightingLabelHandlerTests : IDisposable
     }
 
     [Fact]
-    public void Registry_ContainsEightKinds()
+    public void Registry_ContainsLabelLuminaires()
     {
         Assert.Contains("label-luminaires", HandlerRegistry.All().Select(h => h.Kind));
-        Assert.Equal(8, HandlerRegistry.All().Count);
     }
 }

@@ -120,8 +120,11 @@ public sealed class DrawingSession : IDrawingSession
 
     public void SaveWorking()
     {
-        using var fs = File.Create(SourcePath);
-        DxfWriter.Write(fs, Doc);
+        // 原子写（合并前审查 Critical#1）：先写 tmp 再 Move——写中途崩溃不损持久工作副本
+        // （spec §12 load-if-exists 持久状态；同 SemanticOverlay/LlmConfigStore/Anchor 模式）。
+        string tmp = SourcePath + ".tmp";
+        using (var fs = File.Create(tmp)) DxfWriter.Write(fs, Doc);
+        File.Move(tmp, SourcePath, overwrite: true);
     }
 
     public void Reload() => Doc = LoadDxf(SourcePath);

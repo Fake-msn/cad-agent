@@ -87,9 +87,114 @@ public sealed class ZwcadRuntime : ICadRuntime
 
     public void Restart() => Run(() =>
     {
+        // 先关文档再 Quit：带开文档 Quit 会被 ZWCAD 判异常终止→下次启动弹修复对话框
+        try { _doc?.Close(false); } catch { /* 崩溃后 Close 可能失败，忽略 */ }
+        _doc = null;
         try { _app?.Quit(); } catch { /* 崩溃后 Quit 可能失败，忽略 */ }
         _app = null;
-        _doc = null;
+    });
+
+    // 3j 绘制操作：ModelSpace dynamic COM（ZWCAD 镜像 AutoCAD API）；
+    // 点以 double[3] variant 数组传递；失败统一 CadRuntimeException。
+    private dynamic ModelSpace()
+    {
+        if (_doc == null) throw new CadRuntimeException("无打开的图纸");
+        return _doc.ModelSpace;
+    }
+
+    private static double[] Pt(double x, double y) => new[] { x, y, 0.0 };
+
+    /// <summary>图层幂等确保（镜像影子侧 ResolveLayer；厂商文档赋不存在层会 COM 报错）。</summary>
+    private void EnsureLayer(string layer)
+    {
+        try { dynamic l = _doc.Layers.Item(layer); if (l != null) return; }
+        catch { /* 不存在→创建 */ }
+        _doc.Layers.Add(layer);
+    }
+
+    private void SetLayer(dynamic e, string? layer)
+    {
+        if (layer == null) return;
+        EnsureLayer(layer);
+        e.Layer = layer;
+    }
+
+    public void AddLine(double x1, double y1, double x2, double y2, string? layer = null) => Run(() =>
+    {
+        try
+        {
+            dynamic e = ModelSpace().AddLine(Pt(x1, y1), Pt(x2, y2));
+            SetLayer(e, layer);
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"AddLine 失败: {ex.Message}", ex); }
+    });
+
+    public void AddText(double x, double y, string text, double height, string? layer = null) => Run(() =>
+    {
+        try
+        {
+            dynamic e = ModelSpace().AddText(text, Pt(x, y), height);
+            SetLayer(e, layer);
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"AddText 失败: {ex.Message}", ex); }
+    });
+
+    public void AddCircle(double x, double y, double radius, string? layer = null) => Run(() =>
+    {
+        try
+        {
+            dynamic e = ModelSpace().AddCircle(Pt(x, y), radius);
+            SetLayer(e, layer);
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"AddCircle 失败: {ex.Message}", ex); }
+    });
+
+    public void AddInsert(string blockName, double x, double y, double scale = 1, double rotation = 0, string? layer = null) => Run(() =>
+    {
+        try
+        {
+            dynamic e = ModelSpace().InsertBlock(Pt(x, y), blockName, scale, scale, scale, rotation);
+            SetLayer(e, layer);
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"AddInsert 失败: {ex.Message}", ex); }
+    });
+
+    public void EnsureBlock(string blockName, IReadOnlyList<BlockPrimitive> primitives) => Run(() =>
+    {
+        if (_doc == null) throw new CadRuntimeException("无打开的图纸");
+        try
+        {
+            dynamic blocks = _doc.Blocks;
+            bool exists = false;
+            try { dynamic b0 = blocks.Item(blockName); exists = b0 != null; }
+            catch { exists = false; }
+            if (exists) return;
+            // ZWCAD Blocks.Add 实测签名序=(origin, Name)（与 AutoCAD 文档序相反，真机探针核定）
+            dynamic block = blocks.Add(Pt(0, 0), blockName);
+            foreach (var p in primitives)
+            {
+                switch (p)
+                {
+                    case BlockLine l: block.AddLine(Pt(l.X1, l.Y1), Pt(l.X2, l.Y2)); break;
+                    case BlockCircle c: block.AddCircle(Pt(c.X, c.Y), c.Radius); break;
+                    case BlockText t: block.AddText(t.Value, Pt(t.X, t.Y), t.Height); break;
+                    default: throw new CadRuntimeException($"不支持的块基元: {p.GetType().Name}");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"EnsureBlock 失败: {ex.Message}", ex); }
+    });
+
+    public int EntityCount() => Run(() =>
+    {
+        try { return (int)ModelSpace().Count; }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"EntityCount 失败: {ex.Message}", ex); }
     });
 
     public void Dispose()
@@ -100,9 +205,10 @@ public sealed class ZwcadRuntime : ICadRuntime
         {
             Run(() =>
             {
+                try { _doc?.Close(false); } catch { /* 退出时忽略 */ }
+                _doc = null;
                 try { _app?.Quit(); } catch { /* 退出时忽略 */ }
                 _app = null;
-                _doc = null;
             });
         }
         catch { /* 队列已关闭等 */ }

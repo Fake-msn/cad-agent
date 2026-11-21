@@ -43,6 +43,13 @@ public static partial class CommandRouter
                 try { ProfileValidator.Validate(profile); }
                 catch (InvalidProfileException ex) { stderr.WriteLine(ex.Message); return 1; }
                 string? key = GetOption(args, "--key");
+                // 合并前审查 Warning#3：--key-stdin 从标准输入读密钥（不进 shell history/进程列表）；
+                // --key 保留便利路径（暴露面文档注记）。两者互斥时 stdin 优先。
+                if (args.Contains("--key-stdin"))
+                {
+                    key = Console.ReadLine();
+                    if (string.IsNullOrEmpty(key)) { stderr.WriteLine("--key-stdin 未读到密钥"); return 1; }
+                }
                 if (!string.IsNullOrEmpty(key)) protector.Store(name, key);
                 store.Upsert(profile);
                 store.Save();
