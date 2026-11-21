@@ -49,6 +49,9 @@ public static partial class CommandRouter
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
                 case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
                 case "llm": return Llm(args, positional, agentDir, session, stdout, stderr);
+                case "agent": return Agent(args, agentDir, session, stdout, stderr);
+                case "review": return Review(args, positional, agentDir, session, stdout, stderr);
+                case "repl": return ReplLoop(args, Console.In, stdout, stderr);
                 default: return Usage(stderr);
             }
         }
@@ -128,9 +131,10 @@ public static partial class CommandRouter
         return report.Level switch { GateLevel.Green => 0, GateLevel.Yellow => 2, _ => 3 };
     }
 
-    private static StepEngine Engine(string agentDir, IAuditStore audit, ISemanticGate? semanticGate = null) =>
+    private static StepEngine Engine(string agentDir, IAuditStore audit, ISemanticGate? semanticGate = null,
+        ModelUndoStack? undoStack = null) =>
         new(audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
-            Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate);
+            IdentityOverride ?? Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate, undoStack);
 
     /// <summary>
     /// run --skill 接线（2b-ii-b T8，加性）：入口先经 LoadRuleSet 校验包加载
