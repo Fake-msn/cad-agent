@@ -49,6 +49,15 @@ public class RuleLoaderTests
     }
 
     [Fact]
+    public void LoadYaml_MalformedYaml_InnerExceptionPreserved()
+    {
+        // 2b-ii-b Task 2：YamlException wrap 必须保留内层异常（SkillLoader 已把
+        // InvalidRuleException 作为 inner——链条至此完整）。
+        var ex = Assert.Throws<InvalidRuleException>(() => RuleLoader.LoadYaml("id: [unclosed"));
+        Assert.IsType<YamlDotNet.Core.YamlException>(ex.InnerException);
+    }
+
+    [Fact]
     public void LoadYaml_PendingOriginal_RejectedForNumericRules()
     {
         // pending-original 允许加载但引擎标记不可执行——加载层仅校验枚举合法性

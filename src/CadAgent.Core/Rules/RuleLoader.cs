@@ -27,7 +27,7 @@ public static class RuleLoader
         }
         catch (YamlException ex)
         {
-            throw new InvalidRuleException($"invalid rule YAML: {ex.Message}");
+            throw new InvalidRuleException($"invalid rule YAML: {ex.Message}", ex);
         }
 
         if (dto is null)

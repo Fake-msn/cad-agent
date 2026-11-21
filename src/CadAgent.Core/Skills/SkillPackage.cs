@@ -125,15 +125,23 @@ public static class SkillLoader
             return Array.Empty<SkillAlias>();
 
         var aliases = new List<SkillAlias>();
+        var seenLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in dto.Aliases)
         {
             if (string.IsNullOrWhiteSpace(entry.LayerName))
                 throw new InvalidSkillException("aliases.yaml: layerName must not be empty");
+            // 全数字串拒绝（2b-ii-b Task 2，strict parity）：Enum.TryParse 会把 "3"
+            // 解析为已定义数值——class 只接受枚举名（ignoreCase），先于 parse 拒绝。
             if (string.IsNullOrWhiteSpace(entry.Class) ||
+                entry.Class.All(char.IsAsciiDigit) ||
                 !Enum.TryParse<SemanticClass>(entry.Class, ignoreCase: true, out var parsed) ||
                 !Enum.IsDefined(parsed))
                 throw new InvalidSkillException(
                     $"aliases.yaml: class '{entry.Class}' is not a legal SemanticClass value");
+            // 包内 layerName 重复拒绝（OrdinalIgnoreCase，与 promote upsert 同口径）。
+            if (!seenLayers.Add(entry.LayerName!))
+                throw new InvalidSkillException(
+                    $"aliases.yaml: duplicate layerName '{entry.LayerName}' in skill package");
             aliases.Add(new SkillAlias(entry.LayerName!, parsed));
         }
         return aliases;

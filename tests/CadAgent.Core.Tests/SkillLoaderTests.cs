@@ -90,6 +90,25 @@ public class SkillLoaderTests : IDisposable
     }
 
     [Fact]
+    public void Load_NumericClassString_Throws()
+    {
+        // 2b-ii-b Task 2：全数字串（如 "3"）虽能被 Enum.TryParse 解析为已定义数值，
+        // 但 strict parity 要求拒绝——class 必须是枚举名（ignoreCase），不接受数字串。
+        WriteSkill(aliases: "aliases:\n  - layerName: W-墙\n    class: \"3\"\n");
+        var ex = Assert.Throws<InvalidSkillException>(() => SkillLoader.LoadDirectory(_dir));
+        Assert.Contains("class", ex.Message);
+    }
+
+    [Fact]
+    public void Load_DuplicateLayerName_CaseInsensitive_Throws()
+    {
+        // 2b-ii-b Task 2：包内 layerName OrdinalIgnoreCase 重复→拒绝并列出重复名。
+        WriteSkill(aliases: "aliases:\n  - layerName: W-墙\n    class: Wall\n  - layerName: w-墙\n    class: Door\n");
+        var ex = Assert.Throws<InvalidSkillException>(() => SkillLoader.LoadDirectory(_dir));
+        Assert.Contains("w-墙", ex.Message);
+    }
+
+    [Fact]
     public void Load_UnknownManifestKey_Throws()
     {
         WriteSkill();

@@ -207,12 +207,20 @@ public static partial class CommandRouter
         return 0;
     }
 
-    /// <summary>可重复选项的全部值（按出现序）——--skill 可重复（2b-ii-a T6）。</summary>
-    private static List<string> GetOptionValues(string[] args, string name)
+    /// <summary>
+    /// 可重复选项的全部值（按出现序）——--skill 可重复（2b-ii-a T6）。
+    /// 尾随无值选项（2b-ii-b Task 2）：stderr 非 null 时警告"忽略无值选项 {name}"
+    /// 并宽容继续（不 exit 1）；stderr 为 null（默认）保持旧静默行为。
+    /// </summary>
+    private static List<string> GetOptionValues(string[] args, string name, TextWriter? stderr = null)
     {
         var values = new List<string>();
-        for (int i = 0; i + 1 < args.Length; i++)
-            if (args[i] == name) values.Add(args[i + 1]);
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] != name) continue;
+            if (i + 1 < args.Length) values.Add(args[i + 1]);
+            else stderr?.WriteLine($"忽略无值选项 {name}");
+        }
         return values;
     }
 
@@ -223,9 +231,9 @@ public static partial class CommandRouter
     /// skill 目录非法/规则 Id 冲突→异常由 Run 兜底 stderr + exit 1
     /// （用法错误不审计——与 adjudicate 互斥校验先例一致，校验先于任何副作用）。
     /// </summary>
-    private static SkillSet LoadRuleSet(string[] args)
+    private static SkillSet LoadRuleSet(string[] args, TextWriter? stderr = null)
     {
-        var packages = GetOptionValues(args, "--skill").Select(SkillLoader.LoadDirectory).ToList();
+        var packages = GetOptionValues(args, "--skill", stderr).Select(SkillLoader.LoadDirectory).ToList();
         return SkillSet.Compose(BuiltinRules.Load(), packages);
     }
 

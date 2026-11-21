@@ -380,7 +380,7 @@ public static partial class CommandRouter
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
-        var ruleSet = LoadRuleSet(args);
+        var ruleSet = LoadRuleSet(args, stderr);
         string overlayPath = SemanticOverlayPath(agentDir);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
@@ -539,7 +539,7 @@ public static partial class CommandRouter
     private static int Check(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
-        var ruleSet = LoadRuleSet(args);
+        var ruleSet = LoadRuleSet(args, stderr);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
         var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
@@ -664,7 +664,7 @@ public static partial class CommandRouter
         // 孤儿裁定校验（2b-ii-a T6）：ruleId 必须在加载集（builtin + --skill 包）。
         // 校验顺序契约：互斥→force/exempt 必填→reason 必填→force 合法性→孤儿——
         // 先于 OpenAudit/Load/Upsert/Append/Save，未知 Id 不留审计、不落盘。
-        var ruleSet = LoadRuleSet(args);
+        var ruleSet = LoadRuleSet(args, stderr);
         if (!ruleSet.ContainsRule(ruleId))
         {
             stderr.WriteLine($"未知规则 Id: {ruleId}（不在 builtin+skill 规则集中，拒绝孤儿裁定）");
