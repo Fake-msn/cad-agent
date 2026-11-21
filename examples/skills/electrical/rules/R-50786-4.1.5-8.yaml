@@ -1,0 +1,16 @@
+# R-50786-4.1.5-8.yaml —— excerpt = D7 操作句 + 序号8 格式注记（逐字自 extraction-electrical.md
+# D7 行，4.1.5 表4.1.5+续表；字段释义内嵌引文与反引号原样保留）。完整形校验留后续（检查器注记）。
+id: R-50786-4.1.5-8
+source:
+  standard: "GB/T 50786-2012"
+  clause: "4.1.5"
+  excerpt: "绘制图样时，宜采用表 4.1.5 的电气设备标注方式表示；序号8 线缆 `a b-c (d×e+f×g)i-jh`（\"d—相导体根数e—相导体截面(mm²)f—N、PE导体根数g—N、PE导体截面(mm²)i—敷设方式和管径(mm)…j—敷设部位…h—安装高度(m)\"）"
+  verification: source-text
+modal: "宜"
+force: recommended
+severity: high
+scope: { discipline: electrical, drawingType: any }
+check:
+  type: cable-format
+  params: {}
+suggestion: "线缆标注按表4.1.5 序号8 格式 a b-c(d×e+f×g)i-jh（合规简写实例：BV-3×2.5-PC20-WC，N/PE 省略形）；完整形校验留后续"

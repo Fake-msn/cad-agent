@@ -500,13 +500,17 @@ public static partial class CommandRouter
     /// <summary>
     /// 规范引擎装配（T3 评审裁定带入 T7 的装配守卫）：重复 CheckType 注册直接抛异常，
     /// 防止 RuleEngine 字典 last-wins 静默丢失检查器。异常由 Run 兜底→stderr + exit 1。
+    /// 2b-ii-b T6：注册电气/模型 5 新检查器（T3-T5 交付）——builtin 仅 50001 类型，
+    /// builtin-only 行为不变；--skill 电气/模型包规则自此可评估（此前 NoChecker 跳过）。
     /// </summary>
     private static RuleEngine StandardsEngine()
     {
         IRuleChecker[] checkers =
         {
             new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
-            new ElevationChecker(), new LayerNameChecker()
+            new ElevationChecker(), new LayerNameChecker(),
+            new TextHeightMinChecker(), new CableFormatChecker(), new SlotCodeChecker(),
+            new LuminaireFormatChecker(), new FileNamingChecker()
         };
         var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
             .FirstOrDefault(g => g.Count() > 1);
