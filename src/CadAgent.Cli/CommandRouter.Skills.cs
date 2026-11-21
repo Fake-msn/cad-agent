@@ -1,40 +1,147 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CadAgent.Core;
+using CadAgent.Data;
 using CadAgent.Data.Rules;
+using CadAgent.Data.Semantic;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
 namespace CadAgent.Cli;
 
-// skill 命令族 partial（2b-ii-b Task 1 纯移动提取）：skill list/validate、semantic promote、
-// --skill 规则集装配与结构化跳过 helper。共享 helper（OpenAudit/Identity/LoadOrReject/
+// skill 命令族 partial（2b-ii-b Task 1 纯移动提取；Task 8 增 skill run）：skill list/validate/run、
+// semantic promote、--skill 规则集装配与结构化跳过 helper。共享 helper（OpenAudit/Identity/LoadOrReject/
 // JsonOpts/SemanticJsonOpts 等）留主文件 CommandRouter.cs，partial 同类可见。
 public static partial class CommandRouter
 {
     /// <summary>
-    /// skill 命令族分发（2b-ii-a T7）。子命令校验沿用 semantic/rule 族模式：
-    /// 缺失/未知子命令一律 stderr + exit 1，不落入 Usage 歧义。
+    /// skill 命令族分发（2b-ii-a T7；2b-ii-b T8 增 run）。子命令校验沿用 semantic/rule
+    /// 族模式：缺失/未知子命令一律 stderr + exit 1，不落入 Usage 歧义。
     /// </summary>
-    private static int Skill(string[] positional, string agentDir, TextWriter stdout, TextWriter stderr)
+    private static int Skill(string[] args, string[] positional, string agentDir,
+        string session, TextWriter stdout, TextWriter stderr)
     {
         if (positional.Length < 2)
         {
-            stderr.WriteLine("skill 需要子命令: list|validate");
+            stderr.WriteLine("skill 需要子命令: list|validate|run");
             return 1;
         }
         return positional[1] switch
         {
             "list" => SkillList(agentDir, stdout, stderr),
             "validate" => SkillValidate(positional, stdout),
+            "run" => SkillRun(args, positional, agentDir, session, stdout, stderr),
             _ => UnknownSkillSubcommand(positional[1], stderr)
         };
     }
 
     private static int UnknownSkillSubcommand(string sub, TextWriter stderr)
     {
-        stderr.WriteLine($"未知 skill 子命令: {sub}（可用: list|validate）");
+        stderr.WriteLine($"未知 skill 子命令: {sub}（可用: list|validate|run）");
         return 1;
+    }
+
+    /// <summary>
+    /// skill run（2b-ii-b T8）：模板实例化→StepEngine 执行（审计/快照/闸口全走既有引擎，
+    /// 无执行旁路）。流程：
+    /// 1) 包加载 LoadOrReject（Source="skill"，非法包→audited refusal exit 1）；
+    /// 2) 按名找模板（Ordinal；缺失→用法错误 stderr + exit 1，不审计——map"未找到叠加层"先例）；
+    /// 3) --args 解析为 JSON 对象（非法/非对象→用法错误 stderr + exit 1；值以 JsonElement
+    ///    克隆透传，数值保持数值——引擎处理器 GetDouble 不接受字符串）；Instantiate
+    ///    缺参/未知占位符→InvalidSkillException→LoadOrReject audited refusal exit 1；
+    /// 4) 请求审计先行（执行前）：Source="skill"、Kind="skill-run"、
+    ///    paramsJson={skill,template,args,planId}，PlanRef=planId，哈希不可得→空串；
+    /// 5) 读图+三级闸口（镜像 RunPlan：Load/Inspect 失败→LoadOrReject audited refusal；
+    ///    Red→run-rejected 留痕拒执行；Yellow→警示放行）；overlay 存在→SemanticGate 注入
+    ///    （损坏→LoadOrReject 审计拒绝，不静默降级——与 run 一致）；
+    /// 6) StepEngine.Run→stdout TxResult JSON（与 run 同形 {txId,ok,stepsDone,error}）；
+    ///    失败事务→drawing.Reload()（镜像 RunPlan）；exit 0/1。
+    /// 必需选项缺失（--template/--drawing/--args）→RequireOption 异常由 Run 兜底
+    /// stderr + exit 1（用法错误，先于 OpenAudit）。
+    /// </summary>
+    private static int SkillRun(string[] args, string[] positional, string agentDir,
+        string session, TextWriter stdout, TextWriter stderr)
+    {
+        if (positional.Length < 3)
+        {
+            stderr.WriteLine("skill run 需要目录参数: skill run <skillDir> --template <name> --drawing <file> --args <json>");
+            return 1;
+        }
+        string skillDir = positional[2];
+        string templateName = RequireOption(args, "--template");
+        string drawingPath = RequireOption(args, "--drawing");
+        string argsJson = RequireOption(args, "--args");
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        var package = LoadOrReject(() => SkillLoader.LoadDirectory(skillDir), skillDir,
+            session, audit, op, stderr, source: "skill");
+        if (package is null) return 1;
+        var template = package.Steps.FirstOrDefault(t => string.Equals(t.Name, templateName, StringComparison.Ordinal));
+        if (template is null)
+        {
+            stderr.WriteLine($"未找到模板: {templateName}（skill '{package.Manifest.Name}' 的 steps/ 不含该模板）");
+            return 1;
+        }
+        Dictionary<string, object> templateArgs;
+        try
+        {
+            using var doc = JsonDocument.Parse(argsJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new JsonException("--args 必须是 JSON 对象（参数名→值）");
+            templateArgs = doc.RootElement.EnumerateObject()
+                .ToDictionary(p => p.Name, p => (object)p.Value.Clone());
+        }
+        catch (JsonException ex)
+        {
+            stderr.WriteLine($"--args JSON 非法: {ex.Message}");
+            return 1;
+        }
+        var plan = LoadOrReject(() => TemplateInstantiator.Instantiate(template, templateArgs), skillDir,
+            session, audit, op, stderr, source: "skill");
+        if (plan is null) return 1;
+        // 请求审计先行（brief 步骤4）：先于读图与执行——执行失败/读图失败也不丢请求留痕。
+        audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            session, "skill", "skill-run", drawingPath,
+            JsonSerializer.Serialize(new { skill = skillDir, template = templateName, args = templateArgs, planId = plan.PlanId }),
+            "", "", "", plan.PlanId));
+        // 读图+三级闸口（镜像 RunPlan）：Load/Inspect 失败一并 LoadOrReject 留痕。
+        var loaded = LoadOrReject(() =>
+        {
+            var d = DrawingSession.Load(drawingPath);
+            return Tuple.Create(d, GateDetector.Inspect(d.Summarize(), new EmptySupportMatrix()));
+        }, drawingPath, session, audit, op, stderr, source: "skill");
+        if (loaded is null) return 1;
+        var (drawing, report) = loaded;
+        if (GateRefusesRun(report))
+        {
+            // spec 硬要求6：信息不完整（Red）图纸禁止操作——不执行任何步骤（与 run 一致）。
+            string hash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "skill", "run-rejected", drawingPath,
+                JsonSerializer.Serialize(new { level = report.Level.ToString(), unsupportedCount = report.Unsupported.Count }),
+                hash, hash, "", plan.PlanId));
+            stderr.WriteLine(report.Guidance);
+            return 1;
+        }
+        if (report.Level == GateLevel.Yellow)
+            stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
+        // 语义闸口接线（镜像 RunPlan）：overlay 存在→加载注入；不存在→null（几何级流程
+        // 不受影响）；存在但损坏→审计拒绝、不执行（不得静默降级为 null 闸口）。
+        string overlayPath = SemanticOverlayPath(agentDir);
+        ISemanticGate? semanticGate = null;
+        if (File.Exists(overlayPath))
+        {
+            var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+            if (overlay is null) return 1;
+            semanticGate = new SemanticGate(overlay);
+        }
+        var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
+        if (!result.Ok) drawing.Reload();
+        stdout.WriteLine(JsonSerializer.Serialize(new
+        {
+            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
+        }, JsonOpts));
+        return result.Ok ? 0 : 1;
     }
 
     /// <summary>

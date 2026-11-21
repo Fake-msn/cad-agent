@@ -40,14 +40,14 @@ public static partial class CommandRouter
             switch (positional[0])
             {
                 case "intake": return Intake(positional[1], agentDir, session, stdout, stderr);
-                case "run": return RunPlan(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
+                case "run": return RunPlan(args, positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rollback": return Rollback(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "audit": return AuditVerify(agentDir, stdout, stderr);
                 case "roles": return RolesShow(agentDir, stdout);
                 case "semantic": return Semantic(args, positional, agentDir, session, stdout, stderr);
                 case "check": return Check(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
-                case "skill": return Skill(positional, agentDir, stdout, stderr);
+                case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
                 default: return Usage(stderr);
             }
         }
@@ -131,9 +131,22 @@ public static partial class CommandRouter
         new(audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
             Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate);
 
-    private static int RunPlan(string planPath, string drawingPath, string agentDir,
+    /// <summary>
+    /// run --skill 接线（2b-ii-b T8，加性）：入口先经 LoadRuleSet 校验包加载
+    /// （builtin + --skill 包，Id 冲突/包非法→InvalidSkillException→Run 兜底
+    /// stderr + exit 1，用法错误先于 OpenAudit/Load——check --skill 冲突先例）。
+    /// 第一 slice 仅校验包加载 + tx 审计留痕：闸口 overlay 逻辑不变（别名影响 scan
+    /// 不影响 run 闸口存在性检查）；步骤模板执行走 skill run，run 不做模板实例化。
+    /// 带 --skill 时 tx-start/tx-commit 审计 paramsJson 由裸 planId 升级为
+    /// {planId, rulePackVersion}（RulePackAuditDecorator，SkillSet.RulePackVersion
+    /// 复现证据，与 check/scan 同口径）；不带 --skill 行为逐字不变。
+    /// 回归检查仍 builtin-only（第一 slice 裁定：run --skill 不评估包规则）。
+    /// </summary>
+    private static int RunPlan(string[] args, string planPath, string drawingPath, string agentDir,
         string session, TextWriter stdout, TextWriter stderr)
     {
+        var ruleSet = LoadRuleSet(args, stderr);
+        bool skillLoaded = GetOptionValues(args, "--skill").Count > 0;
         var plan = StepPlanParser.Parse(File.ReadAllText(planPath));
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
@@ -181,7 +194,12 @@ public static partial class CommandRouter
             if (overlay is null) return 1;
             semanticGate = new SemanticGate(overlay);
         }
-        var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
+        // 带 --skill：tx 审计 paramsJson 加性携带 rulePackVersion（装饰器只改写
+        // tx-start/tx-commit，其余记录原样透传）；不带 --skill：直传，行为不变。
+        IAuditStore engineAudit = skillLoaded
+            ? new RulePackAuditDecorator(audit, ruleSet.RulePackVersion)
+            : audit;
+        var result = Engine(agentDir, engineAudit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -723,7 +741,41 @@ public static partial class CommandRouter
 
     private static int Usage(TextWriter stderr)
     {
-        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate> [参数] [--project <dir>]");
+        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run> [参数] [--project <dir>]");
         return 1;
+    }
+
+    /// <summary>
+    /// run --skill tx 审计装饰器（2b-ii-b T8）：仅把 Source="plan" 的 tx-start/tx-commit
+    /// 记录 paramsJson 由裸 planId 改写为 {planId, rulePackVersion}（planId 原值保留，
+    /// 规则包版本复现证据——与 check/scan 的 rulePackVersion 同口径）。其余记录原样
+    /// 透传；ReadAll/VerifyChain 直通内层存储。只在带 --skill 时装配（加性，无 --skill
+    /// 的 run 审计逐字不变）。装饰发生在 Append 入链之前——哈希链对改写后的内容计算，
+    /// 链完整性不受影响。
+    /// </summary>
+    private sealed class RulePackAuditDecorator : IAuditStore
+    {
+        private readonly IAuditStore _inner;
+        private readonly string _rulePackVersion;
+
+        public RulePackAuditDecorator(IAuditStore inner, string rulePackVersion)
+        {
+            _inner = inner;
+            _rulePackVersion = rulePackVersion;
+        }
+
+        public AuditRecord Append(AuditEntry e)
+        {
+            if (e.Source == "plan" && e.Kind is "tx-start" or "tx-commit")
+                e = e with
+                {
+                    ParamsJson = JsonSerializer.Serialize(new { planId = e.ParamsJson, rulePackVersion = _rulePackVersion })
+                };
+            return _inner.Append(e);
+        }
+
+        public IReadOnlyList<AuditRecord> ReadAll() => _inner.ReadAll();
+
+        public bool VerifyChain(out string error) => _inner.VerifyChain(out error);
     }
 }
