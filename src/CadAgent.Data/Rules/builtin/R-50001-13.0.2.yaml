@@ -1,0 +1,15 @@
+# R-50001-13.0.2.yaml
+id: R-50001-13.0.2
+source:
+  standard: "GB/T 50001-2017"
+  clause: "13.0.2"
+  excerpt: "图层命名应采用分级形式，每个图层名称宜由 2～5 个数据字段（代码）组成……每个相邻的数据字段应用连字符'-'分隔开。"
+  verification: source-text
+modal: "应／宜／不能"
+force: recommended
+severity: medium
+scope: { discipline: any, drawingType: any }
+check:
+  type: layer-name
+  params: { mode: structure }
+suggestion: "图层名 2～5 级 '-' 分隔；专业代码白名单/附录B推荐名待视觉核验后启用"
