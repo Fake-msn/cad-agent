@@ -46,10 +46,13 @@ public static partial class CommandRouter
 
         var undoStack = new ModelUndoStack();
         ISemanticGate? gate = overlay != null ? new SemanticGate(overlay) : null;
-        var engine = Engine(agentDir, audit, gate, undoStack);
+        var importHandler = SymbolImportHandler(args);
+        var engine = Engine(agentDir, audit, gate, undoStack, importHandler);
         var meter = new UsageMeter(profile.Limits);
         var egress = new EgressPolicy(agentDir);
-        var allowedKinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet(StringComparer.Ordinal);
+        var allowedKinds = HandlerRegistry.All().Select(h => h.Kind)
+            .Concat(importHandler != null ? new[] { importHandler.Kind } : Array.Empty<string>())
+            .ToHashSet(StringComparer.Ordinal);
         ILlmClient client = LlmClientFactory?.Invoke(profile, key) ?? new OpenAiClient(profile, key);
 
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(), session,

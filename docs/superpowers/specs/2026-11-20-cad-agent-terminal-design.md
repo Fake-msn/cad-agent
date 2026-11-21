@@ -443,6 +443,13 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 信号/控制/应急照明/保护接地/接地/接闪/电话/数据/有线电视/广播/视频/综合布线/消防电话/50V以下电源/直流电源 15 类＝实线+上标字母（形式2 嵌标 —X— 注记）；#16 光缆＝横线+中圆斜杠（∅近似）。
 - elec-309..324；**50786 图形符号全表覆盖完成**（4.1.2 强电164 + 4.1.3-1..6 弱电144 + 4.1.4 线型16 = 324）；4.1.5 标注方式/4.2.x 文字符号为非图形（既有格式规则覆盖部分，其余 deferred）。
 
+**计划3h 完成（跨文档符号导入，2026-11-21 记录；全套件 530 测试含 3 真机；§12 长期 deferred 项清除）**：
+- **insert-symbol 第九处理器**（Data ImportSymbolHandler）：skill 包 symbols.yaml 按名解析（OrdinalIgnoreCase 首包命中；**不接受任意路径参数**）→源 DXF 读取→**白名单重建克隆 Line/Circle/Arc/TextEntity**（不赌 Entity.Clone 的外来表引用；Arc:Circle 继承序注意）→建块（块名=符号名，中文块名往返验证）/复用块幂等→Insert(scale/rotation/layer)；未知符号/缺文件/不支持类型响亮失败（先校验后变更）。
+- CLI 接线：Engine extraHandler 可选参；run/agent/repl 经 --skill 注入（**agent/repl allowedKinds 同步含注入 kind**，否则计划解析期拒）；skill run 包目录为位置参数→SkillRunImportHandler(skillDir+--skill 去重)；KindDocs 加行。无 --skill 时 insert-symbol 不注册→解析期 Failed（诚实）。
+- interior-244 加 steps/place-luminaire 模板（symbol/x/y）；E2E：建筑底图→scan/map Room→模板导入 3 筒灯（1 块 3 Insert）→签认→验链；未知符号失败零变更。
+- 几何导入不声明 ISemanticAware（语义确认仍 scan/map）；执行经 StepEngine 审计/快照管线无旁路。
+- **符号库 324+17 自此真正落图**；诚实边界：白名单四类之外类型拒收（随库扩展再扩）；重建克隆非精确 Clone（属性子集：几何+文本值/高/旋转）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
