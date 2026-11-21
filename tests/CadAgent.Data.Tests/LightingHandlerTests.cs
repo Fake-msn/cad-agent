@@ -90,9 +90,8 @@ public class LightingHandlerTests : IDisposable
     }
 
     [Fact]
-    public void Registry_ContainsSevenKinds()
+    public void Registry_ContainsLayoutLighting()
     {
         Assert.Contains("layout-lighting", HandlerRegistry.All().Select(h => h.Kind));
-        Assert.Equal(7, HandlerRegistry.All().Count);
     }
 }

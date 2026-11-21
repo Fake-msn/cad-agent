@@ -112,9 +112,9 @@ public class HandlerTests : IDisposable
     }
 
     [Fact]
-    public void Registry_ContainsAllSevenKinds()
+    public void Registry_ContainsAllEightKinds()
     {
         var kinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet();
-        Assert.Equal(new[] { "add-line", "add-text", "delete-entity", "move-entity", "change-layer", "insert-block", "layout-lighting" }.ToHashSet(), kinds);
+        Assert.Equal(new[] { "add-line", "add-text", "delete-entity", "move-entity", "change-layer", "insert-block", "layout-lighting", "label-luminaires" }.ToHashSet(), kinds);
     }
 }

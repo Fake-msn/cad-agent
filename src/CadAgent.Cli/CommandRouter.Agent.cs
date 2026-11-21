@@ -23,6 +23,7 @@ public static partial class CommandRouter
         change-layer: 改图层 {handle: number|string, layer: string}（不存在则创建）
         insert-block: 插入图纸内已有块 {block: string, x,y: number, scale?: number, rotation?: number(弧度)}
         layout-lighting: 房间网格布灯 {x,y,width,depth,spacing: number(mm), block: string, layer?: string}（需已确认 Room 语义；点位=区域内 spacing 网格）
+        label-luminaires: 灯具编号/设备索引符号 {prefix: string(品种代号,归院标), block?: string, start?: number, symbolSize?: number(8~12mm,默认10), layer?: string}（需已确认 Lighting 语义；正六边形符号 JGJ/T 244-2011 3.6.6-4）
         """;
 
     private static int Agent(string[] args, string agentDir, string session, TextWriter stdout, TextWriter stderr)
