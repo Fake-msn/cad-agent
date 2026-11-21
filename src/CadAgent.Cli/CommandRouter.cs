@@ -373,6 +373,9 @@ public static partial class CommandRouter
                 case CadAgent.Core.Audit.AnchorStatus.Missing:
                     stderr.WriteLine("警示: 外部锚未启用（anchor.json 缺失）");
                     return 0;
+                case CadAgent.Core.Audit.AnchorStatus.Stale:
+                    stderr.WriteLine("警示: 外部锚滞后（db 超前锚，崩溃窗口尾记录无锚保护）；审计包 manifest 如实记 Stale");
+                    return 0;
                 default:
                     stderr.WriteLine($"外部锚校验失败: {status}（尾截断或伪造）");
                     return 1;

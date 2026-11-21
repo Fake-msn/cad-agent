@@ -4,8 +4,8 @@ using System.Text.Json;
 
 namespace CadAgent.Core.Audit;
 
-/// <summary>验锚结果（spec §12 外部锚约束）。</summary>
-public enum AnchorStatus { Ok, Truncated, Forged, Missing }
+/// <summary>验锚结果（spec §12 外部锚约束；Stale=合并前审查 Warning#2 锚滞后窗口）。</summary>
+public enum AnchorStatus { Ok, Truncated, Forged, Missing, Stale }
 
 /// <summary>
 /// 审计链外部锚：DB 旁 anchor.json 持久化头哈希+序号+HMAC 签名。
@@ -62,7 +62,9 @@ public sealed class AnchorService
         if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expect), Encoding.UTF8.GetBytes(doc.Hmac)))
             return AnchorStatus.Forged;
         if (dbHeadSeq < doc.Seq) return AnchorStatus.Truncated;
-        if (dbHeadSeq == doc.Seq && dbHeadHash != doc.HeadHash) return AnchorStatus.Forged;
+        // 锚滞后（commit 与 anchor.Update 间崩溃窗口）：db 超前锚→尾记录无锚保护，显式 Stale 不谎报 Ok
+        if (dbHeadSeq > doc.Seq) return AnchorStatus.Stale;
+        if (dbHeadHash != doc.HeadHash) return AnchorStatus.Forged;
         return AnchorStatus.Ok;
     }
 

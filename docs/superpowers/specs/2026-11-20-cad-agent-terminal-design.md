@@ -466,6 +466,16 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 诚实边界：重放第一 slice 仅生成类（编辑类 delete/move/change-layer 不支持响亮失败）；读回闸口为计数级（几何逐点比对仍 deferred）；--live 交付为 .live.dwg 旁路文件（不覆盖源/工作副本）。
 - **用户核心质疑三缺口全部闭合**：读回环(3i)/活 CAD 执行(3j)/生成式验证(3j 基准)。计划 4 视图就绪。
 
+**合并前质量门禁（2026-11-21，code-review-csharp 扩展审查 main..3j 全量 82 文件 +5860 行；用户裁定修 Critical+Warning）**：
+- 审查结论：1 Critical / 3 Warning / 4 Info；无安全漏洞类 Critical（密钥 DPAPI/参数化 SQL/出境闸/哈希链+HMAC 锚核查通过）。
+- **Critical#1 已修**：DrawingSession.SaveWorking 改 tmp+Move 原子写（原 File.Create 先截断，崩溃可损持久工作副本）；回归 SaveWorkingAtomicTests。
+- **Warning#2 已修**：AnchorStatus 增 Stale（db 超前锚=commit→anchor.Update 崩溃窗口尾记录无锚保护）；Verify 显式 Stale 不谎报 Ok；CLI verify --anchor 警示 exit 0（同 Missing 先例）；审计包 manifest 如实记 Stale；回归 MergeGateReviewFixesTests.AnchorLag。
+- **Warning#3 已修**：llm add 增 --key-stdin（标准输入读密钥，不进 argv/shell history）；--key 便利路径保留（暴露面注记）；回归 KeyStdinTests。
+- **Warning#4 已修**：SkillPackage.LoadSymbols 符号 file 穿越守卫（.. / rooted / 领分隔符拒绝；包内相对子目录允许）；回归三场景。
+- **Info 注记（不修，宿主化时处理）**：①OpenAiClient 每实例 HttpClient（CLI 短命进程可接受，宿主化改 IHttpClientFactory）；②CLI 边界 GetAwaiter().GetResult() 有意同步（无同步上下文）；③EgressPolicy loopback 集偏严（fail-safe 方向正确，可选 IPAddress.IsLoopback 完备化）；④COM 通道 BlockText 丢 rotation（当前符号库 rotation=0 无实际分歧，扩旋转符号时补）。
+- 修复后全套件 **566 测试连绿两次含 5 真机**（首跑单败为瞬态文件锁竞争，复跑稳定）。
+- **ZWCAD"套件损坏"弹窗核查（用户报告）**：崩溃重启机制为计划内（spec §9 Restart+重试），弹窗本身非预期——根因 Dispose/Restart 带开文档 Quit 致 ZWCAD 判异常终止；已修先 Close(false) 再 Quit（dc031fa→acb99f6）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
