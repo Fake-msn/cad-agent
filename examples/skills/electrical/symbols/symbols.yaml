@@ -245,3 +245,50 @@ symbols:
   - { name: "分支器(四个信号分支)", file: elec-238.dxf, class: Auxiliary, description: "Tap-off, general symbol (4 branches)；横线+圆+双上双下茎" }
   - { name: "混合器(两路)", file: elec-239.dxf, class: Auxiliary, description: "Combiner, general symbol (2-way)；信息流左到右：左入两路+半圆+右出" }
   - { name: "电视插座", file: elec-240.dxf, class: Auxiliary, description: "Television socket；形式1=圆TV；形式2=开口框+茎TV" }
+# --- 表4.1.3-4 广播系统（3g W4）---
+  - { name: "传声器", file: elec-241.dxf, class: Auxiliary, description: "Microphone, general symbol；开右圆+竖bar" }
+  - { name: "扬声器", file: elec-242.dxf, class: Auxiliary, description: "Loudspeaker, general symbol；音箱锥（见注1：C吸顶/R嵌入/W壁挂安装字母旁注）" }
+  - { name: "嵌入式安装扬声器箱", file: elec-243.dxf, class: Auxiliary, description: "Flush-type loudspeaker box；圆+内音箱锥" }
+  - { name: "扬声器箱、音箱、声柱", file: elec-244.dxf, class: Auxiliary, description: "Loudspeaker box；框+内音箱锥（见注1）" }
+  - { name: "号筒式扬声器", file: elec-245.dxf, class: Auxiliary, description: "Horn；小圆+左开三角" }
+  - { name: "调谐器、无线电接收机", file: elec-246.dxf, class: Auxiliary, description: "Tuner; radio receiver；方框+顶天线V" }
+  - { name: "放大器(广播)", file: elec-247.dxf, class: Auxiliary, description: "Amplifier, general symbol；方框+三角（见注2：A扩大机/PRA前置/AP功率字母旁注）" }
+  - { name: "传声器插座", file: elec-248.dxf, class: Auxiliary, description: "Microphone socket；开口框+茎+M" }
+# --- 表4.1.3-5 安全技术防范系统（3g W4）---
+  - { name: "摄像机", file: elec-249.dxf, class: Auxiliary, description: "Camera；梯形机身+左镜头stub" }
+  - { name: "彩色摄像机", file: elec-250.dxf, class: Auxiliary, description: "Color camera；249+三dot" }
+  - { name: "彩色转黑白摄像机", file: elec-251.dxf, class: Auxiliary, description: "Color to black and white camera；249+dot+斜箭头" }
+  - { name: "带云台的摄像机", file: elec-252.dxf, class: Auxiliary, description: "Camera with pan/tilt unit；249+下云台三角" }
+  - { name: "有室外防护罩的摄像机", file: elec-253.dxf, class: Auxiliary, description: "Camera with outdoor protective cover；249+OH" }
+  - { name: "网络(数字)摄像机", file: elec-254.dxf, class: Auxiliary, description: "Network camera；249+IP" }
+  - { name: "红外摄像机", file: elec-255.dxf, class: Auxiliary, description: "Infrared camera；249+JR" }
+  - { name: "红外带照明灯摄像机", file: elec-256.dxf, class: Auxiliary, description: "Infrared camera with light；249+JR+右上×灯框" }
+  - { name: "半球形摄像机", file: elec-257.dxf, class: Auxiliary, description: "Hemispherical camera；形式1=249+H；形式2=半球罩+内框" }
+  - { name: "全球摄像机", file: elec-258.dxf, class: Auxiliary, description: "Spherical camera；形式1=249+R；形式2=圆+内框" }
+  - { name: "监视器", file: elec-259.dxf, class: Auxiliary, description: "Monitor；双框（内屏圆角近似直角）" }
+  - { name: "彩色监视器", file: elec-260.dxf, class: Auxiliary, description: "Color monitor；259+三dot" }
+  - { name: "读卡器", file: elec-261.dxf, class: Auxiliary, description: "Card reader；框+右上斜槽线" }
+  - { name: "键盘读卡器", file: elec-262.dxf, class: Auxiliary, description: "Card reader with keypad；框+KP" }
+  - { name: "保安巡查打卡器", file: elec-263.dxf, class: Auxiliary, description: "Guard tour station；框+内∩拱" }
+  - { name: "紧急脚挑开关", file: elec-264.dxf, class: Auxiliary, description: "Deliberately-operated device (foot)；圆+内check" }
+  - { name: "紧急按钮开关", file: elec-265.dxf, class: Auxiliary, description: "Deliberately-operated device (manual)；双圆" }
+  - { name: "门磁开关", file: elec-266.dxf, class: Auxiliary, description: "Magnetically operated protective switch；圆+内U" }
+  - { name: "玻璃破碎探测器", file: elec-267.dxf, class: Auxiliary, description: "Glass-break detector (surface contact)；菱形+B" }
+  - { name: "振动探测器", file: elec-268.dxf, class: Auxiliary, description: "Vibration detector (structural or inertia)；菱形+A" }
+  - { name: "被动红外入侵探测器", file: elec-269.dxf, class: Auxiliary, description: "Passive infrared intrusion detector；左向三角+JR" }
+  - { name: "微波入侵探测器", file: elec-270.dxf, class: Auxiliary, description: "Microwave intrusion detector；左向三角+M" }
+  - { name: "被动红外/微波双技术探测器", file: elec-271.dxf, class: Auxiliary, description: "IR/M dual-technology detector；左向三角+IR/M" }
+  - { name: "主动红外探测器", file: elec-272.dxf, class: Auxiliary, description: "Active infrared intrusion detector；Tx---IR---Rx（发射接收分别为Tx、Rx）" }
+  - { name: "遮挡式微波探测器", file: elec-273.dxf, class: Auxiliary, description: "Microwave fence detector；Tx---M---Rx" }
+  - { name: "埋入线电场扰动探测器", file: elec-274.dxf, class: Auxiliary, description: "Buried line field disturbance detector；双框---L---" }
+  - { name: "弯曲或振动电缆探测器", file: elec-275.dxf, class: Auxiliary, description: "Flex or shock sensitive cable detector；双框---C---" }
+  - { name: "激光探测器", file: elec-276.dxf, class: Auxiliary, description: "Laser detector；双框---LD---" }
+  - { name: "对讲系统主机", file: elec-277.dxf, class: Auxiliary, description: "Main control module for flat intercom electrical control system；框+左圆+右四tick" }
+  - { name: "对讲电话分机", file: elec-278.dxf, class: Auxiliary, description: "Interphone handset；框+左铃弧+右四tick" }
+  - { name: "可视对讲机", file: elec-279.dxf, class: Auxiliary, description: "Video entry security intercom；框+左双框屏+右四tick" }
+  - { name: "可视对讲户外机", file: elec-280.dxf, class: Auxiliary, description: "Video intercom outdoor unit；框+屏+锥+右箭头" }
+  - { name: "指纹识别器", file: elec-281.dxf, class: Auxiliary, description: "Finger print verifier；圆+内指纹弧" }
+  - { name: "磁力锁", file: elec-282.dxf, class: Auxiliary, description: "Magnetic lock；菱形+M" }
+  - { name: "电锁按键", file: elec-283.dxf, class: Auxiliary, description: "Button for electro-mechanic lock；双圆+E" }
+  - { name: "电控锁", file: elec-284.dxf, class: Auxiliary, description: "Electro-mechanical lock；菱形+EL" }
+  - { name: "投影机", file: elec-285.dxf, class: Auxiliary, description: "Projector；圆+内圆角框（直角近似）" }
