@@ -84,4 +84,61 @@ public static partial class CommandRouter
             return -1; // 读回失败→计数不等→闸口拒绝
         }
     }
+
+    /// <summary>
+    /// audit package（3c，spec §5.5）：可独立复核的交付包——audit.db + snapshots +
+    /// semantic/adjudications + anchor + manifest。**不含 llm 配置/密钥**。
+    /// </summary>
+    private static int AuditPackage(string[] args, string agentDir, TextWriter stdout, TextWriter stderr)
+    {
+        string outDir = RequireOption(args, "--out");
+        Directory.CreateDirectory(outDir);
+        using var audit = OpenAudit(agentDir);
+        var all = audit.ReadAll();
+        bool chainOk = audit.VerifyChain(out string chainError);
+        long headSeq = all.Count > 0 ? all[^1].Seq : 0;
+        string headHash = all.Count > 0 ? all[^1].Hash : "";
+        var anchorStatus = new CadAgent.Core.Audit.AnchorService(agentDir).Verify(headSeq, headHash);
+
+        var contents = new List<string>();
+        void CopyFile(string name)
+        {
+            string src = Path.Combine(agentDir, name);
+            if (File.Exists(src)) { File.Copy(src, Path.Combine(outDir, name), true); contents.Add(name); }
+        }
+        CopyFile("audit.db");
+        CopyFile("audit.db-wal");
+        CopyFile("audit.db-shm");
+        CopyFile("anchor.json");
+        CopyFile("semantic.json");
+        CopyFile("adjudications.json");
+        string snapDir = Path.Combine(agentDir, "snapshots");
+        if (Directory.Exists(snapDir))
+        {
+            foreach (string f in Directory.GetFiles(snapDir, "*", SearchOption.AllDirectories))
+            {
+                string rel = Path.GetRelativePath(agentDir, f);
+                string dest = Path.Combine(outDir, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                File.Copy(f, dest, true);
+                contents.Add(rel);
+            }
+        }
+        // 密钥与 llm 配置绝不入包（anchor-key.bin 亦不入——跨机验锚需密钥分发，留后续）
+        var manifest = new
+        {
+            createdAt = DateTimeOffset.UtcNow.ToString("O"),
+            headSeq,
+            headHash,
+            recordCount = all.Count,
+            chainVerified = chainOk,
+            chainError = chainOk ? null : chainError,
+            anchorStatus = anchorStatus.ToString(),
+            contents
+        };
+        File.WriteAllText(Path.Combine(outDir, "manifest.json"),
+            JsonSerializer.Serialize(manifest, SemanticJsonOpts) + "\n");
+        stdout.WriteLine(JsonSerializer.Serialize(new { package = outDir, manifest }, SemanticJsonOpts));
+        return chainOk ? 0 : 1;
+    }
 }

@@ -42,7 +42,9 @@ public static partial class CommandRouter
                 case "intake": return Intake(positional[1], agentDir, session, stdout, stderr);
                 case "run": return RunPlan(args, positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rollback": return Rollback(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
-                case "audit": return AuditVerify(agentDir, stdout, stderr);
+                case "audit": return positional.Length > 1 && positional[1] == "package"
+                    ? AuditPackage(args, agentDir, stdout, stderr)
+                    : AuditVerify(args, agentDir, stdout, stderr);
                 case "roles": return RolesShow(agentDir, stdout);
                 case "semantic": return Semantic(args, positional, agentDir, session, stdout, stderr);
                 case "check": return Check(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
@@ -91,7 +93,7 @@ public static partial class CommandRouter
         GetOption(args, name) ?? throw new ArgumentException($"缺少必需选项 {name}");
 
     private static SqliteAuditStore OpenAudit(string agentDir) =>
-        new(Path.Combine(agentDir, "audit.db"));
+        new(Path.Combine(agentDir, "audit.db"), new CadAgent.Core.Audit.AnchorService(agentDir));
 
     private static IIdentityProvider Identity(string agentDir) =>
         new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml")));
@@ -318,16 +320,36 @@ public static partial class CommandRouter
         return 0;
     }
 
-    private static int AuditVerify(string agentDir, TextWriter stdout, TextWriter stderr)
+    private static int AuditVerify(string[] args, string agentDir, TextWriter stdout, TextWriter stderr)
     {
         using var audit = OpenAudit(agentDir);
-        if (audit.VerifyChain(out string error))
+        if (!audit.VerifyChain(out string error))
         {
-            stdout.WriteLine($"审计链完整，共 {audit.ReadAll().Count} 条记录");
-            return 0;
+            stderr.WriteLine(error);
+            return 1;
         }
-        stderr.WriteLine(error);
-        return 1;
+        var all = audit.ReadAll();
+        stdout.WriteLine($"审计链完整，共 {all.Count} 条记录");
+        if (args.Contains("--anchor"))
+        {
+            var anchor = new CadAgent.Core.Audit.AnchorService(agentDir);
+            long headSeq = all.Count > 0 ? all[^1].Seq : 0;
+            string headHash = all.Count > 0 ? all[^1].Hash : "";
+            var status = anchor.Verify(headSeq, headHash);
+            switch (status)
+            {
+                case CadAgent.Core.Audit.AnchorStatus.Ok:
+                    stdout.WriteLine("外部锚校验通过（无截断/伪造）");
+                    return 0;
+                case CadAgent.Core.Audit.AnchorStatus.Missing:
+                    stderr.WriteLine("警示: 外部锚未启用（anchor.json 缺失）");
+                    return 0;
+                default:
+                    stderr.WriteLine($"外部锚校验失败: {status}（尾截断或伪造）");
+                    return 1;
+            }
+        }
+        return 0;
     }
 
     private static int RolesShow(string agentDir, TextWriter stdout)
