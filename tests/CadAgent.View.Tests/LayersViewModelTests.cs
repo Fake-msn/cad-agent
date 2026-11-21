@@ -162,4 +162,35 @@ public class LayersViewModelTests
         Assert.All(layers.Layers, l => Assert.True(l.IsVisible));
         Assert.Equal(1, raised);
     }
+
+    // ---- T9 carryover: Refresh rebuilds the layer list after an edit ----
+
+    [Fact]
+    public void Refresh_RebuildsNamesAndCounts_KeepsVisibility_RaisesEvent()
+    {
+        (LayersViewModel layers, CanvasViewModel canvas) = Make();
+        layers.Toggle("WALL"); // hide WALL before the edit
+        var newItems = new[]
+        {
+            Line("WALL", 0xFF0000),
+            Line("0", 0xFFFFFF), // layer created by the edit
+            Line("0", 0xFFFFFF),
+        };
+        int raised = 0;
+        canvas.RenderInvalidated += () => raised++;
+
+        layers.Refresh(newItems);
+
+        Assert.Equal(new[] { "0", "WALL" }, layers.Layers.Select(l => l.Name).ToArray());
+        Assert.Equal(new[] { 2, 1 }, layers.Layers.Select(l => l.EntityCount).ToArray());
+        Assert.False(layers.Layers.Single(l => l.Name == "WALL").IsVisible); // hidden state survives
+        Assert.True(layers.Layers.Single(l => l.Name == "0").IsVisible);
+        Assert.Equal(1, raised);
+        // Refreshed names are live for Toggle/Isolate (old snapshot names are gone).
+        layers.Toggle("0");
+        Assert.Contains("0", canvas.HiddenLayers);
+        layers.Isolate("TEXT"); // no longer a known layer -> no-op (hidden set unchanged)
+        Assert.Equal(2, canvas.HiddenLayers.Count);
+        Assert.Contains("WALL", canvas.HiddenLayers);
+    }
 }

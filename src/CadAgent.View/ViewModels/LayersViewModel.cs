@@ -48,6 +48,27 @@ public sealed class LayersViewModel
     public LayersViewModel(IReadOnlyList<RenderItem> renderItems, CanvasViewModel canvasVM)
     {
         _canvas = canvasVM;
+        Layers = BuildEntries(renderItems, canvasVM);
+        foreach (LayerEntry entry in Layers) _names.Add(entry.Name);
+    }
+
+    /// <summary>按名序的图层列表（构造时快照；可见性实时）。T9 Refresh 可重建。</summary>
+    public IReadOnlyList<LayerEntry> Layers { get; private set; }
+
+    /// <summary>
+    /// 编辑后重建（T9 承接）：按新渲染图元重算图层名/计数/色样（新建图层出现、
+    /// 消失图层移除）。HiddenLayers 归画布所有，隐藏状态原样保留；触发一次重绘。
+    /// </summary>
+    public void Refresh(IReadOnlyList<RenderItem> renderItems)
+    {
+        Layers = BuildEntries(renderItems, _canvas);
+        _names.Clear();
+        foreach (LayerEntry entry in Layers) _names.Add(entry.Name);
+        _canvas.Invalidate();
+    }
+
+    private static IReadOnlyList<LayerEntry> BuildEntries(IReadOnlyList<RenderItem> renderItems, CanvasViewModel canvasVM)
+    {
         var groups = new Dictionary<string, (int Count, uint Color)>(StringComparer.OrdinalIgnoreCase);
         foreach (RenderItem item in renderItems)
         {
@@ -55,15 +76,11 @@ public sealed class LayersViewModel
                 ? (g.Count + 1, g.Color)
                 : (1, item.ColorRgb);
         }
-        Layers = groups
+        return groups
             .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
             .Select(kv => new LayerEntry(kv.Key, kv.Value.Count, kv.Value.Color, canvasVM))
             .ToList();
-        foreach (LayerEntry entry in Layers) _names.Add(entry.Name);
     }
-
-    /// <summary>按名序的图层列表（构造时快照；可见性实时）。</summary>
-    public IReadOnlyList<LayerEntry> Layers { get; }
 
     /// <summary>切换图层可见性：HiddenLayers 增删 + RenderInvalidated。</summary>
     public void Toggle(string name)

@@ -127,13 +127,15 @@ public sealed class AuditViewModel
     private readonly SnapshotStore _snapshots;
     private readonly DrawingSession _session;
     private readonly CanvasViewModel? _canvas;
+    private readonly SemaphoreSlim? _sessionGate;
 
     public AuditViewModel(IAuditStore auditStore, SnapshotStore snapshotStore,
-        DrawingSession session, CanvasViewModel? canvas = null)
+        DrawingSession session, CanvasViewModel? canvas = null, SemaphoreSlim? sessionGate = null)
     {
         _snapshots = snapshotStore;
         _session = session;
         _canvas = canvas;
+        _sessionGate = sessionGate;
         try
         {
             var entries = new List<AuditEntryVm>();
@@ -227,7 +229,12 @@ public sealed class AuditViewModel
         // 只读加载快照副本：绝不调用 SaveWorking/Restore，当前会话不被触碰。
         DrawingSession before = DrawingSession.Load(snapshotPath);
         IReadOnlyList<RenderItem> beforeItems = RenderModelBuilder.Build(before);
-        IReadOnlyList<RenderItem> afterItems = RenderModelBuilder.Build(_session);
+        // 会话闸（T9，T6 承接）：当前会话的 off-thread 读与 EditViewModel 的
+        // 编辑/撤销互斥（MainWindow 装配同一 SemaphoreSlim）——绝不读到被撕扯的 Doc。
+        _sessionGate?.Wait();
+        IReadOnlyList<RenderItem> afterItems;
+        try { afterItems = RenderModelBuilder.Build(_session); }
+        finally { _sessionGate?.Release(); }
 
         Dictionary<string, string> beforeKeys = GeometryKeys(beforeItems);
         Dictionary<string, string> afterKeys = GeometryKeys(afterItems);

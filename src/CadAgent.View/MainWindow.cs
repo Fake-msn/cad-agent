@@ -40,6 +40,15 @@ namespace CadAgent.View;
 /// 问题清单自动刷新（AdjudicationsChanged → Issues.RefreshAsync 联动）。
 /// 写审计：audit.db 存在 → 复用 T6 存储；缺失 → 首次写入惰性建库
 /// （打开窗口仍不建库，沿用 T6 只读回放约定）。skill 目录接线留 T10。
+/// T9：顶部编辑工具栏（Select/Line/Text/Move/Delete/ChangeLayer/InsertBlock/Undo
+/// + 文本/块名输入 + 目标层下拉）。**所有编辑经 EditViewModel→StepEngine——
+/// 无直接 Doc 修改、无审计旁路**（view-edit 请求审计先于 tx）。Line 两点点击
+/// （第一击画布预览锚点）；Text/InsertBlock 工具栏输入+点击；Move 选中+目标
+/// 点击（dx/dy 相对图元首点）；Delete 选中后再次点击工具栏按钮确认；
+/// ChangeLayer 选中+层下拉。编辑/撤销完成 → RenderModelBuilder 重建 →
+/// Canvas.Refresh + Layers.Refresh（T4 承接）+ 状态栏计数。会话闸
+/// （SemaphoreSlim）共享给编辑与后台 session 读（diff/check/scan）；
+/// UI 层编辑期间禁用 Diff 切换、diff 加载期间禁用工具栏（互斥）。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -47,9 +56,18 @@ public sealed class MainWindow : Window
     private static readonly string[] ClassOptions =
         Enum.GetNames<SemanticClass>().Where(n => n != nameof(SemanticClass.Unknown)).ToArray();
 
-    private readonly string _baseStatus = "";
+    /// <summary>T9 文本工具默认字高（GB 50001 字高系列常用值；高度输入留 T10）。</summary>
+    private const double DefaultTextHeight = 3.5;
+
+    /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
+    private const double PickTolerancePixels = 5;
+
+    private string _baseStatus = "";
     private string _diffSummary = "";
     private TextBlock? _semanticHeader;
+
+    /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
+    private (double X, double Y)? _moveBase;
 
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null)
     {
@@ -73,6 +91,10 @@ public sealed class MainWindow : Window
         Canvas = new CanvasViewModel(items);
         var layers = new LayersViewModel(items, Canvas);
         Layers = layers;
+
+        // T9 会话闸：编辑/撤销（EditViewModel）与后台 session 读（diff/check/scan）
+        // 共享同一互斥闸——off-thread 读绝不看到被编辑撕扯的 Doc（T6 承接）。
+        var sessionGate = new SemaphoreSlim(1, 1);
 
         _baseStatus = $"{vm.Title} — {items.Count} render items";
         var status = new TextBlock { Margin = new Thickness(8, 4), Text = _baseStatus };
@@ -104,7 +126,7 @@ public sealed class MainWindow : Window
         panel.Children.Add(layerList); // LastChildFill：列表占满面板其余区域
 
         // T5：右栏问题清单（in-process check；skill 目录接线留 T8/T10，当前 builtin-only）。
-        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, Array.Empty<string>(), Canvas);
+        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, Array.Empty<string>(), Canvas, sessionGate);
         Issues = issues;
         issues.IssuesChanged += UpdateIssuesPanel;
 
@@ -154,7 +176,7 @@ public sealed class MainWindow : Window
             ? new SqliteAuditStore(auditDbPath)
             : new EmptyAuditStore();
         var audit = new AuditViewModel(auditStore,
-            new SnapshotStore(Path.Combine(agentDir, "snapshots")), vm.Session, Canvas);
+            new SnapshotStore(Path.Combine(agentDir, "snapshots")), vm.Session, Canvas, sessionGate);
         Audit = audit;
 
         var auditHeader = new TextBlock
@@ -275,9 +297,75 @@ public sealed class MainWindow : Window
             ? auditStore
             : new LazyWriteAuditStore(auditDbPath);
 
+        // T9：手动编辑视图模型——所有编辑经 StepEngine（无旁路）；写审计复用 T8
+        // 存储；身份/角色与签认同源；语义闸口由 VM 按 overlay 存在性注入（镜像 CLI）。
+        var edit = new EditViewModel(vm.Session, writeAudit,
+            new SnapshotStore(Path.Combine(agentDir, "snapshots")),
+            signoffIdentity, new RoleChecker(), vm.ProjectDir, sessionGate: sessionGate);
+        Edit = edit;
+        edit.EditCompleted += () => RefreshAfterEdit(vm);
+
+        var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(4, 2) };
+        EditToolbar = toolbar;
+        Button Tool(string label, EditTool tool)
+        {
+            var b = new Button { Content = label, Margin = new Thickness(2, 0) };
+            b.Click += (_, _) => SetActiveTool(tool);
+            toolbar.Children.Add(b);
+            return b;
+        }
+        Tool("Select", EditTool.Select);
+        Tool("Line", EditTool.Line);
+        Tool("Text", EditTool.Text);
+        Tool("Move", EditTool.Move);
+        // Delete 两段式：首按激活工具 → 画布点击选中 → 再按本按钮确认删除。
+        var delete = new Button
+        {
+            Content = "Delete",
+            Margin = new Thickness(2, 0),
+            [ToolTip.TipProperty] = "选中实体后再次点击确认删除"
+        };
+        delete.Click += OnDeleteClick;
+        toolbar.Children.Add(delete);
+        Tool("ChangeLayer", EditTool.ChangeLayer);
+        Tool("InsertBlock", EditTool.InsertBlock);
+        var undo = new Button { Content = "Undo", Margin = new Thickness(2, 0), IsEnabled = false };
+        undo.Click += OnUndoClick;
+        toolbar.Children.Add(undo);
+        UndoButton = undo;
+
+        var textInput = new TextBox { Watermark = "Text content", Width = 140, Margin = new Thickness(2, 0) };
+        EditTextInput = textInput;
+        toolbar.Children.Add(textInput);
+        var blockInput = new TextBox { Watermark = "Block name", Width = 120, Margin = new Thickness(2, 0) };
+        EditBlockInput = blockInput;
+        toolbar.Children.Add(blockInput);
+        var layerSelector = new ComboBox
+        {
+            ItemsSource = layers.Layers.Select(l => l.Name).ToList(),
+            PlaceholderText = "layer",
+            Width = 120,
+            Margin = new Thickness(2, 0)
+        };
+        layerSelector.SelectionChanged += OnEditLayerSelected;
+        EditLayerSelector = layerSelector;
+        toolbar.Children.Add(layerSelector);
+        var editError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            Foreground = Brushes.IndianRed,
+            IsVisible = false,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        EditError = editError;
+        toolbar.Children.Add(editError);
+
+        Canvas.ToolClickHandler = OnCanvasToolClick;
+
         // T8 纠偏 tab：Scan → 不明确图层列表（证据 + 类下拉 + Map + Isolate）。
         // skill 目录接线留 T10（当前 builtin-only，与 T5 问题清单同口径）。
-        var semantic = new SemanticViewModel(vm.Session, vm.ProjectDir, Canvas, writeAudit, signoffIdentity);
+        var semantic = new SemanticViewModel(vm.Session, vm.ProjectDir, Canvas, writeAudit, signoffIdentity,
+            sessionGate: sessionGate);
         Semantic = semantic;
         semantic.SemanticChanged += UpdateSemanticPanel;
 
@@ -423,6 +511,8 @@ public sealed class MainWindow : Window
         dock.Children.Add(auditPanel);
         DockPanel.SetDock(signoffPanel, Dock.Bottom);
         dock.Children.Add(signoffPanel);
+        DockPanel.SetDock(toolbar, Dock.Top);
+        dock.Children.Add(toolbar);
         DockPanel.SetDock(tabs, Dock.Left);
         dock.Children.Add(tabs);
         DockPanel.SetDock(issuesPanel, Dock.Right);
@@ -538,6 +628,27 @@ public sealed class MainWindow : Window
 
     /// <summary>当前裁定列表（T8，同 RuleId 最新裁定生效）。</summary>
     public ListBox? AdjudicationList { get; }
+
+    /// <summary>手动编辑视图模型（T9，加载成功时非 null；所有编辑经 StepEngine）。</summary>
+    public EditViewModel? Edit { get; }
+
+    /// <summary>编辑工具栏（T9：七工具 + Undo + 文本/块名输入 + 目标层下拉 + 错误文本）。</summary>
+    public StackPanel? EditToolbar { get; }
+
+    /// <summary>撤销按钮（T9：撤销最近事务；无事务时禁用）。</summary>
+    public Button? UndoButton { get; }
+
+    /// <summary>文本工具内容输入框（T9）。</summary>
+    public TextBox? EditTextInput { get; }
+
+    /// <summary>块插入工具块名输入框（T9）。</summary>
+    public TextBox? EditBlockInput { get; }
+
+    /// <summary>改层工具目标层下拉（T9：ChangeLayer 激活且选中实体时选择即应用）。</summary>
+    public ComboBox? EditLayerSelector { get; }
+
+    /// <summary>编辑错误/引导文本（T9，可见时非空）。</summary>
+    public TextBlock? EditError { get; }
 
     /// <summary>行模板：复选框（可见性）+ 色样 + 名称（计数）。Click → Toggle。</summary>
     private static CheckBox BuildLayerRow(LayerEntry entry, LayersViewModel layers)
@@ -760,6 +871,7 @@ public sealed class MainWindow : Window
     {
         if (DiffToggle is null || Canvas is null || Audit is null) return;
         DiffToggle.IsEnabled = false;
+        if (EditToolbar is not null) EditToolbar.IsEnabled = false; // T9：diff 加载期间禁止编辑（互斥）
         try
         {
             DiffResult result = await Audit.LoadDiffAsync(txId);
@@ -779,7 +891,11 @@ public sealed class MainWindow : Window
             }
             Canvas.Invalidate(); // 状态栏摘要刷新
         }
-        finally { DiffToggle.IsEnabled = true; }
+        finally
+        {
+            DiffToggle.IsEnabled = true;
+            if (EditToolbar is not null) EditToolbar.IsEnabled = true;
+        }
     }
 
     private void SetAuditError(string? message)
@@ -971,6 +1087,157 @@ public sealed class MainWindow : Window
         if (AdjudicationError is null) return;
         AdjudicationError.Text = message ?? "";
         AdjudicationError.IsVisible = message is not null;
+    }
+
+    /// <summary>T9：激活工具（清预览锚点/Move 基准/旧错误）。Select 恢复默认选择路径。</summary>
+    private void SetActiveTool(EditTool tool)
+    {
+        if (Edit is null || Canvas is null) return;
+        Edit.ActiveTool = tool;
+        Canvas.SetPendingPoint(null);
+        _moveBase = null;
+        SetEditError(null);
+    }
+
+    /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。</summary>
+    private void OnDeleteClick(object? sender, RoutedEventArgs e)
+    {
+        if (Edit is null || Canvas is null) return;
+        if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
+            _ = RunEditAsync(() => Edit.DeleteAsync(handle));
+        else
+            SetActiveTool(EditTool.Delete);
+    }
+
+    /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。</summary>
+    private void OnUndoClick(object? sender, RoutedEventArgs e)
+    {
+        if (Edit is null || Edit.RecentTxIds.Count == 0) return;
+        string txId = Edit.RecentTxIds[^1];
+        _ = RunEditAsync(() => Edit.UndoAsync(txId));
+    }
+
+    /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。</summary>
+    private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
+    {
+        if (Edit is null || Canvas is null) return;
+        if (Edit.ActiveTool == EditTool.ChangeLayer
+            && Canvas.SelectedHandle is string handle
+            && EditLayerSelector?.SelectedItem is string layer)
+            _ = RunEditAsync(() => Edit.ChangeLayerAsync(handle, layer));
+    }
+
+    /// <summary>
+    /// T9：画布左击工具路由（世界坐标）。返回 true=已消费（跳过默认选择）。
+    /// Line 第一击设预览锚点、第二击提交；Text/InsertBlock 需工具栏输入（空→引导）；
+    /// Move 点击实体选中并记首点基准、点击目标点提交 dx/dy；Delete/ChangeLayer
+    /// 点击仅选中（确认走工具栏二次按压/层下拉）。Select 走默认选择路径。
+    /// </summary>
+    private bool OnCanvasToolClick(double wx, double wy)
+    {
+        if (Edit is null || Canvas is null) return false;
+        switch (Edit.ActiveTool)
+        {
+            case EditTool.Line:
+                if (Canvas.PendingPoint is (double x1, double y1))
+                {
+                    Canvas.SetPendingPoint(null);
+                    _ = RunEditAsync(() => Edit.DrawLineAsync(x1, y1, wx, wy));
+                }
+                else
+                {
+                    Canvas.SetPendingPoint((wx, wy));
+                }
+                return true;
+
+            case EditTool.Text:
+                string text = EditTextInput?.Text ?? "";
+                if (text.Length == 0)
+                {
+                    SetEditError("请先输入文本内容（工具栏 Text content 框）");
+                    return true;
+                }
+                _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, DefaultTextHeight));
+                return true;
+
+            case EditTool.InsertBlock:
+                string block = EditBlockInput?.Text ?? "";
+                if (block.Length == 0)
+                {
+                    SetEditError("请先输入块名（工具栏 Block name 框）");
+                    return true;
+                }
+                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy));
+                return true;
+
+            case EditTool.Move:
+                int? hit = Canvas.HitTest(wx, wy, PickTolerancePixels / Canvas.Scale);
+                if (hit is int i)
+                {
+                    Canvas.Select(i);
+                    _moveBase = Canvas.Items[i].Points.Count > 0
+                        ? Canvas.Items[i].Points[0]
+                        : ((double X, double Y)?)null;
+                }
+                else if (Canvas.SelectedHandle is string moveHandle && _moveBase is (double bx, double by))
+                {
+                    _moveBase = null;
+                    _ = RunEditAsync(() => Edit.MoveAsync(moveHandle, wx - bx, wy - by));
+                }
+                return true;
+
+            case EditTool.Delete:
+            case EditTool.ChangeLayer:
+                Canvas.Select(Canvas.HitTest(wx, wy, PickTolerancePixels / Canvas.Scale));
+                return true;
+
+            default:
+                return false; // Select：默认 HitTest→Select 路径
+        }
+    }
+
+    /// <summary>T9：编辑/撤销评估期间禁用工具栏 + Diff 切换（防重入 + diff/编辑互斥）。</summary>
+    private async Task RunEditAsync(Func<Task> apply)
+    {
+        SetEditBusy(true);
+        try { await apply(); }
+        finally { SetEditBusy(false); }
+    }
+
+    private void SetEditBusy(bool busy)
+    {
+        if (EditToolbar is not null) EditToolbar.IsEnabled = !busy;
+        if (DiffToggle is not null) DiffToggle.IsEnabled = !busy;
+    }
+
+    /// <summary>
+    /// T9：编辑/撤销完成（成功或失败）→ 重建渲染模型 → Canvas.Refresh +
+    /// Layers.Refresh（T4 承接）+ 图层列表/层下拉/状态栏计数/错误/Undo 可用性。
+    /// </summary>
+    private void RefreshAfterEdit(MainViewModel vm)
+    {
+        if (Canvas is null || Layers is null || Edit is null) return;
+        IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
+        Canvas.Refresh(items);
+        Layers.Refresh(items);
+        if (LayerList is not null) LayerList.ItemsSource = Layers.Layers;
+        if (EditLayerSelector is not null)
+            EditLayerSelector.ItemsSource = Layers.Layers.Select(l => l.Name).ToList();
+        _baseStatus = $"{vm.Title} — {items.Count} render items";
+        _moveBase = null;
+        // 编辑使旧对比失效：Diff 切换回退（关分支幂等清叠加/摘要），避免残留勾选态。
+        if (DiffToggle is { IsChecked: true }) DiffToggle.IsChecked = false;
+        _diffSummary = "";
+        Canvas.Invalidate(); // 状态栏计数刷新
+        SetEditError(Edit.ErrorMessage);
+        if (UndoButton is not null) UndoButton.IsEnabled = Edit.RecentTxIds.Count > 0;
+    }
+
+    private void SetEditError(string? message)
+    {
+        if (EditError is null) return;
+        EditError.Text = message ?? "";
+        EditError.IsVisible = message is not null;
     }
 
     /// <summary>T6：无 audit.db 时的只读空存储占位——视图绝不创建/写入审计库。</summary>

@@ -57,8 +57,38 @@ public sealed class CanvasViewModel
 
     public CanvasViewModel(IReadOnlyList<RenderItem> items) => Items = items;
 
-    /// <summary>渲染图元（T2 RenderModelBuilder 产物，绘制坐标系）。</summary>
-    public IReadOnlyList<RenderItem> Items { get; }
+    /// <summary>渲染图元（T2 RenderModelBuilder 产物，绘制坐标系）。T9 Refresh 可替换。</summary>
+    public IReadOnlyList<RenderItem> Items { get; private set; }
+
+    /// <summary>
+    /// 编辑后重建（T9）：替换渲染图元（StepEngine 事务提交/撤回后由 UI 调
+    /// RenderModelBuilder.Build 重建）。索引选择/定位高亮/对比叠加全部失效清除
+    /// （句柄集可能已不存在；diff 与编辑互斥，编辑后不得残留旧对比）。触发一次重绘。
+    /// </summary>
+    public void Refresh(IReadOnlyList<RenderItem> items)
+    {
+        Items = items;
+        SelectedIndex = null;
+        _highlightedHandles.Clear();
+        DiffOverlay = null;
+        RenderInvalidated?.Invoke();
+    }
+
+    /// <summary>绘制预览锚点（T9 Line 工具第一击）；null=无待定点。画布画十字标记。</summary>
+    public (double X, double Y)? PendingPoint { get; private set; }
+
+    /// <summary>设置/清除绘制预览锚点，触发一次重绘。</summary>
+    public void SetPendingPoint((double X, double Y)? point)
+    {
+        PendingPoint = point;
+        RenderInvalidated?.Invoke();
+    }
+
+    /// <summary>
+    /// 工具点击拦截（T9）：MainWindow 按 ActiveTool 路由画布左击（世界坐标）。
+    /// 返回 true=已消费（跳过默认选择）；false/null=走默认 HitTest→Select。
+    /// </summary>
+    public Func<double, double, bool>? ToolClickHandler { get; set; }
 
     /// <summary>隐藏图层集合（大小写不敏感，CAD 图层名约定）。直接增删后调用 <see cref="Invalidate"/>。</summary>
     public HashSet<string> HiddenLayers { get; } = new(StringComparer.OrdinalIgnoreCase);

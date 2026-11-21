@@ -485,4 +485,39 @@ public class CanvasViewModelTests
         Assert.Equal((0.0, 0.0), vm.Pan);
         Assert.Equal(0, raised);
     }
+
+    // ---- T9 carryover: Refresh after a StepEngine edit ----
+
+    [Fact]
+    public void Refresh_ReplacesItems_ClearsSelectionAndDiff_RaisesEvent()
+    {
+        var vm = new CanvasViewModel(new[] { Line(0, 0, 10, 10, handle: "A") });
+        vm.Select(0);
+        vm.SelectHandles(new[] { "A" });
+        vm.SetDiffOverlay(new DiffOverlay(Array.Empty<RenderItem>(), Array.Empty<string>(), Array.Empty<string>()));
+        var newItems = new[] { Line(0, 0, 10, 10, handle: "A"), Line(5, 5, 20, 20, handle: "B") };
+        int raised = 0;
+        vm.RenderInvalidated += () => raised++;
+
+        vm.Refresh(newItems);
+
+        Assert.Same(newItems, vm.Items);
+        Assert.Null(vm.SelectedIndex); // index-based selection is invalid after rebuild
+        Assert.Empty(vm.HighlightedHandles);
+        Assert.Null(vm.DiffOverlay); // stale overlay must not survive an edit
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void PendingPoint_SetAndClear_RaisesEvent()
+    {
+        var vm = new CanvasViewModel(new[] { Line(0, 0, 10, 10) });
+        int raised = 0;
+        vm.RenderInvalidated += () => raised++;
+        vm.SetPendingPoint((3.0, 4.0));
+        Assert.Equal((3.0, 4.0), vm.PendingPoint);
+        vm.SetPendingPoint(null);
+        Assert.Null(vm.PendingPoint);
+        Assert.Equal(2, raised);
+    }
 }

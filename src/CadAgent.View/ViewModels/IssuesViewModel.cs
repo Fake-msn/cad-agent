@@ -72,14 +72,16 @@ public sealed class IssuesViewModel
     private readonly string _projectDir;
     private readonly IReadOnlyList<string> _skillDirs;
     private readonly CanvasViewModel? _canvas;
+    private readonly SemaphoreSlim? _sessionGate;
 
     public IssuesViewModel(DrawingSession session, string projectDir,
-        IReadOnlyList<string> skillDirs, CanvasViewModel? canvas = null)
+        IReadOnlyList<string> skillDirs, CanvasViewModel? canvas = null, SemaphoreSlim? sessionGate = null)
     {
         _session = session;
         _projectDir = projectDir;
         _skillDirs = skillDirs;
         _canvas = canvas;
+        _sessionGate = sessionGate;
     }
 
     /// <summary>最近一次评估的问题列表（初始为空；失败时清空）。</summary>
@@ -146,7 +148,10 @@ public sealed class IssuesViewModel
         string overlayPath = Path.Combine(agentDir, "semantic.json");
         var overlay = File.Exists(overlayPath) ? SemanticOverlay.Load(overlayPath) : new SemanticOverlay();
 
-        return CreateEngine().Evaluate(ruleSet.AllRules, _session, overlay, adjudications);
+        // 会话闸（T9，T5/T6 承接）：评估读 session 与 EditViewModel 编辑/撤销互斥。
+        _sessionGate?.Wait();
+        try { return CreateEngine().Evaluate(ruleSet.AllRules, _session, overlay, adjudications); }
+        finally { _sessionGate?.Release(); }
     }
 
     /// <summary>

@@ -12,7 +12,9 @@ namespace CadAgent.View.Controls;
 /// 画布控件（计划4 T3）：渲染 CanvasViewModel.VisibleItems（深色背景 #1E1E1E），
 /// 变换/命中全部委托 VM（WorldToScreen/ScreenToWorld/HitTest）。
 /// 指针：滚轮→ZoomAt（光标锚点）；中键拖拽→PanBy（屏幕增量）；左键→ScreenToWorld
-/// →HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮（文本黄色加粗）。
+/// →T9 工具拦截（ToolClickHandler，MainWindow 按 ActiveTool 路由）→未消费则
+/// HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮（文本黄色加粗）。
+/// T9 绘制预览：PendingPoint 十字标记 + 到光标的橡皮筋线（Line 工具第一击）。
 /// 尺寸变化→Fit（重置 zoom/pan，T10 可升级为保持视图）。线宽恒定设备像素（CAD 习惯）。
 /// 文本按水平渲染（RotationDeg 暂不参与，与 VM 文本命中盒一致）；插入点视为基线左端。
 /// </summary>
@@ -25,6 +27,9 @@ public sealed class DrawingCanvas : Control
     private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
     private static readonly Pen SelectionPen = new(Brushes.Yellow, 2);
 
+    // T9 绘制预览：待定点十字 + 到光标的橡皮筋线（Line 工具第一击后）。
+    private static readonly Pen PreviewPen = new(Brushes.Yellow, 1);
+
     // T6 对比叠加：before 灰幽灵 / added 绿 / removed 红 + 删除线。
     private static readonly Pen DiffBeforePen = new(new SolidColorBrush(Color.FromRgb(0x80, 0x80, 0x80)), 1);
     private static readonly Pen DiffAddedPen = new(new SolidColorBrush(Color.FromRgb(0x00, 0xC8, 0x53)), 2);
@@ -35,6 +40,9 @@ public sealed class DrawingCanvas : Control
     private bool _panning;
     private Point _lastPanPosition;
     private Size _lastFitSize;
+
+    /// <summary>T9：光标屏幕位置（仅 PendingPoint 存在时跟踪，预览橡皮筋用）。</summary>
+    private Point? _hoverScreen;
 
     public DrawingCanvas(CanvasViewModel viewModel)
     {
@@ -95,6 +103,15 @@ public sealed class DrawingCanvas : Control
             bool added = diff is not null && item.Handle.Length > 0 && diff.AddedHandles.Contains(item.Handle);
             Pen pen = added ? DiffAddedPen : highlight ? SelectionPen : GetPen(item.ColorRgb);
             DrawItem(context, item, pen);
+        }
+
+        // T9 绘制预览：待定锚点十字标记 + 到当前光标的橡皮筋线（只读叠加，不参与命中）。
+        if (ViewModel.PendingPoint is (double px, double py))
+        {
+            Point anchor = ScreenPoint((px, py));
+            if (_hoverScreen is Point hover) context.DrawLine(PreviewPen, anchor, hover);
+            context.DrawLine(PreviewPen, new Point(anchor.X - 6, anchor.Y), new Point(anchor.X + 6, anchor.Y));
+            context.DrawLine(PreviewPen, new Point(anchor.X, anchor.Y - 6), new Point(anchor.X, anchor.Y + 6));
         }
     }
 
@@ -238,8 +255,12 @@ public sealed class DrawingCanvas : Control
         else if (point.Properties.IsLeftButtonPressed)
         {
             (double wx, double wy) = ViewModel.ScreenToWorld(point.Position.X, point.Position.Y);
-            double tolerance = PickTolerancePixels / ViewModel.Scale;
-            ViewModel.Select(ViewModel.HitTest(wx, wy, tolerance));
+            // T9：工具点击拦截（MainWindow 按 ActiveTool 路由）；未消费 → 默认选择。
+            if (ViewModel.ToolClickHandler is not { } handler || !handler(wx, wy))
+            {
+                double tolerance = PickTolerancePixels / ViewModel.Scale;
+                ViewModel.Select(ViewModel.HitTest(wx, wy, tolerance));
+            }
             e.Handled = true;
         }
     }
@@ -247,7 +268,16 @@ public sealed class DrawingCanvas : Control
     protected override void OnPointerMoved(PointerEventArgs e)
     {
         base.OnPointerMoved(e);
-        if (!_panning) return;
+        if (!_panning)
+        {
+            // T9：有待定预览锚点时跟踪光标（橡皮筋线随动）。
+            if (ViewModel.PendingPoint is not null)
+            {
+                _hoverScreen = e.GetPosition(this);
+                InvalidateVisual();
+            }
+            return;
+        }
         Point p = e.GetPosition(this);
         ViewModel.PanBy(p.X - _lastPanPosition.X, p.Y - _lastPanPosition.Y);
         _lastPanPosition = p;

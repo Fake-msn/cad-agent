@@ -30,6 +30,7 @@ public sealed class SemanticViewModel
     private readonly IAuditStore _audit;
     private readonly IIdentityProvider _identity;
     private readonly string _sessionId;
+    private readonly SemaphoreSlim? _sessionGate;
 
     // 并发闸（审查修复）：overlay 的 Load→mutate→Save→audit 必须整段互斥。
     // CLI 每次调用串行，但视图里两个并发 Map（或 Scan 期间的 Map）会交错
@@ -40,7 +41,7 @@ public sealed class SemanticViewModel
 
     public SemanticViewModel(DrawingSession session, string projectDir,
         CanvasViewModel? canvasVM, IAuditStore auditStore, IIdentityProvider identity,
-        string? sessionId = null)
+        string? sessionId = null, SemaphoreSlim? sessionGate = null)
     {
         _session = session;
         _projectDir = projectDir;
@@ -48,6 +49,7 @@ public sealed class SemanticViewModel
         _audit = auditStore;
         _identity = identity;
         _sessionId = sessionId ?? Guid.NewGuid().ToString("N");
+        _sessionGate = sessionGate;
     }
 
     /// <summary>最近一次扫描的不明确图层列表（证据：计数/样例句柄/名称提示；失败时清空）。</summary>
@@ -143,52 +145,64 @@ public sealed class SemanticViewModel
         _canvas.Invalidate();
     }
 
-    /// <summary>镜像 CLI SemanticScan：规则集校验先于副作用；Save 先于审计（CLI 序）。</summary>
+    /// <summary>镜像 CLI SemanticScan：规则集校验先于副作用；Save 先于审计（CLI 序）。
+    /// 会话闸（T9）：session 读（Scan+ComputeHash）与编辑互斥；锁序 overlay→session。</summary>
     private ScanResult ScanCore(IReadOnlyList<string> skillDirs)
     {
         // 与 CLI LoadRuleSet 同一路径：包非法/Id 冲突 → 异常先于任何副作用（不审计）。
         SkillSet ruleSet = ComposeRuleSet(skillDirs);
         OperatorIdentity op = _identity.Current;
         SemanticOverlay existing = LoadOrReject(() => SemanticOverlay.Load(OverlayPath), OverlayPath);
-        ScanResult result = SemanticScanner.Scan(_session, existing, ruleSet.MergedAliases);
-        result.Overlay.Save(OverlayPath);
-        // 扫描不改图纸：前后哈希一致（沿用 CLI intake 的诚实留痕）。
-        string hash = _session.ComputeHash();
-        _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-            _sessionId, "semantic", "semantic-scan", _session.SourcePath,
-            JsonSerializer.Serialize(new
-            {
-                annotationCount = result.Overlay.Annotations.Count,
-                ambiguousCount = result.Ambiguous.Count,
-                version = result.Overlay.Version,
-                // 规则包溯源（与 CLI check/run-regression 同口径；无 skill→builtin 常量）。
-                rulePackVersion = ruleSet.RulePackVersion
-            }),
-            hash, hash, "", ""));
-        return result;
+        _sessionGate?.Wait();
+        try
+        {
+            ScanResult result = SemanticScanner.Scan(_session, existing, ruleSet.MergedAliases);
+            result.Overlay.Save(OverlayPath);
+            // 扫描不改图纸：前后哈希一致（沿用 CLI intake 的诚实留痕）。
+            string hash = _session.ComputeHash();
+            _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                _sessionId, "semantic", "semantic-scan", _session.SourcePath,
+                JsonSerializer.Serialize(new
+                {
+                    annotationCount = result.Overlay.Annotations.Count,
+                    ambiguousCount = result.Ambiguous.Count,
+                    version = result.Overlay.Version,
+                    // 规则包溯源（与 CLI check/run-regression 同口径；无 skill→builtin 常量）。
+                    rulePackVersion = ruleSet.RulePackVersion
+                }),
+                hash, hash, "", ""));
+            return result;
+        }
+        finally { _sessionGate?.Release(); }
     }
 
-    /// <summary>镜像 CLI SemanticMap：句柄取自在载 session 该层实体（大小写不敏感）。</summary>
+    /// <summary>镜像 CLI SemanticMap：句柄取自在载 session 该层实体（大小写不敏感）。
+    /// 会话闸（T9）：session 读（句柄枚举+ComputeHash）与编辑互斥。</summary>
     private SemanticOverlay MapCore(string layer, SemanticClass cls)
     {
         if (!File.Exists(OverlayPath))
             throw new InvalidOperationException("未找到语义叠加层，请先执行 semantic scan");
         OperatorIdentity op = _identity.Current;
         SemanticOverlay overlay = LoadOrReject(() => SemanticOverlay.Load(OverlayPath), OverlayPath);
-        List<string> handlesOnLayer = _session.Doc.Entities
-            .Where(e => string.Equals(e.Layer?.Name ?? "0", layer, StringComparison.OrdinalIgnoreCase))
-            .Select(e => e.Handle.ToString())
-            .ToList();
-        overlay.ConfirmMapping(new LayerMapping(layer, cls, op.Account, DateTimeOffset.UtcNow));
-        overlay.ApplyMappingToAnnotations(layer, cls, handlesOnLayer);
-        overlay.Save(OverlayPath);
-        // map 只改叠加层不改图纸：前后哈希一致。
-        string hash = _session.ComputeHash();
-        _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-            _sessionId, "semantic", "semantic-map", layer,
-            JsonSerializer.Serialize(new { layer, @class = cls.ToString(), @operator = op.Account }),
-            hash, hash, "", ""));
-        return overlay;
+        _sessionGate?.Wait();
+        try
+        {
+            List<string> handlesOnLayer = _session.Doc.Entities
+                .Where(e => string.Equals(e.Layer?.Name ?? "0", layer, StringComparison.OrdinalIgnoreCase))
+                .Select(e => e.Handle.ToString())
+                .ToList();
+            overlay.ConfirmMapping(new LayerMapping(layer, cls, op.Account, DateTimeOffset.UtcNow));
+            overlay.ApplyMappingToAnnotations(layer, cls, handlesOnLayer);
+            overlay.Save(OverlayPath);
+            // map 只改叠加层不改图纸：前后哈希一致。
+            string hash = _session.ComputeHash();
+            _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                _sessionId, "semantic", "semantic-map", layer,
+                JsonSerializer.Serialize(new { layer, @class = cls.ToString(), @operator = op.Account }),
+                hash, hash, "", ""));
+            return overlay;
+        }
+        finally { _sessionGate?.Release(); }
     }
 
     /// <summary>与 CLI LoadRuleSet / IssuesViewModel.Evaluate 同一合成路径。</summary>
