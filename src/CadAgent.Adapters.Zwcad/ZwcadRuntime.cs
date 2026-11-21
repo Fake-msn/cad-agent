@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using CadAgent.Core.Cad;
 
 namespace CadAgent.Adapters.Zwcad;
@@ -49,7 +48,7 @@ public sealed class ZwcadRuntime : ICadRuntime
     {
         if (_app == null)
         {
-            EnsureNoForeignInstance();
+            VendorGuard.EnsureNoForeignInstance(VendorProfiles.Zwcad);
             var type = Type.GetTypeFromProgID(ProgId)
                 ?? throw new CadRuntimeException($"ZWCAD COM 未注册: {ProgId}");
             _app = Activator.CreateInstance(type)
@@ -57,26 +56,6 @@ public sealed class ZwcadRuntime : ICadRuntime
             _app.Visible = false;
         }
         return _app;
-    }
-
-    // 2026-11-22 CUIX 损坏事故根因(b)：并发 ZWCAD 实例共享同一用户 profile，
-    // CUIX 加载/保存竞态→损坏→下次启动弹模态修复框（挂起无人值守自动化）。
-    // 启动前守卫：已有实例则等待其退出（真机测试串行衔接的残留窗口），超时拒绝。
-    internal static Func<string[]> ProcessNames =
-        () => Process.GetProcesses().Select(p => p.ProcessName).ToArray();
-    internal static TimeSpan GuardWait = TimeSpan.FromSeconds(10);
-
-    internal static void EnsureNoForeignInstance()
-    {
-        var deadline = DateTime.UtcNow + GuardWait;
-        while (ProcessNames().Any(n => n.Equals("ZWCAD", StringComparison.OrdinalIgnoreCase)))
-        {
-            if (DateTime.UtcNow >= deadline)
-                throw new CadRuntimeException(
-                    "检测到已有 ZWCAD 进程：并发实例共享用户配置会竞态损坏 ZWCAD.CUIX。" +
-                    "请关闭已有 ZWCAD（含人工会话）后重试；真机测试须串行运行。");
-            Thread.Sleep(250);
-        }
     }
 
     public RuntimeInfo GetInfo() => Run(() =>
@@ -195,8 +174,10 @@ public sealed class ZwcadRuntime : ICadRuntime
             try { dynamic b0 = blocks.Item(blockName); exists = b0 != null; }
             catch { exists = false; }
             if (exists) return;
-            // ZWCAD Blocks.Add 实测签名序=(origin, Name)（与 AutoCAD 文档序相反，真机探针核定）
-            dynamic block = blocks.Add(Pt(0, 0), blockName);
+            // Blocks.Add 签名序按厂商 profile 分支（ZWCAD 实测 origin 先；AutoCAD 文档 Name 先）
+            dynamic block = VendorProfiles.Zwcad.BlocksAddNameFirst
+                ? blocks.Add(blockName, Pt(0, 0))
+                : blocks.Add(Pt(0, 0), blockName);
             foreach (var p in primitives)
             {
                 switch (p)
@@ -238,19 +219,6 @@ public sealed class ZwcadRuntime : ICadRuntime
         _staThread.Join(TimeSpan.FromSeconds(10));
         // Quit 返回≠进程退出：CUIX 回写发生在退出尾段；测试宿主若先退出会留下
         // 不完整收尾（ZCR 残留簇证据）。等待进程退出闭合该窗口（2026-11-22 复现分析）。
-        WaitForProcessExit(ExitWait);
-    }
-
-    internal static TimeSpan ExitWait = TimeSpan.FromSeconds(15);
-
-    internal static void WaitForProcessExit(TimeSpan timeout)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            if (!ProcessNames().Any(n => n.Equals("ZWCAD", StringComparison.OrdinalIgnoreCase)))
-                return;
-            Thread.Sleep(250);
-        }
+        VendorGuard.WaitForProcessExit(VendorProfiles.Zwcad, VendorGuard.ExitWait);
     }
 }

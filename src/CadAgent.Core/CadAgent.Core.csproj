@@ -7,6 +7,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="CadAgent.Core.Tests" />
+    <InternalsVisibleTo Include="CadAgent.Adapters.Zwcad" />
+    <InternalsVisibleTo Include="CadAgent.Adapters.Zwcad.Tests" />
+    <InternalsVisibleTo Include="CadAgent.Adapters.Acad.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <PackageReference Include="YamlDotNet" Version="16.2.1" />
