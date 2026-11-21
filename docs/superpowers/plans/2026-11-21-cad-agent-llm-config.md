@@ -848,3 +848,8 @@ public class LlmCommandTests : IDisposable
 - 治理哈希：builtin YAML 不动；SemanticClass 加值不影响 YAML 内容哈希。
 - 离线可测：所有 HTTP 经 ILlmHttp fake；llm test 实弹仅显式命令；DPAPI 真机 Windows 可测。
 - 诚实边界：视觉实弹探针/首启向导图形按钮/订阅 OAuth/降级策略=3b/plan4/后续；--offline 旗标为测试与无网环境设计。
+---
+
+## 接管对齐记录（2026-11-21，Side chat）
+
+主会话并行启动了其计划 3a（2026-11-21-cad-agent-llm-infrastructure.md，Task 1 已提交 b5f822b：ProviderProfile/DataPolicy/ProfileLimits/TokenPlan/LlmConfigStore/ProfileValidator + CadAgent.Llm 项目脚手架）。用户裁定本侧接管计划 3：**采纳主会话计划为 LLM 基础设施执行权威**（架构更优：DPAPI/HTTP 在 CadAgent.Llm 项目，Core 保持纯净），本侧原 T6-T10 重复设计废弃（未提交文件已清理，Core 的 ProtectedData 包已回退）。本计划 T1-T5 硬前置已提交且与主会话计划互补保留。后续按主会话计划 Task 2-8 内联执行。
