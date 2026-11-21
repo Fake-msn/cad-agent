@@ -144,3 +144,25 @@ symbols:
   - { name: "单极限时开关", file: elec-140.dxf, class: Auxiliary, description: "Period limiting switch, single pole；圆+折blade+t注记" }
   - { name: "单极声光控开关", file: elec-141.dxf, class: Auxiliary, description: "Sound and light control switch, single pole；圆+折blade+SL注记" }
   - { name: "双控单极开关", file: elec-142.dxf, class: Auxiliary, description: "Two-way single pole switch；圆+上下双折blade" }
+  - { name: "单极拉线开关", file: elec-143.dxf, class: Auxiliary, description: "Pull-cord single pole switch；圆+blade+端上箭头（拉线）" }
+  - { name: "风机盘管三速开关", file: elec-144.dxf, class: Auxiliary, description: "Three-speed fan coil switch；圆+blade+端T bar" }
+  - { name: "按钮", file: elec-145.dxf, class: Auxiliary, description: "Push-button；双同心圆" }
+  - { name: "带指示灯的按钮", file: elec-146.dxf, class: Auxiliary, description: "Push-button with indicator lamp；双圆+内×" }
+  - { name: "防止无意操作的按钮", file: elec-147.dxf, class: Auxiliary, description: "Push-button protected against unintentional operation；双圆+右保护罩（打碎玻璃罩式）" }
+  - { name: "灯", file: elec-148.dxf, class: Lighting, description: "Lamp, general symbol；圆内×（见注7）" }
+  - { name: "应急疏散指示标志灯", file: elec-149.dxf, class: Lighting, description: "Emergency exit indicating luminaires；矩形+E" }
+  - { name: "应急疏散指示标志灯(向右)", file: elec-150.dxf, class: Lighting, description: "Emergency exit indicating luminaires (right)；矩形+右箭头" }
+  - { name: "应急疏散指示标志灯(向左)", file: elec-151.dxf, class: Lighting, description: "Emergency exit indicating luminaires (left)；矩形+左箭头" }
+  - { name: "应急疏散指示标志灯(向左、向右)", file: elec-152.dxf, class: Lighting, description: "Emergency exit indicating luminaires (left, right)；矩形+双向双箭头" }
+  - { name: "专用电路上的应急照明灯", file: elec-153.dxf, class: Lighting, description: "Emergency lighting luminaire on special circuit；实心点+×四射线" }
+  - { name: "自带电源的应急照明灯", file: elec-154.dxf, class: Lighting, description: "Self-contained emergency lighting luminaire；153+方框" }
+  - { name: "荧光灯(单管)", file: elec-155.dxf, class: Lighting, description: "Fluorescent lamp, general symbol；单管横线+端tick" }
+  - { name: "二管荧光灯", file: elec-156.dxf, class: Lighting, description: "Luminaire with two fluorescent tubes；双平行线+端tick" }
+  - { name: "三管荧光灯", file: elec-157.dxf, class: Lighting, description: "Luminaire with three fluorescent tubes；三平行线+端tick" }
+  - { name: "多管荧光灯", file: elec-158.dxf, class: Lighting, description: "Luminaire with many fluorescent tubes；n>3：单线+斜杠+n注记" }
+  - { name: "单管格栅灯", file: elec-159.dxf, class: Lighting, description: "Grille lamp with one fluorescent tubes；矩形+内单管tick线" }
+  - { name: "双管格栅灯", file: elec-160.dxf, class: Lighting, description: "Grille lamp with two fluorescent tubes；矩形+内双管线" }
+  - { name: "三管格栅灯", file: elec-161.dxf, class: Lighting, description: "Grille lamp with three fluorescent tubes；矩形+内三管线" }
+  - { name: "投光灯", file: elec-162.dxf, class: Lighting, description: "Projector, general symbol；圆内×+左包弧" }
+  - { name: "聚光灯", file: elec-163.dxf, class: Lighting, description: "Spot light；162+右向平行双箭头" }
+  - { name: "风扇、风机", file: elec-164.dxf, class: Auxiliary, description: "Fan；方框+圆+双叶弧" }
