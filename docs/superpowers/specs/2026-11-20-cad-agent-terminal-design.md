@@ -427,6 +427,12 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 读回测试：目录条目数==DXF 文件数==164 + 每文件 DxfReader entities>0 + electrical skill validate 保持 0。
 - 诚实边界：近似重建非精确描摹；涂黑/斜线填充以密集线近似；形式2 不单独建块（description 注记）；复合符号（#16/#42/#93 等）取主要素简化注记；45/46/47 说明列共用按图形区分命名；4.1.3-x 弱电符号表/4.1.4 线型符号**留后续切片**（裁切已就绪）。
 
+**计划3g 完成（50786 弱电符号矢量化 144/144，2026-11-21 记录；全套件 515 测试含 3 真机；符号总 308）**：
+- 表4.1.3-1 通信/综合布线 17 + 4.1.3-2 火灾报警 38 + 4.1.3-3 有线电视/卫星 21 + 4.1.3-4 广播 8 + 4.1.3-5 安防 37 + 4.1.3-6 设备监控 23 = **144**；连续编号 elec-165..308 并入 electrical symbols.yaml（表边界注释）。
+- **MinerU 漏提取兜底**：p34/p39 续表在 v1/v2 均 0 行（空占位块）——zip 内 origin.pdf 经 pypdfium2 整页渲染（150dpi）恢复全部漏行（com#13-17、tv#11-21 等）；整页渲染 p33-45 入库 _reparse/gb50786/pages/（gitignored）。**管线教训：表裁切可能截断/漏提，整页渲染是核对兜底**。
+- 火灾注1/注2 字母替代清单（C/Z/G/S；RS/RD/I/O/P/T/SI/M/SB/D/FI/CRT/FPA/MT/BO/TP）、广播注1/注2（C/R/W；A/PRA/AP）入 description。
+- 诚实边界：同 3f 近似重建口径；湿度/压差等形式1/2 字母差异取形式1+注记；**4.1.4 线型符号仍 deferred**（p45 表已渲染就绪，3 行起）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
