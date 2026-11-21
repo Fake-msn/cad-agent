@@ -12,7 +12,7 @@ namespace CadAgent.View.Controls;
 /// 画布控件（计划4 T3）：渲染 CanvasViewModel.VisibleItems（深色背景 #1E1E1E），
 /// 变换/命中全部委托 VM（WorldToScreen/ScreenToWorld/HitTest）。
 /// 指针：滚轮→ZoomAt（光标锚点）；中键拖拽→PanBy（屏幕增量）；左键→ScreenToWorld
-/// →HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮。
+/// →HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮（文本黄色加粗）。
 /// 尺寸变化→Fit（重置 zoom/pan，T10 可升级为保持视图）。线宽恒定设备像素（CAD 习惯）。
 /// 文本按水平渲染（RotationDeg 暂不参与，与 VM 文本命中盒一致）；插入点视为基线左端。
 /// </summary>
@@ -26,6 +26,7 @@ public sealed class DrawingCanvas : Control
     private static readonly Pen SelectionPen = new(Brushes.Yellow, 2);
 
     private readonly Dictionary<uint, Pen> _penCache = new();
+    private readonly Dictionary<uint, IBrush> _brushCache = new();
     private bool _panning;
     private Point _lastPanPosition;
     private Size _lastFitSize;
@@ -111,9 +112,11 @@ public sealed class DrawingCanvas : Control
                 if (item.Points.Count < 1 || string.IsNullOrEmpty(item.Text)) break;
                 double fontSize = item.TextHeight * ViewModel.Scale;
                 if (fontSize < MinTextFontSize) break; // 亚像素文本不可读，跳过
+                bool isSelected = ReferenceEquals(pen, SelectionPen);
                 var text = new FormattedText(
                     item.Text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
-                    new Typeface(FontFamily.Default), fontSize, GetBrush(item.ColorRgb));
+                    new Typeface(FontFamily.Default, FontStyle.Normal, isSelected ? FontWeight.Bold : FontWeight.Normal),
+                    fontSize, isSelected ? SelectionPen.Brush! : GetBrush(item.ColorRgb));
                 Point p = ScreenPoint(item.Points[0]);
                 // CAD 插入点=基线左端；FormattedText 以左上角定位 → 上移文本高度。
                 context.DrawText(text, new Point(p.X, p.Y - text.Height));
@@ -229,8 +232,15 @@ public sealed class DrawingCanvas : Control
         return pen;
     }
 
-    private static IBrush GetBrush(uint rgb) =>
-        new SolidColorBrush(Color.FromRgb((byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb));
+    private IBrush GetBrush(uint rgb)
+    {
+        if (!_brushCache.TryGetValue(rgb, out IBrush? brush))
+        {
+            brush = new SolidColorBrush(Color.FromRgb((byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb));
+            _brushCache[rgb] = brush;
+        }
+        return brush;
+    }
 
     private static double NormDeg(double deg) => ((deg % 360.0) + 360.0) % 360.0;
 }

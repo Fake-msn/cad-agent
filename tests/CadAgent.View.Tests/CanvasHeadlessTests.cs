@@ -144,6 +144,38 @@ public class CanvasHeadlessTests
         finally { window.Close(); }
     }
 
+    [AvaloniaFact]
+    public void Canvas_TextSelection_PixelProbeShowsYellowOnlyWhenSelected()
+    {
+        // Single RED text at the origin: degenerate bounds -> baseScale=1, so the
+        // font size equals TextHeight (100px). Glyphs render above the insertion
+        // screen point. Yellow highlight = high GREEN channel; red text on the
+        // dark background keeps GREEN low. Probe 5x5 AA neighborhoods on a grid
+        // across the glyph box (exact glyph metrics vary by font).
+        var text = new RenderItem(RenderKind.Text, new[] { (0.0, 0.0) }, "0", 0xFF0000, "MMMM", 100, 0);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { text });
+        try
+        {
+            (double px, double py) = vm.WorldToScreen(0, 0);
+            window.CaptureRenderedFrame(); // ensure at least one composed frame
+            WriteableBitmap? normal = window.CaptureRenderedFrame();
+            Assert.NotNull(normal);
+            Assert.True(MaxChannelInBox(normal!, px + 2, py - 100, px + 350, py - 2, channel: 0) > 150,
+                "red text must actually render (RED channel present)");
+            Assert.True(MaxChannelInBox(normal!, px + 2, py - 100, px + 350, py - 2, channel: 1) < 90,
+                "unselected text must stay its normal red color (no yellow)");
+
+            vm.Select(0);
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            WriteableBitmap? selected = window.CaptureRenderedFrame();
+            Assert.NotNull(selected);
+            Assert.True(MaxChannelInBox(selected!, px + 2, py - 100, px + 350, py - 2, channel: 1) > 150,
+                "selected text must highlight yellow (SelectionPen color)");
+        }
+        finally { window.Close(); }
+    }
+
     /// <summary>Max RGB channel in a 5x5 neighborhood (anti-aliased 1px stroke may
     /// not fully cover the exact mathematical point), bounds-checked.</summary>
     private static int NeighborhoodBrightness(WriteableBitmap frame, int x, int y)
@@ -161,6 +193,25 @@ public class CanvasHeadlessTests
                 int r = Marshal.ReadByte(fb.Address, offset + 2);
                 max = Math.Max(max, Math.Max(r, Math.Max(g, b)));
             }
+        return max;
+    }
+
+    /// <summary>Max of one RGBA channel (0=R,1=G,2=B; headless frames are Rgba8888)
+    /// over 5x5 AA neighborhoods sampled on an 8px grid inside the given screen
+    /// box, bounds-checked.</summary>
+    private static int MaxChannelInBox(WriteableBitmap frame, double x0, double y0, double x1, double y1, int channel)
+    {
+        using ILockedFramebuffer fb = frame.Lock();
+        int max = 0;
+        for (int y = (int)Math.Round(y0); y <= (int)Math.Round(y1); y += 8)
+            for (int x = (int)Math.Round(x0); x <= (int)Math.Round(x1); x += 8)
+                for (int dy = -2; dy <= 2; dy++)
+                    for (int dx = -2; dx <= 2; dx++)
+                    {
+                        int px = x + dx, py = y + dy;
+                        if (px < 0 || py < 0 || px >= fb.Size.Width || py >= fb.Size.Height) continue;
+                        max = Math.Max(max, Marshal.ReadByte(fb.Address, py * fb.RowBytes + px * 4 + channel));
+                    }
         return max;
     }
 }
