@@ -80,3 +80,36 @@ symbols:
   - { name: "接触器主动断触点", file: elec-076.dxf, class: Auxiliary, description: "Contactor; Main break contact of a contactor；非操作位置触点闭合" }
   - { name: "隔离器", file: elec-077.dxf, class: Auxiliary, description: "Disconnector; Isolator；动合+固定端横bar" }
   - { name: "隔离开关", file: elec-078.dxf, class: Auxiliary, description: "Switch-disconnector; on-load isolating switch；77+blade枢轴小圆" }
+  - { name: "带自动释放功能的隔离开关", file: elec-079.dxf, class: Auxiliary, description: "Switch-disconnector, automatic release；78+涂黑释放块" }
+  - { name: "断路器", file: elec-080.dxf, class: Auxiliary, description: "Circuit breaker, general symbol；动合+×标记" }
+  - { name: "带隔离功能断路器", file: elec-081.dxf, class: Auxiliary, description: "Circuit breaker with disconnector function；80+顶部星号" }
+  - { name: "剩余电流动作断路器", file: elec-082.dxf, class: Auxiliary, description: "Residual current operated circuit-breaker；80+IΔ注记" }
+  - { name: "带隔离功能的剩余电流动作断路器", file: elec-083.dxf, class: Auxiliary, description: "Residual current operated circuit-breaker with disconnector function；81+IΔ注记" }
+  - { name: "继电器线圈、驱动器件", file: elec-084.dxf, class: Auxiliary, description: "Relay coil, general symbol; operating device, general symbol；矩形+上下引线" }
+  - { name: "缓慢释放继电器线圈", file: elec-085.dxf, class: Auxiliary, description: "Relay coil of a slow-releasing relay；84+左涂黑块" }
+  - { name: "缓慢吸合继电器线圈", file: elec-086.dxf, class: Auxiliary, description: "Relay coil of a slow-operating relay；84+左×块" }
+  - { name: "热继电器的驱动器件", file: elec-087.dxf, class: Auxiliary, description: "Operating device of a thermal relay；84+内钩形" }
+  - { name: "熔断器", file: elec-088.dxf, class: Auxiliary, description: "Fuse, general symbol；竖矩形+上下引线" }
+  - { name: "熔断器式隔离器", file: elec-089.dxf, class: Auxiliary, description: "Fuse-disconnector; Fuse isolator；动合+blade斜矩形+顶bar；斜矩形近似" }
+  - { name: "熔断器式隔离开关", file: elec-090.dxf, class: Auxiliary, description: "Fuse switch-disconnector; On-load isolating fuse switch；89+枢轴小圆" }
+  - { name: "火花间隙", file: elec-091.dxf, class: Auxiliary, description: "Spark gap；相对双箭头留隙" }
+  - { name: "避雷器", file: elec-092.dxf, class: Auxiliary, description: "Surge diverter; Lightning arrester；竖矩形+内下箭头+引线" }
+  - { name: "多功能电器(CPS)", file: elec-093.dxf, class: Auxiliary, description: "Multi-ple-function switching device；控制与保护开关电器；功能符号组合可省略不采用要素" }
+  - { name: "电压表", file: elec-094.dxf, class: Auxiliary, description: "Voltmeter；圆+V" }
+  - { name: "电度表(瓦时计)", file: elec-095.dxf, class: Auxiliary, description: "Watt-hour meter；矩形+上隔线+Wh" }
+  - { name: "复费率电度表", file: elec-096.dxf, class: Auxiliary, description: "Multi-rate watt-hour meter；示出二费率：双隔线+Wh" }
+  - { name: "信号灯", file: elec-097.dxf, class: Lighting, description: "Lamp, general symbol；圆内×（见注5）" }
+  - { name: "音响信号装置", file: elec-098.dxf, class: Auxiliary, description: "Acoustic signalling device, general symbol；电喇叭/电铃/单击电铃/电动汽车笛；上半圆+三腿" }
+  - { name: "蜂鸣器", file: elec-099.dxf, class: Auxiliary, description: "Buzzer；下半圆+顶线+双腿" }
+  - { name: "发电站(规划的)", file: elec-100.dxf, class: Auxiliary, description: "Generating station, planned；空方形" }
+  - { name: "发电站(运行的)", file: elec-101.dxf, class: Auxiliary, description: "Generating station, in service or unspecified；斜线填充方形" }
+  - { name: "热电联产发电站(规划的)", file: elec-102.dxf, class: Auxiliary, description: "Combined electric and heat generated station, planned；方形+右双竖线" }
+  - { name: "热电联产发电站(运行的)", file: elec-103.dxf, class: Auxiliary, description: "Combined electric and heat generated station, in service or unspecified；左半斜线填充+右双竖线" }
+  - { name: "变电站、配电所(规划的)", file: elec-104.dxf, class: Auxiliary, description: "Substation, planned；空圆；可加详细类型说明" }
+  - { name: "变电站、配电所(运行的)", file: elec-105.dxf, class: Auxiliary, description: "Substation, in service or unspecified；斜线填充圆" }
+  - { name: "接闪杆", file: elec-106.dxf, class: Auxiliary, description: "Air-termination rod；实心点" }
+  - { name: "架空线路", file: elec-107.dxf, class: Auxiliary, description: "Over-head line；横线+中圆" }
+  - { name: "电力电缆井/人孔", file: elec-108.dxf, class: Auxiliary, description: "Manhole for underground chamber；方形穿横线" }
+  - { name: "手孔", file: elec-109.dxf, class: Auxiliary, description: "Hand hole for underground chamber；矩形+中竖线穿横线" }
+  - { name: "电缆梯架、托盘和槽盒线路", file: elec-110.dxf, class: Auxiliary, description: "Line of cable ladder, cable tray, cable trunking；三平行实线+端tick" }
+  - { name: "电缆沟线路", file: elec-111.dxf, class: Auxiliary, description: "Line of cable trench；三平行虚线+端tick" }
