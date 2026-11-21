@@ -265,6 +265,55 @@ public class SemanticViewModelTests
         Assert.Equal(1, raised);
     }
 
+    /// <summary>
+    /// Review fix (Important): concurrent overlay read-modify-write must be
+    /// serialized. Two MapAsync on different layers race Load->mutate->Save:
+    /// without a gate both load the same version and the last writer silently
+    /// drops the other's LayerMapping/HumanConfirmed while BOTH audit records
+    /// claim success (atomic Save prevents corruption, not lost updates).
+    /// Post-fix determinism: the gate makes the second Load see the first
+    /// Save, so Version advances exactly twice and both mappings survive.
+    /// </summary>
+    [Fact]
+    public async Task Map_ConcurrentTwoLayers_NoLostUpdate_BothAudited_ChainValid()
+    {
+        using var f = new Fixture();
+        SemanticViewModel vm = f.MakeVm();
+        await vm.ScanAsync(Array.Empty<string>());
+        int versionAfterScan = vm.Version;
+
+        await Task.WhenAll(
+            vm.MapAsync("W-墙体", SemanticClass.Wall),
+            vm.MapAsync("WALL", SemanticClass.Wall));
+
+        Assert.Null(vm.ErrorMessage);
+        SemanticOverlay overlay = SemanticOverlay.Load(f.OverlayPath);
+        // BOTH human confirmations present — no lost update in either direction.
+        LayerMapping wall = Assert.Single(overlay.Mappings, m => m.LayerName == "W-墙体");
+        Assert.Equal(SemanticClass.Wall, wall.Class);
+        Assert.Equal("tester", wall.ConfirmedBy);
+        LayerMapping known = Assert.Single(overlay.Mappings, m => m.LayerName == "WALL");
+        Assert.Equal(SemanticClass.Wall, known.Class);
+        Assert.Equal("tester", known.ConfirmedBy);
+        foreach (string handle in f.Session.Doc.Entities.Select(e => e.Handle.ToString()))
+        {
+            SemanticAnnotation a = Assert.Single(overlay.Annotations, x => x.TargetHandle == handle);
+            Assert.Equal(Provenance.HumanConfirmed, a.Provenance);
+            Assert.Equal(1.0, a.Confidence);
+            Assert.Equal(SemanticClass.Wall, a.Class);
+        }
+        // Serialized RMW: each Save sees the prior one -> exactly +2 versions.
+        Assert.Equal(versionAfterScan + 2, overlay.Version);
+        Assert.Equal(overlay.Version, vm.Version);
+        Assert.Empty(vm.Ambiguous);
+
+        List<AuditRecord> maps = f.Audit.ReadAll().Where(r => r.Entry.Kind == "semantic-map").ToList();
+        Assert.Equal(2, maps.Count);
+        Assert.Contains(maps, r => r.Entry.Target == "W-墙体");
+        Assert.Contains(maps, r => r.Entry.Target == "WALL");
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
     // ---- Isolate ----
 
     [Fact]

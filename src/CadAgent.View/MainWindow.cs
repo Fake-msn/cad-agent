@@ -990,18 +990,27 @@ public sealed class MainWindow : Window
     private sealed class LazyWriteAuditStore : IAuditStore
     {
         private readonly string _dbPath;
+        private readonly object _createLock = new();
         private SqliteAuditStore? _inner;
 
         public LazyWriteAuditStore(string dbPath) => _dbPath = dbPath;
 
         private SqliteAuditStore Ensure()
         {
-            if (_inner is null)
+            // 双检锁（审查修复）：并发首写（Scan 的后台 Append 与裁定的同步
+            // Append 共享本占位）必须创建同一个 SqliteAuditStore——两个实例
+            // 各持独立 _writeLock，事务交错读同一链头会写出重复 seq/断链。
+            SqliteAuditStore? inner = _inner;
+            if (inner is not null) return inner;
+            lock (_createLock)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_dbPath))!);
-                _inner = new SqliteAuditStore(_dbPath);
+                if (_inner is null)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_dbPath))!);
+                    _inner = new SqliteAuditStore(_dbPath);
+                }
+                return _inner;
             }
-            return _inner;
         }
 
         public AuditRecord Append(AuditEntry e) => Ensure().Append(e);

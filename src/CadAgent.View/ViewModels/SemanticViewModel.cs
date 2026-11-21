@@ -31,6 +31,13 @@ public sealed class SemanticViewModel
     private readonly IIdentityProvider _identity;
     private readonly string _sessionId;
 
+    // 并发闸（审查修复）：overlay 的 Load→mutate→Save→audit 必须整段互斥。
+    // CLI 每次调用串行，但视图里两个并发 Map（或 Scan 期间的 Map）会交错
+    // 加载同一版本——后写者静默丢掉先写者的 LayerMapping/HumanConfirmed，
+    // 而两条审计都声称成功（原子 Save 防损坏，不防丢更新）。异步包装先
+    // await 闸再进 Task.Run，核心体+结果发布全程持闸，finally 释放。
+    private readonly SemaphoreSlim _overlayGate = new(1, 1);
+
     public SemanticViewModel(DrawingSession session, string projectDir,
         CanvasViewModel? canvasVM, IAuditStore auditStore, IIdentityProvider identity,
         string? sessionId = null)
@@ -62,10 +69,12 @@ public sealed class SemanticViewModel
 
     /// <summary>
     /// 扫描：后台执行加载+扫描+落盘+审计（不阻塞 UI 线程），结果回到调用方上下文发布。
+    /// 与 MapAsync 共用并发闸：Load→mutate→Save→audit 整段串行，杜绝丢更新。
     /// 任何异常（包非法/Id 冲突/overlay 损坏/审计故障）→ ErrorMessage，列表清空。
     /// </summary>
     public async Task ScanAsync(IReadOnlyList<string> skillDirs)
     {
+        await _overlayGate.WaitAsync();
         try
         {
             ScanResult result = await Task.Run(() => ScanCore(skillDirs));
@@ -81,15 +90,21 @@ public sealed class SemanticViewModel
             Version = 0;
             ErrorMessage = ex.Message;
         }
+        finally
+        {
+            _overlayGate.Release();
+        }
         SemanticChanged?.Invoke();
     }
 
     /// <summary>
     /// 人工确认图层映射：后台执行确认+升级标注+落盘+审计。无 overlay → 提示先扫描
     /// （同 CLI：不留审计、不落盘）；成功后该层移出不明确列表。
+    /// 与 ScanAsync 共用并发闸：并发 Map 串行化，后一个 Load 必见前一个 Save。
     /// </summary>
     public async Task MapAsync(string layer, SemanticClass cls)
     {
+        await _overlayGate.WaitAsync();
         try
         {
             SemanticOverlay overlay = await Task.Run(() => MapCore(layer, cls));
@@ -103,6 +118,10 @@ public sealed class SemanticViewModel
         catch (Exception ex)
         {
             ErrorMessage = ex.Message;
+        }
+        finally
+        {
+            _overlayGate.Release();
         }
         SemanticChanged?.Invoke();
     }

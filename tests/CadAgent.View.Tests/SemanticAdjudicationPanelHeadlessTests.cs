@@ -336,4 +336,44 @@ public class SemanticAdjudicationPanelHeadlessTests
         }
         finally { Cleanup(window, f); }
     }
+
+    /// <summary>
+    /// Review fix (Important): LazyWriteAuditStore.Ensure must double-check
+    /// lock first-create. Semantic (Task.Run core) and Adjudication
+    /// (synchronous core) share ONE lazy store; concurrent first appends
+    /// without the lock create two SqliteAuditStore instances (two
+    /// _writeLocks) whose transactions read the same chain head -> duplicate
+    /// seq / broken chain. Post-fix: one shared instance, chain valid.
+    /// </summary>
+    [AvaloniaFact]
+    public async Task NoAuditDb_ConcurrentScanAndAdjudicate_ShareOneStore_ChainValid()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withAuditDb: false);
+        var refreshed = new TaskCompletionSource();
+        void Handler() => refreshed.TrySetResult();
+        window.Issues!.IssuesChanged += Handler;
+        try
+        {
+            Assert.False(File.Exists(f.AuditDbPath)); // open must not create the db (T6)
+            // Scan core appends on a thread-pool thread while AdjudicateAsync
+            // appends synchronously on the UI thread -> genuine Ensure race.
+            await Task.WhenAll(
+                window.Semantic!.ScanAsync(Array.Empty<string>()),
+                window.Adjudication!.AdjudicateAsync("R-50001-5.0.2", RuleForce.Mandatory, false, "并发首写"));
+            await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(15)); // linked issues refresh done
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.Null(window.Semantic!.ErrorMessage);
+            Assert.True(File.Exists(f.AuditDbPath));
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "semantic-scan");
+            Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "rule-adjudicated");
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            window.Issues!.IssuesChanged -= Handler;
+            Cleanup(window, f);
+        }
+    }
 }
