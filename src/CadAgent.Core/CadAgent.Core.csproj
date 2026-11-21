@@ -9,6 +9,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CadAgent.Core.Tests" />
     <InternalsVisibleTo Include="CadAgent.Adapters.Zwcad" />
+    <InternalsVisibleTo Include="CadAgent.Adapters.Acad" />
     <InternalsVisibleTo Include="CadAgent.Adapters.Zwcad.Tests" />
     <InternalsVisibleTo Include="CadAgent.Adapters.Acad.Tests" />
   </ItemGroup>

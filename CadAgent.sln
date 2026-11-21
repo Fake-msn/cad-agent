@@ -22,6 +22,7 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.View", "src\CadAgent.View\CadAgent.View.csproj", "{1E542113-8DAE-4F00-A3E5-7D532255E236}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.View.Tests", "tests\CadAgent.View.Tests\CadAgent.View.Tests.csproj", "{874B6E37-70CC-4B23-8FCC-0D6F5474D7B9}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.Llm", "src\CadAgent.Llm\CadAgent.Llm.csproj", "{8284F412-2CD2-42DA-9055-04EFB4D660AB}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.Llm.Tests", "tests\CadAgent.Llm.Tests\CadAgent.Llm.Tests.csproj", "{FD5E5A5A-D76E-4D85-8B5E-4E7B0E9947E4}"
@@ -29,6 +30,10 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.Adapters.Zwcad", "src\CadAgent.Adapters.Zwcad\CadAgent.Adapters.Zwcad.csproj", "{9D8798D0-CDDC-4EF7-91CB-1A76B049D266}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.Adapters.Zwcad.Tests", "tests\CadAgent.Adapters.Zwcad.Tests\CadAgent.Adapters.Zwcad.Tests.csproj", "{65B8E789-1C6C-40CA-A7F2-A5AEDAF142CF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.Adapters.Acad", "src\CadAgent.Adapters.Acad\CadAgent.Adapters.Acad.csproj", "{FD88C436-561C-4885-8A1F-892ECB6404F9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CadAgent.Adapters.Acad.Tests", "tests\CadAgent.Adapters.Acad.Tests\CadAgent.Adapters.Acad.Tests.csproj", "{5F0E733C-7551-45E2-AE0B-D60ECBF15787}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -87,6 +92,14 @@ Global
 		{65B8E789-1C6C-40CA-A7F2-A5AEDAF142CF}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{65B8E789-1C6C-40CA-A7F2-A5AEDAF142CF}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{65B8E789-1C6C-40CA-A7F2-A5AEDAF142CF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FD88C436-561C-4885-8A1F-892ECB6404F9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FD88C436-561C-4885-8A1F-892ECB6404F9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FD88C436-561C-4885-8A1F-892ECB6404F9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FD88C436-561C-4885-8A1F-892ECB6404F9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5F0E733C-7551-45E2-AE0B-D60ECBF15787}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5F0E733C-7551-45E2-AE0B-D60ECBF15787}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5F0E733C-7551-45E2-AE0B-D60ECBF15787}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5F0E733C-7551-45E2-AE0B-D60ECBF15787}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{DF54FDC1-546E-4FDB-B4DF-4B5492219FE4} = {8090C9E6-0523-471D-965D-6A0D392859DA}
@@ -101,5 +114,7 @@ Global
 		{FD5E5A5A-D76E-4D85-8B5E-4E7B0E9947E4} = {683D9304-1D64-48A8-B4E6-7CBF3A024C98}
 		{9D8798D0-CDDC-4EF7-91CB-1A76B049D266} = {8090C9E6-0523-471D-965D-6A0D392859DA}
 		{65B8E789-1C6C-40CA-A7F2-A5AEDAF142CF} = {683D9304-1D64-48A8-B4E6-7CBF3A024C98}
+		{FD88C436-561C-4885-8A1F-892ECB6404F9} = {8090C9E6-0523-471D-965D-6A0D392859DA}
+		{5F0E733C-7551-45E2-AE0B-D60ECBF15787} = {683D9304-1D64-48A8-B4E6-7CBF3A024C98}
 	EndGlobalSection
 EndGlobal
