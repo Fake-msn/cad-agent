@@ -370,6 +370,16 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **3c 承接**：中望 COM 适配器（ICadRuntime）+ 保真导出 + 审计包（含哈希链外部锚）+ 厂商支持矩阵。
 - 诚实边界：DPAPI Windows-only（跨平台留后续）；vision heuristic 保守（最终靠探针）；套餐窗口第一 slice 从首次 Record 起算；Ollama 探测 heuristic；llm test 实弹冒烟待用户配置真实 key。
 
+**计划3b-i 完成（编排循环核心，2026-11-21 记录；全套件 438 测试）**：
+- EgressPolicy（§8.5）：项目 local-only.txt 硬约束 > profile 策略 > 首次云端确认（cloud-consent.json 持久化）；localhost 一等公民。
+- DrawingSummarizer：有界确定性文本摘要（图层/实体计数/文本清单前50/块名/语义标注×来源计数+人工映射含 HumanConfirmed 标记）；视觉渲染留 3c/计划4。
+- AgentPlanParser：```json 围栏/裸 JSON 提取 + planId 缺省注入 + StepPlanParser schema + kind 白名单（LLM 幻觉挡在引擎外）。
+- AgentOrchestrator：出境闸→预算前置→LLM 计划→校验→人工确认→StepEngine 执行→失败一次重规划（错误反馈）→仍失败 Escalated；llm-call 审计（model/usage/attempt/planId，无图纸内容无密钥）；agent-run/egress-blocked/egress-consent/plan-rejected 全事件。
+- CLI agent 命令：--yes 自动确认（测试路径）/ stdin 交互确认（手动冒烟待真实终端）；LlmClientFactory 注入；六处理器 kindDocs。
+- E2E：多步计划执行+审计全链+consent 持久化（二次调用不再询问）+配置/审计全文密钥扫描。
+- **3b-ii 承接**：审查签认（review 角色+职责分离+驳回回滚）；步级 undo（会话内模型 undo 栈）；REPL 交互会话。
+- 诚实边界：交互确认 stdin 路径测试不覆盖（--yes 全测）；重规划上限 1 次（裁定）；意图文本不入审计（隐私）；读图仅文本摘要（视觉 deferred）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
