@@ -68,7 +68,10 @@ public sealed class DrawingCanvas : Control
         RenderItem? selected = ViewModel.SelectedItem;
         foreach (RenderItem item in ViewModel.VisibleItems)
         {
-            Pen pen = IsSelected(item, selected) ? SelectionPen : GetPen(item.ColorRgb);
+            // T5：问题定位高亮集命中的图元与单选选中同样施加高亮（按真实句柄匹配）。
+            bool highlight = IsSelected(item, selected)
+                || (item.Handle.Length > 0 && ViewModel.HighlightedHandles.Contains(item.Handle));
+            Pen pen = highlight ? SelectionPen : GetPen(item.ColorRgb);
             DrawItem(context, item, pen);
         }
     }

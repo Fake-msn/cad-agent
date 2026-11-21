@@ -380,4 +380,109 @@ public class CanvasViewModelTests
         vm.Select(-1);
         Assert.Null(vm.SelectedIndex);
     }
+
+    // ---- T5: multi-handle issue highlight + center-on ----
+
+    [Fact]
+    public void SelectHandles_SetsHighlightSet_FirstMatchSelected_RaisesOnce()
+    {
+        var items = new[] { Line(0, 0, 1, 1, handle: "A"), Line(2, 2, 3, 3, handle: "B") };
+        var vm = new CanvasViewModel(items);
+        int raised = 0;
+        vm.RenderInvalidated += () => raised++;
+        vm.SelectHandles(new[] { "B", "A" });
+        Assert.Equal(new[] { "A", "B" }, vm.HighlightedHandles.OrderBy(h => h).ToArray());
+        Assert.Equal(0, vm.SelectedIndex); // first item (in Items order) whose handle matches
+        Assert.Equal("A", vm.SelectedHandle);
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void SelectHandles_ReplacesPreviousSet_EmptyClears()
+    {
+        var items = new[] { Line(0, 0, 1, 1, handle: "A"), Line(2, 2, 3, 3, handle: "B") };
+        var vm = new CanvasViewModel(items);
+        vm.SelectHandles(new[] { "A", "B" });
+        vm.SelectHandles(new[] { "B" });
+        Assert.Equal(new[] { "B" }, vm.HighlightedHandles.ToArray());
+        Assert.Equal(1, vm.SelectedIndex);
+        vm.SelectHandles(Array.Empty<string>());
+        Assert.Empty(vm.HighlightedHandles);
+        Assert.Null(vm.SelectedIndex);
+    }
+
+    [Fact]
+    public void SelectHandles_UnknownOrEmptyHandles_NoSelection()
+    {
+        var vm = new CanvasViewModel(new[] { Line(0, 0, 1, 1, handle: "") });
+        vm.SelectHandles(new[] { "", "NO-SUCH" });
+        Assert.Null(vm.SelectedIndex); // empty item handle never matches
+    }
+
+    [Fact]
+    public void Select_ClearsIssueHighlights()
+    {
+        var vm = new CanvasViewModel(new[] { Line(0, 0, 1, 1, handle: "A"), Line(2, 2, 3, 3, handle: "B") });
+        vm.SelectHandles(new[] { "A", "B" });
+        vm.Select(1); // user takes over selection -> issue highlight set cleared
+        Assert.Empty(vm.HighlightedHandles);
+        Assert.Equal("B", vm.SelectedHandle);
+    }
+
+    [Fact]
+    public void CenterOn_MatchedHandles_CentersBounds_KeepsZoom()
+    {
+        var items = new[] { Line(0, 0, 10, 10, handle: "A"), Line(100, 100, 110, 110, handle: "B") };
+        var vm = new CanvasViewModel(items);
+        vm.Fit((0, 0, 110, 110), 1000, 500);
+        vm.ZoomAt(2, 500, 250);
+        double zoomBefore = vm.Zoom;
+        int raised = 0;
+        vm.RenderInvalidated += () => raised++;
+        vm.CenterOn(new[] { "B" });
+        // Matched bounds (100,100)-(110,110), center (105,105) -> viewport center.
+        (double sx, double sy) = vm.WorldToScreen(105, 105);
+        Assert.Equal(500, sx, 6);
+        Assert.Equal(250, sy, 6);
+        Assert.Equal(zoomBefore, vm.Zoom);
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void CenterOn_MultipleHandles_CentersUnionBounds()
+    {
+        var items = new[] { Line(0, 0, 10, 10, handle: "A"), Line(100, 100, 110, 110, handle: "B") };
+        var vm = new CanvasViewModel(items);
+        vm.Fit((0, 0, 110, 110), 1000, 500);
+        vm.PanBy(120, -80); // displace first so centering is observable
+        vm.CenterOn(new[] { "A", "B" });
+        (double sx, double sy) = vm.WorldToScreen(55, 55); // union center
+        Assert.Equal(500, sx, 6);
+        Assert.Equal(250, sy, 6);
+    }
+
+    [Fact]
+    public void CenterOn_NoMatch_NoOpNoEvent()
+    {
+        var vm = new CanvasViewModel(new[] { Line(0, 0, 10, 10, handle: "A") });
+        vm.Fit((0, 0, 10, 10), 1000, 500);
+        int raised = 0;
+        vm.RenderInvalidated += () => raised++;
+        vm.CenterOn(new[] { "NO-SUCH" });
+        Assert.Equal((0.0, 0.0), vm.Pan);
+        Assert.Equal(0, raised);
+        vm.CenterOn(Array.Empty<string>());
+        Assert.Equal(0, raised);
+    }
+
+    [Fact]
+    public void CenterOn_BeforeFit_NoOp()
+    {
+        var vm = new CanvasViewModel(new[] { Line(0, 0, 10, 10, handle: "A") });
+        int raised = 0;
+        vm.RenderInvalidated += () => raised++;
+        vm.CenterOn(new[] { "A" }); // viewport unknown -> no-op
+        Assert.Equal((0.0, 0.0), vm.Pan);
+        Assert.Equal(0, raised);
+    }
 }

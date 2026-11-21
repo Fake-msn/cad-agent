@@ -13,6 +13,8 @@ namespace CadAgent.View.ViewModels;
 /// HitTest 容差为世界单位；只命中可见图层，返回 Items 原始索引（首个命中）。
 /// 选择（T4）：SelectedHandle 为选中图元的真实 DXF 句柄字符串（RenderItem.Handle，
 /// Insert 展开子图元为 "{insertHandle}:{childIndex}"），画布按句柄匹配高亮。
+/// 问题定位（T5）：SelectHandles 多句柄高亮 + CenterOn 居中（保持 Zoom）；
+/// Select（用户点击）清空定位高亮集。
 /// </summary>
 public sealed class CanvasViewModel
 {
@@ -27,8 +29,9 @@ public sealed class CanvasViewModel
 
     private double _baseScale = 1;
     private double _minX, _minY;
-    private double _viewportH;
+    private double _viewportW, _viewportH;
     private double _offsetX, _offsetY;
+    private readonly HashSet<string> _highlightedHandles = new(StringComparer.Ordinal);
 
     public CanvasViewModel(IReadOnlyList<RenderItem> items) => Items = items;
 
@@ -56,6 +59,12 @@ public sealed class CanvasViewModel
     /// <summary>选中图元（画布按 Handle 匹配高亮）。</summary>
     public RenderItem? SelectedItem => SelectedIndex is int i && i >= 0 && i < Items.Count ? Items[i] : null;
 
+    /// <summary>
+    /// 问题定位高亮句柄集（T5）：SelectHandles 设置，画布对命中的图元同样施加
+    /// 选中高亮；用户点击画布（Select）接管选择时清空。空句柄不参与匹配。
+    /// </summary>
+    public IReadOnlyCollection<string> HighlightedHandles => _highlightedHandles;
+
     /// <summary>过滤 HiddenLayers 后的可见图元。</summary>
     public IEnumerable<RenderItem> VisibleItems => Items.Where(i => !HiddenLayers.Contains(i.Layer));
 
@@ -73,6 +82,7 @@ public sealed class CanvasViewModel
         double height = bounds.MaxY - bounds.MinY;
         _minX = bounds.MinX;
         _minY = bounds.MinY;
+        _viewportW = viewportW;
         _viewportH = viewportH;
 
         if (viewportW <= 0 || viewportH <= 0)
@@ -120,10 +130,50 @@ public sealed class CanvasViewModel
         RenderInvalidated?.Invoke();
     }
 
-    /// <summary>设置选中索引；null/越界 → 清除选择。</summary>
+    /// <summary>设置选中索引；null/越界 → 清除选择。用户接管选择 → 清空问题定位高亮集（T5）。</summary>
     public void Select(int? index)
     {
         SelectedIndex = index is int i && i >= 0 && i < Items.Count ? i : null;
+        _highlightedHandles.Clear();
+        RenderInvalidated?.Invoke();
+    }
+
+    /// <summary>
+    /// 问题定位多选高亮（T5）：替换高亮句柄集；SelectedIndex 指向 Items 中首个
+    /// 句柄命中的图元（状态栏联动），无命中 → null。空句柄不参与匹配。触发一次重绘。
+    /// </summary>
+    public void SelectHandles(IEnumerable<string> handles)
+    {
+        _highlightedHandles.Clear();
+        foreach (string h in handles)
+            if (h.Length > 0) _highlightedHandles.Add(h);
+        SelectedIndex = null;
+        for (int i = 0; i < Items.Count; i++)
+            if (Items[i].Handle.Length > 0 && _highlightedHandles.Contains(Items[i].Handle))
+            {
+                SelectedIndex = i;
+                break;
+            }
+        RenderInvalidated?.Invoke();
+    }
+
+    /// <summary>
+    /// 视图居中到句柄命中图元的并集包围盒中心（T5）：保持当前 Zoom，仅调整 Pan。
+    /// 无命中图元或视口尺寸未知（未 Fit）→ 无操作（不触发事件）。
+    /// </summary>
+    public void CenterOn(IEnumerable<string> handles)
+    {
+        var wanted = new HashSet<string>(handles.Where(h => h.Length > 0), StringComparer.Ordinal);
+        if (wanted.Count == 0 || _viewportW <= 0 || _viewportH <= 0) return;
+        List<RenderItem> matched = Items.Where(i => i.Handle.Length > 0 && wanted.Contains(i.Handle)).ToList();
+        if (matched.Count == 0) return;
+
+        (double minX, double minY, double maxX, double maxY) = RenderModelBuilder.Bounds(matched);
+        double cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+        double s = Scale;
+        // WorldToScreen 逆变换：令 (cx,cy) 落在视口中心 (vpW/2, vpH/2)。
+        Pan = (_viewportW / 2 - _offsetX - (cx - _minX) * s,
+               _viewportH / 2 - _offsetY - (cy - _minY) * s);
         RenderInvalidated?.Invoke();
     }
 
