@@ -11,7 +11,8 @@ namespace CadAgent.Data.Checks;
 /// 部位 AB,AC,CE,SCE,WS,RS,CC,BC,CLC,WC,FC；灯具安装 SW,CS,DS,W,C,R,CR,WR,S,CL,HM）。
 /// 候选：缆线简写形文本（CableFormatChecker.SimpleForm 全匹配）。按 '-' 分段槽位判定：
 /// 4 段→末段=敷设部位（∈positions）、倒数第二段去数字=敷设方式（∈methods）；
-/// 3 段→末段含数字=仅方式槽（去数字判 methods）、纯字母=仅部位槽（判 positions）；
+/// 3 段→末段含数字=仅方式槽（去数字判 methods）；纯字母尾码按白名单成员资格定槽：
+/// ∈methods ∉positions→方式槽、∈positions ∉methods→部位槽、双属或双不属→不判（宁漏勿滥）；
 /// 2 段（BV-3×2.5，无尾码）不判。CE/CL 一码多义按槽位消歧（D9 注记）：同码在不同槽位
 /// 按各自白名单成员资格判（CE 方式/部位均合法；CL 方式合法、部位非法——部位白名单为 CLC）。
 /// 白名单缺键/空→对应槽位不判（无白名单不可判，保守，不产生幻影问题）。
@@ -40,13 +41,29 @@ public sealed class SlotCodeChecker : IRuleChecker
             string[] parts = value.Split('-');
             if (parts.Length < 3) continue; // 无尾码（BV-3×2.5）不判
 
-            // 简写形正则保证形态：4 段→[型号, 规格, 方式+数字, 部位]；3 段→末段为方式+数字或纯字母部位。
+            // 简写形正则保证形态：4 段→[型号, 规格, 方式+数字, 部位]；3 段→末段为方式+数字或纯字母尾码。
             string last = parts[^1];
             bool lastHasDigits = Digits.IsMatch(last);
-            string? position = parts.Length >= 4 || !lastHasDigits ? last : null;
-            string? method = parts.Length >= 4 ? Digits.Replace(parts[^2], "")
-                : lastHasDigits ? Digits.Replace(last, "")
-                : null;
+            string? position = null;
+            string? method = null;
+            if (parts.Length >= 4)
+            {
+                position = last;
+                method = Digits.Replace(parts[^2], "");
+            }
+            else if (lastHasDigits)
+            {
+                method = Digits.Replace(last, "");
+            }
+            else
+            {
+                // 3 段纯字母尾码：按白名单成员资格定槽（CE/CL 消歧先例）——仅方式成员→方式槽、
+                // 仅部位成员→部位槽；双属或双不属→不判（宁漏勿滥，尾码语义不可确知）。
+                bool inMethods = methods.Contains(last);
+                bool inPositions = positions.Contains(last);
+                if (inMethods && !inPositions) method = last;
+                else if (inPositions && !inMethods) position = last;
+            }
 
             if (method is not null && methods.Count > 0 && !methods.Contains(method))
                 issues.Add(BadCode(rule, handle, value, method, "敷设方式", "表4.2.1-1", methods));
@@ -63,5 +80,5 @@ public sealed class SlotCodeChecker : IRuleChecker
             new[] { handle },
             $"缆线标注 \"{value}\" {slot}代码 \"{code}\" 不在{table}白名单（{string.Join("、", whitelist.OrderBy(c => c, StringComparer.Ordinal))}）。",
             rule.Suggestion,
-            "缆线简写形按 '-' 分段槽位判定（末段=部位、倒数第二段去数字=方式）；CE/CL 一码多义按槽位消歧；灯具安装尾码留 luminaire-format；非缆线文本可能漏检");
+            "缆线简写形按 '-' 分段槽位判定（4段末段=部位、倒数第二段去数字=方式；3段含数字末段=方式）；3段纯字母尾码按白名单成员资格定槽（仅方式或仅部位成员），双属/双不属不判（宁漏勿滥）；CE/CL 一码多义按槽位消歧；灯具安装尾码留 luminaire-format；非缆线文本可能漏检");
 }

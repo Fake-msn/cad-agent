@@ -58,6 +58,24 @@ public class RuleLoaderTests
     }
 
     [Fact]
+    public void LoadDirectory_InvalidRuleFile_InnerExceptionPreserved()
+    {
+        // 终审修复波（裁定 3）：目录级 rewrap 不得丢内层——文件名包装须携带 ex，
+        // 链条 LoadDirectory(InvalidRuleException) → LoadYaml(InvalidRuleException) → YamlException 完整。
+        string dir = Path.Combine(Path.GetTempPath(), $"ruleloader-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "bad.yaml"), "id: [unclosed");
+            var ex = Assert.Throws<InvalidRuleException>(() => RuleLoader.LoadDirectory(dir));
+            Assert.Contains("bad.yaml", ex.Message);
+            var inner = Assert.IsType<InvalidRuleException>(ex.InnerException);
+            Assert.IsType<YamlDotNet.Core.YamlException>(inner.InnerException);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void LoadYaml_PendingOriginal_RejectedForNumericRules()
     {
         // pending-original 允许加载但引擎标记不可执行——加载层仅校验枚举合法性

@@ -6,9 +6,11 @@ namespace CadAgent.Data.Checks;
 /// <summary>
 /// GB/T 50786-2012 4.1.5 序号8 缆线标注格式（modal 双录"应（3.4.3）／宜（4.2.1）——情态冲突在案，
 /// 按较严应执行"；force recommended 由规则数据承载，检查器不覆写）。
-/// 候选：TextEntity/MText 值以 2～4 个大写字母型号前缀开头且含 "×"（保守启发）。
-/// 简报候选式 ^[A-Z]{2,4}- 的 "-" 不强制——否则缺 "-" 的格式违规（如 BV3×2.5）永不成候选，
-/// 与简报测试1矛盾；前缀后随 "-" 或数字的常见形态均入候选。
+/// 候选：TextEntity/MText 值以 2～4 个大写字母型号前缀开头（前缀后随 "-" 或数字，lookahead）
+/// 且含 "×"（保守启发）。简报候选式 ^[A-Z]{2,4}- 的 "-" 不强制——否则缺 "-" 的格式违规
+/// （如 BV3×2.5）永不成候选，与简报测试1矛盾；lookahead (?=[-\d]) 同时排除 ≥5 字母前缀
+/// （如 WDZAY-）与纯字母+×（如 MRAB×）。误旗边界如实披露：多段型号前缀（如 WDZ-YJY）
+/// 与尺寸形文本（如 MR100×50）仍成候选并可能被旗标（recommended，DetectionBasis 注明）。
 /// 合规简写形（表4.1.5 序号8 的 N/PE 省略实例，如 BV-3×2.5-PC20-WC）：
 /// ^[A-Z]{2,4}-\d+(\.\d+)?×\d+(\.\d+)?(-[A-Z]{1,3}\d+)?(-[A-Z]{1,3})?$。
 /// 完整形 a b-c(d×e+f×g)i-jh 含空格/+/括号——第一 slice 仅校验简写形候选，完整形候选不判
@@ -18,8 +20,8 @@ public sealed class CableFormatChecker : IRuleChecker
 {
     public string CheckType => "cable-format";
 
-    /// <summary>型号前缀（2～4 大写字母）开头；"-" 不强制（缺 "-" 本身即格式违规，须成候选）。</summary>
-    internal static readonly Regex CandidatePrefix = new(@"^[A-Z]{2,4}", RegexOptions.Compiled);
+    /// <summary>型号前缀（2～4 大写字母，后随 "-" 或数字）开头；"-" 不强制（缺 "-" 本身即格式违规，须成候选）。</summary>
+    internal static readonly Regex CandidatePrefix = new(@"^[A-Z]{2,4}(?=[-\d])", RegexOptions.Compiled);
 
     /// <summary>表4.1.5 序号8 合规简写形（N/PE 省略实例）；SlotCodeChecker 复用为候选判定。</summary>
     internal static readonly Regex SimpleForm = new(
@@ -50,7 +52,7 @@ public sealed class CableFormatChecker : IRuleChecker
                 new[] { handle },
                 $"缆线标注 \"{value}\" 不符合格式 a b-c(d×e+f×g)i-jh（表4.1.5 序号8）；简写实例：BV-3×2.5-PC20-WC。",
                 rule.Suggestion,
-                "文本模式候选（型号前缀+×），简写形正则；完整形（含空格/+/括号）校验留后续；非缆线文本可能漏检"));
+                "文本模式候选（型号前缀+×），简写形正则；非缆线文本可能漏检；多段型号前缀（如WDZ-YJY）与尺寸形文本（如MR100×50）可能误旗；完整形（含空格/+/括号）校验留后续"));
         }
         return issues;
     }

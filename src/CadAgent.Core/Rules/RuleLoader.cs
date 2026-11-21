@@ -46,7 +46,7 @@ public static class RuleLoader
             }
             catch (InvalidRuleException ex)
             {
-                throw new InvalidRuleException($"{Path.GetFileName(path)}: {ex.Message}");
+                throw new InvalidRuleException($"{Path.GetFileName(path)}: {ex.Message}", ex);
             }
         }
         return rules;

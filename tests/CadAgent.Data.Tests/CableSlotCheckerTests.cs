@@ -9,7 +9,8 @@ namespace CadAgent.Data.Tests;
 /// 2b-ii-b T4 缆线格式 + 槽位代码白名单检查器测试。简报测试逐字保留；
 /// 简报适配：补 using CadAgent.Data.Checks（简报代码块遗漏，检查器所在命名空间）。
 /// 候选启发说明：简报候选式 ^[A-Z]{2,4}- 若强制 "-"，缺 "-" 的 BV3×2.5 永不成候选，
-/// 与测试1（钉住 BV3×2.5 被旗标）矛盾——实现取型号前缀（2～4 大写字母）+×，"-" 不强制。
+/// 与测试1（钉住 BV3×2.5 被旗标）矛盾——实现取型号前缀（2～4 大写字母，后随 "-" 或数字，
+/// lookahead ^[A-Z]{2,4}(?=[-\d])）+×；≥5 字母前缀（ABCDE-/WDZAY-）与纯字母+×（MRAB×）不成候选。
 /// </summary>
 public class CableSlotCheckerTests : IDisposable
 {
@@ -103,6 +104,12 @@ public class CableSlotCheckerTests : IDisposable
             var issue = Assert.Single(issues);
             Assert.Contains("a b-c(d×e+f×g)i-jh", issue.Message);   // 完整格式
             Assert.Contains("BV-3×2.5-PC20-WC", issue.Message);      // 简写实例
+            // 终审裁定 1b/1c：DetectionBasis 钉住新串——误旗边界披露 + 漏检注记 + 完整形留后续。
+            Assert.Equal(
+                "文本模式候选（型号前缀+×），简写形正则；非缆线文本可能漏检；" +
+                "多段型号前缀（如WDZ-YJY）与尺寸形文本（如MR100×50）可能误旗；完整形（含空格/+/括号）校验留后续",
+                issue.DetectionBasis);
+            Assert.Contains("误旗", issue.DetectionBasis);            // 误旗边界如实披露
             Assert.Contains("完整形", issue.DetectionBasis);          // 完整形校验留后续（如实注明）
             Assert.Contains("漏检", issue.DetectionBasis);            // 候选启发保守性
         }
@@ -128,21 +135,23 @@ public class CableSlotCheckerTests : IDisposable
     [Fact]
     public void SlotCode_SuffixVariants_NoSuffixSkipped_ThreeSegmentSlots()
     {
-        // 2 段（无尾码）不判；3 段末段含数字=仅方式槽、纯字母=仅部位槽；消息引表4.2.1-1/-2。
+        // 2 段（无尾码）不判；3 段末段含数字=仅方式槽（去数字判 methods）；
+        // 3 段纯字母尾码按成员资格定槽（终审裁定 2）：FC 仅部位成员→部位槽合法；
+        // YY 双不属→不判（宁漏勿滥，原"仅部位 YY 非法"断言按裁定更新）。消息引表4.2.1-1。
         string path = DxfFixture.CreateTempDxf(doc =>
         {
             doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(0, 0), Value = "BV-3×2.5", Height = 3.5 });        // 无尾码→不判
             doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(10, 0), Value = "BV-3×2.5-SC20", Height = 3.5 });  // 仅方式 SC 合法
-            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(20, 0), Value = "BV-3×2.5-FC", Height = 3.5 });    // 仅部位 FC 合法
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(20, 0), Value = "BV-3×2.5-FC", Height = 3.5 });    // 仅部位成员 FC→部位槽合法
             doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(30, 0), Value = "BV-3×2.5-XX20", Height = 3.5 });  // 仅方式 XX 非法
-            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(40, 0), Value = "BV-3×2.5-YY", Height = 3.5 });    // 仅部位 YY 非法
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(40, 0), Value = "BV-3×2.5-YY", Height = 3.5 });    // 纯字母 YY 双不属→不判（保守）
         });
         try
         {
             var issues = new SlotCodeChecker().Check(R("slot-code-whitelist", Whitelists()), DrawingSession.Load(path), new SemanticOverlay());
-            Assert.Equal(2, issues.Count);
-            Assert.Contains(issues, i => i.Message.Contains("XX") && i.Message.Contains("表4.2.1-1"));
-            Assert.Contains(issues, i => i.Message.Contains("YY") && i.Message.Contains("表4.2.1-2"));
+            var issue = Assert.Single(issues); // 仅 XX20 方式违规；YY 双不属不判
+            Assert.Contains("XX", issue.Message);
+            Assert.Contains("表4.2.1-1", issue.Message);
         }
         finally { File.Delete(path); }
     }
@@ -178,5 +187,88 @@ public class CableSlotCheckerTests : IDisposable
         Assert.Empty(CheckParams.StringSet(p, "missing"));
         Assert.Empty(CheckParams.StringSet(p, "nullKey"));
         Assert.Throws<InvalidOperationException>(() => CheckParams.StringSet(new Dictionary<string, object> { ["k"] = 42.0 }, "k"));
+    }
+
+    // ---- 终审修复波：候选边界收紧 + 误旗披露（裁定 1） ----
+
+    [Fact]
+    public void CableFormat_CandidateBoundary_LongPrefixOrPureLetterTimes_NotCandidate()
+    {
+        // 裁定 1a：CandidatePrefix=^[A-Z]{2,4}(?=[-\d])——≥5 字母前缀（ABCDE-/WDZAY-）
+        // 与纯字母+×（MRAB×，前缀后随 × 而非 -/数字）不成候选，不产生 issue。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(0, 0), Value = "ABCDE-3×2.5", Height = 3.5 });  // 5 字母→非候选
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(10, 0), Value = "WDZAY-3×2.5", Height = 3.5 }); // 5 字母→非候选
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(20, 0), Value = "MRAB×50", Height = 3.5 });     // 纯字母+×→非候选
+        });
+        try
+        {
+            var issues = new CableFormatChecker().Check(R("cable-format"), DrawingSession.Load(path), new SemanticOverlay());
+            Assert.Empty(issues);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void CableFormat_DisclosedFalseFlags_MultiSegmentPrefixAndDimension_FlaggedWithDisclosure()
+    {
+        // 裁定 1b/1c：WDZ（3 字母随 -）与 MR（2 字母随数字）仍成候选→简写形不匹配→旗标；
+        // 此为已披露的误旗类（recommended + DetectionBasis 披露，可接受）；BV3×2.5 仍旗标。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(0, 0), Value = "WDZ-YJY-3×2.5-PC20-WC", Height = 3.5 }); // 多段型号前缀→误旗（披露）
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(10, 0), Value = "MR100×50", Height = 3.5 });              // 尺寸形文本→误旗（披露）
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(20, 0), Value = "BV3×2.5", Height = 3.5 });               // 缺- 格式违规仍旗标
+        });
+        try
+        {
+            var issues = new CableFormatChecker().Check(R("cable-format"), DrawingSession.Load(path), new SemanticOverlay());
+            Assert.Equal(3, issues.Count);
+            Assert.Contains(issues, i => i.Message.Contains("WDZ-YJY-3×2.5-PC20-WC"));
+            Assert.Contains(issues, i => i.Message.Contains("MR100×50"));
+            Assert.Contains(issues, i => i.Message.Contains("BV3×2.5"));
+            Assert.All(issues, i => Assert.Contains("误旗", i.DetectionBasis)); // 误旗边界披露
+        }
+        finally { File.Delete(path); }
+    }
+
+    // ---- 终审修复波：3 段纯字母尾码成员资格定槽（裁定 2） ----
+
+    [Fact]
+    public void SlotCode_ThreeSegmentBareLetterTail_MembershipDisambiguation_Conservative()
+    {
+        // CT ∈methods ∉positions→方式槽（合法，无 issue）；CE 双属→不判；XX 双不属→不判（宁漏勿滥）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(0, 0), Value = "BV-3×2.5-CT", Height = 3.5 }); // 仅方式成员→方式槽合法
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(10, 0), Value = "BV-3×2.5-CE", Height = 3.5 }); // 双属→不判
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(20, 0), Value = "BV-3×2.5-XX", Height = 3.5 }); // 双不属→不判（保守）
+        });
+        try
+        {
+            var issues = new SlotCodeChecker().Check(R("slot-code-whitelist", Whitelists()), DrawingSession.Load(path), new SemanticOverlay());
+            Assert.Empty(issues);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void SlotCode_FourSegmentBareLetterPosition_StillJudged_DetectionBasisBoundary()
+    {
+        // 4 段逻辑不变：末段 YY 仍按部位槽判（违规）；DetectionBasis 披露 3 段纯字母边界。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new TextEntity { InsertPoint = (XYZ)new XY(0, 0), Value = "BV-3×2.5-PC20-YY", Height = 3.5 });
+        });
+        try
+        {
+            var issues = new SlotCodeChecker().Check(R("slot-code-whitelist", Whitelists()), DrawingSession.Load(path), new SemanticOverlay());
+            var issue = Assert.Single(issues);
+            Assert.Contains("YY", issue.Message);
+            Assert.Contains("表4.2.1-2", issue.Message);
+            Assert.Contains("宁漏勿滥", issue.DetectionBasis); // 3 段纯字母尾码保守边界披露
+        }
+        finally { File.Delete(path); }
     }
 }
