@@ -10,13 +10,14 @@ namespace CadAgent.Core;
 /// <summary>图层别名：院标图层名 → 语义类别（aliases.yaml，class 枚举 ignoreCase）。</summary>
 public sealed record SkillAlias(string LayerName, SemanticClass Class);
 
-/// <summary>一个已加载的 skill 包：清单 + 规则 + 别名 + 步骤模板 + 来源目录。支持对象初始化器构造。</summary>
+/// <summary>一个已加载的 skill 包：清单 + 规则 + 别名 + 步骤模板 + 符号元数据 + 来源目录。支持对象初始化器构造。</summary>
 public sealed class SkillPackage
 {
     public required SkillManifest Manifest { get; init; }
     public IReadOnlyList<Rule> Rules { get; init; } = Array.Empty<Rule>();
     public IReadOnlyList<SkillAlias> Aliases { get; init; } = Array.Empty<SkillAlias>();
     public IReadOnlyList<StepTemplate> Steps { get; init; } = Array.Empty<StepTemplate>();
+    public IReadOnlyList<SymbolMeta> Symbols { get; init; } = Array.Empty<SymbolMeta>();
     public required string SourceDir { get; init; }
 }
 
@@ -24,7 +25,8 @@ public sealed class SkillPackage
 /// skill 目录加载：skill.yaml 必需（strict YAML，未知键拒绝，沿用 RoleConfig 先例）；
 /// rules/*.yaml 经 RuleLoader.LoadYaml（包内 Id 重复拒绝）；aliases.yaml 可选；
 /// steps/*.yaml 可选（2b-ii-b Task 7：模板 schema strict，包内模板名重复拒绝）；
-/// symbols 子目录容忍不解析（2b-ii-b）。异常带文件名并保留内层异常。
+/// symbols/symbols.yaml 可选（2b-ii-b Task 9：元数据 strict，包内符号名重复拒绝；
+/// 文件存在性不强制——跨文档导入计划 3）。异常带文件名并保留内层异常。
 /// </summary>
 public static class SkillLoader
 {
@@ -51,6 +53,7 @@ public static class SkillLoader
         var rules = LoadRules(Path.Combine(dir, "rules"));
         var aliases = LoadAliases(Path.Combine(dir, "aliases.yaml"));
         var steps = LoadSteps(Path.Combine(dir, "steps"));
+        var symbols = LoadSymbols(Path.Combine(dir, "symbols", "symbols.yaml"));
 
         return new SkillPackage
         {
@@ -58,6 +61,7 @@ public static class SkillLoader
             Rules = rules,
             Aliases = aliases,
             Steps = steps,
+            Symbols = symbols,
             SourceDir = dir,
         };
     }
@@ -218,6 +222,50 @@ public static class SkillLoader
         return templates;
     }
 
+    private static IReadOnlyList<SymbolMeta> LoadSymbols(string path)
+    {
+        if (!File.Exists(path))
+            return Array.Empty<SymbolMeta>();
+
+        SymbolsFileDto? dto;
+        try
+        {
+            dto = Deserializer.Deserialize<SymbolsFileDto>(File.ReadAllText(path));
+        }
+        catch (YamlException ex)
+        {
+            throw new InvalidSkillException($"symbols.yaml: {ex.Message}", ex);
+        }
+
+        if (dto?.Symbols is null)
+            return Array.Empty<SymbolMeta>();
+
+        var symbols = new List<SymbolMeta>();
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in dto.Symbols)
+        {
+            if (string.IsNullOrWhiteSpace(entry.Name))
+                throw new InvalidSkillException("symbols.yaml: name must not be empty");
+            if (string.IsNullOrWhiteSpace(entry.File))
+                throw new InvalidSkillException("symbols.yaml: file must not be empty");
+            // 全数字串拒绝（2b-ii-b Task 2，strict parity）：Enum.TryParse 会把 "3"
+            // 解析为已定义数值——class 只接受枚举名（ignoreCase），先于 parse 拒绝。
+            if (string.IsNullOrWhiteSpace(entry.Class) ||
+                entry.Class.All(char.IsAsciiDigit) ||
+                !Enum.TryParse<SemanticClass>(entry.Class, ignoreCase: true, out var parsed) ||
+                !Enum.IsDefined(parsed))
+                throw new InvalidSkillException(
+                    $"symbols.yaml: class '{entry.Class}' is not a legal SemanticClass value");
+            // 包内符号名重复拒绝（OrdinalIgnoreCase，与 aliases layerName 同口径）。
+            if (!seenNames.Add(entry.Name!))
+                throw new InvalidSkillException(
+                    $"symbols.yaml: duplicate symbol name '{entry.Name}' in skill package");
+            // 文件存在性不强制——跨文档符号导入留计划 3（第一 slice 仅元数据校验）。
+            symbols.Add(new SymbolMeta(entry.Name!, entry.File!, parsed, entry.Description ?? ""));
+        }
+        return symbols;
+    }
+
     private sealed class ManifestDto
     {
         public string? Name { get; set; }
@@ -255,6 +303,19 @@ public static class SkillLoader
     {
         public string? Kind { get; set; }
         public Dictionary<string, object>? Params { get; set; }
+    }
+
+    private sealed class SymbolsFileDto
+    {
+        public List<SymbolDto>? Symbols { get; set; }
+    }
+
+    private sealed class SymbolDto
+    {
+        public string? Name { get; set; }
+        public string? File { get; set; }
+        public string? Class { get; set; }
+        public string? Description { get; set; }
     }
 
     /// <summary>
