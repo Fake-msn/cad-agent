@@ -31,5 +31,6 @@
     <None Include="..\..\src\CadAgent.Cli\vendor-support.json" Link="vendor-support.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

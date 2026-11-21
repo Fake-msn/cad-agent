@@ -9,6 +9,7 @@ namespace CadAgent.Adapters.Zwcad.Tests;
 /// 3c T2 真机集成测试（本机 ZWCAD 2025）。无 ZWCAD 环境：dotnet test --filter Category!=RequiresZwcad。
 /// </summary>
 [Trait("Category", "RequiresZwcad")]
+[Collection("ZwcadLive")]
 public class ZwcadRuntimeTests : IDisposable
 {
     private readonly string _dxf;
