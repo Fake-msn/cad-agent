@@ -10,6 +10,7 @@ using Avalonia.VisualTree;
 using CadAgent.Core;
 using CadAgent.View.Controls;
 using CadAgent.View.Rendering;
+using CadAgent.View.Services;
 using CadAgent.View.ViewModels;
 
 namespace CadAgent.View;
@@ -27,13 +28,17 @@ namespace CadAgent.View;
 /// 选择事务 → 画布高亮 step 目标句柄 + 状态栏摘要（只读回放不改图）；
 /// Diff 切换 → 快照前后对比叠加（before 灰/after 正常/added 绿/removed 红删除线），
 /// 快照缺失等失败 → 行内错误 + 切换回退。无 audit.db → 空时间线（不创建库）。
+/// T7：审计面板上方签认面板——事务选择 + 意见框 + Approve/Reject（Role>=Review
+/// 才可点；自审拒绝行内报错）+ 每事务签认状态；签认写 signoffs.json + 审计
+/// review-signed（身份默认 WindowsIdentityProvider + .cadagent/roles.yaml，
+/// 可注入 IIdentityProvider 供测试）。
 /// </summary>
 public sealed class MainWindow : Window
 {
     private readonly string _baseStatus = "";
     private string _diffSummary = "";
 
-    public MainWindow(MainViewModel vm)
+    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null)
     {
         DataContext = vm;
         Title = vm.Title;
@@ -185,11 +190,79 @@ public sealed class MainWindow : Window
         auditPanel.Children.Add(auditError);
         auditPanel.Children.Add(auditList); // LastChildFill
 
+        // T7：审查签认面板（审计面板上方）。身份默认 Windows 账号 + roles.yaml；
+        // 测试可注入 FixedIdentity。Draw 角色 → 按钮禁用；自审 → 行内拒绝信息。
+        IIdentityProvider signoffIdentity = identity
+            ?? new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml")));
+        var signoff = new SignoffViewModel(auditStore,
+            new ReviewSignoffStore(Path.Combine(agentDir, "signoffs.json")),
+            signoffIdentity, new RoleChecker(), audit.Transactions);
+        Signoff = signoff;
+        signoff.SignoffsChanged += UpdateSignoffStatus;
+
+        var signoffHeader = new TextBlock
+        {
+            Text = "Signoff",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var txSelector = new ComboBox
+        {
+            ItemsSource = audit.Transactions,
+            Width = 300,
+            Margin = new Thickness(4, 2),
+            ItemTemplate = new FuncDataTemplate<TxGroup>((group, _) =>
+                group is null ? new Control() : new TextBlock
+                {
+                    Text = $"{(group.TxId.Length > 8 ? group.TxId[..8] : group.TxId)} · {group.Operator} · {group.Status}"
+                })
+        };
+        txSelector.SelectionChanged += OnSignoffTxSelected;
+        SignoffTxSelector = txSelector;
+
+        var comment = new TextBox { Watermark = "Comment", Width = 240, Margin = new Thickness(4, 2) };
+        SignoffComment = comment;
+
+        var approve = new Button { Content = "Approve", Margin = new Thickness(4, 2), IsEnabled = signoff.CanSign };
+        approve.Click += (_, _) => _ = SignCoreAsync(approved: true);
+        ApproveButton = approve;
+        var reject = new Button { Content = "Reject", Margin = new Thickness(4, 2), IsEnabled = signoff.CanSign };
+        reject.Click += (_, _) => _ = SignCoreAsync(approved: false);
+        RejectButton = reject;
+
+        var signoffStatus = new TextBlock { Margin = new Thickness(6, 2) };
+        SignoffStatus = signoffStatus;
+        var signoffError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        SignoffError = signoffError;
+
+        var signoffTopRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        signoffTopRow.Children.Add(signoffHeader);
+        signoffTopRow.Children.Add(txSelector);
+        signoffTopRow.Children.Add(comment);
+        signoffTopRow.Children.Add(approve);
+        signoffTopRow.Children.Add(reject);
+
+        var signoffPanel = new DockPanel { Height = 96 };
+        DockPanel.SetDock(signoffTopRow, Dock.Top);
+        signoffPanel.Children.Add(signoffTopRow);
+        DockPanel.SetDock(signoffError, Dock.Top);
+        signoffPanel.Children.Add(signoffError);
+        signoffPanel.Children.Add(signoffStatus); // LastChildFill
+
         var dock = new DockPanel();
         DockPanel.SetDock(status, Dock.Bottom);
         dock.Children.Add(status);
         DockPanel.SetDock(auditPanel, Dock.Bottom);
         dock.Children.Add(auditPanel);
+        DockPanel.SetDock(signoffPanel, Dock.Bottom);
+        dock.Children.Add(signoffPanel);
         DockPanel.SetDock(panel, Dock.Left);
         dock.Children.Add(panel);
         DockPanel.SetDock(issuesPanel, Dock.Right);
@@ -239,6 +312,27 @@ public sealed class MainWindow : Window
 
     /// <summary>审计/对比错误文本（快照缺失等失败时可见）。</summary>
     public TextBlock? AuditError { get; }
+
+    /// <summary>审查签认视图模型（T7，加载成功时非 null）。</summary>
+    public SignoffViewModel? Signoff { get; }
+
+    /// <summary>签认事务选择器（T7，headless 测试入口）。</summary>
+    public ComboBox? SignoffTxSelector { get; }
+
+    /// <summary>签认意见输入框（T7）。</summary>
+    public TextBox? SignoffComment { get; }
+
+    /// <summary>通过按钮（T7；Role&lt;Review 时禁用）。</summary>
+    public Button? ApproveButton { get; }
+
+    /// <summary>驳回按钮（T7；Role&lt;Review 时禁用）。</summary>
+    public Button? RejectButton { get; }
+
+    /// <summary>选中事务的签认状态文本（T7：unsigned / approved ✓ / rejected ✗）。</summary>
+    public TextBlock? SignoffStatus { get; }
+
+    /// <summary>签认错误文本（角色拒绝/自审拒绝/未选事务等，可见时非空）。</summary>
+    public TextBlock? SignoffError { get; }
 
     /// <summary>行模板：复选框（可见性）+ 色样 + 名称（计数）。Click → Toggle。</summary>
     private static CheckBox BuildLayerRow(LayerEntry entry, LayersViewModel layers)
@@ -488,6 +582,56 @@ public sealed class MainWindow : Window
         if (AuditError is null) return;
         AuditError.Text = message ?? "";
         AuditError.IsVisible = message is not null;
+    }
+
+    /// <summary>T7：切换签认事务 → 刷新该事务签认状态。</summary>
+    private void OnSignoffTxSelected(object? sender, SelectionChangedEventArgs e) => UpdateSignoffStatus();
+
+    /// <summary>T7：选中事务的签认状态（未签认 / 最新签认人 + 结论 + 本地时间）。</summary>
+    private void UpdateSignoffStatus()
+    {
+        if (SignoffStatus is null || Signoff is null) return;
+        if (SignoffTxSelector?.SelectedItem is not TxGroup group)
+        {
+            SignoffStatus.Text = "";
+            return;
+        }
+        string shortId = group.TxId.Length > 8 ? group.TxId[..8] : group.TxId;
+        ReviewSignoff? s = Signoff.SignoffFor(group.TxId);
+        SignoffStatus.Text = s is null
+            ? $"{shortId}: unsigned"
+            : $"{shortId}: {(s.Approved ? "approved ✓" : "rejected ✗")} by {s.Operator} ({s.Ts.ToLocalTime():yyyy-MM-dd HH:mm})";
+    }
+
+    /// <summary>
+    /// T7：Approve/Reject 共用入口。未选事务 → 引导错误；角色拒绝/自审拒绝/
+    /// 存储故障 → 捕获异常行内展示（签认与审计均未落盘）。
+    /// </summary>
+    private async Task SignCoreAsync(bool approved)
+    {
+        if (Signoff is null) return;
+        if (SignoffTxSelector?.SelectedItem is not TxGroup group)
+        {
+            SetSignoffError("Select a transaction first");
+            return;
+        }
+        SetSignoffError(null);
+        try
+        {
+            await Signoff.SignAsync(group.TxId, approved, SignoffComment?.Text ?? "");
+            UpdateSignoffStatus();
+        }
+        catch (Exception ex)
+        {
+            SetSignoffError(ex.Message);
+        }
+    }
+
+    private void SetSignoffError(string? message)
+    {
+        if (SignoffError is null) return;
+        SignoffError.Text = message ?? "";
+        SignoffError.IsVisible = message is not null;
     }
 
     /// <summary>T6：无 audit.db 时的只读空存储占位——视图绝不创建/写入审计库。</summary>
