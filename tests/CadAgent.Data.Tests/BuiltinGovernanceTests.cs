@@ -37,7 +37,16 @@ public class BuiltinGovernanceTests
                 ?? throw new InvalidOperationException($"嵌入资源缺失: {name}");
             stream.CopyTo(buffer);
         }
-        string hash = Convert.ToHexString(SHA256.HashData(buffer.ToArray())).ToLowerInvariant();
+        // 行尾无关（合并后审查）：嵌入资源字节随 checkout 行尾（autocrlf CRLF），
+        // 治理哈希 pin 钉 LF 归一字节——哈希前 \r\n→\n 归一，两种 checkout 均绿。
+        var raw = buffer.ToArray();
+        using var normalized = new MemoryStream();
+        for (int i = 0; i < raw.Length; i++)
+        {
+            if (raw[i] == 0x0D && i + 1 < raw.Length && raw[i + 1] == 0x0A) continue;
+            normalized.WriteByte(raw[i]);
+        }
+        string hash = Convert.ToHexString(SHA256.HashData(normalized.ToArray())).ToLowerInvariant();
         Assert.Equal(PinnedSha256, hash);
     }
 }

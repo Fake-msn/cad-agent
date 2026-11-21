@@ -191,7 +191,8 @@ public class SkillCommandTests : IDisposable
             """);
         var (code, _, _) = Run("semantic", "promote", "--layer", "W-自定义", "--skill", _skillDir);
         Assert.Equal(0, code);
-        string[] lines = File.ReadAllText(Path.Combine(_skillDir, "skill.yaml")).Split('\n');
+        // 行尾无关（合并后审查：CRLF checkout 下 Split('\n') 留 \r 致断言假败）
+        string[] lines = File.ReadAllLines(Path.Combine(_skillDir, "skill.yaml"));
         Assert.Contains("version: \"1.0.1\"", lines); // 顶层 patch bump（列 0 整行匹配）
         Assert.Contains("  version: \"9.9.9\"", lines); // 嵌套行原样保留
         Assert.DoesNotContain("9.9.10", string.Join("\n", lines));
