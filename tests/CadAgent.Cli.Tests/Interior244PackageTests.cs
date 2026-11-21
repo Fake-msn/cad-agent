@@ -91,6 +91,20 @@ public class Interior244PackageTests : IDisposable
     }
 
     [Fact]
+    public void LuminaireSymbols_SeventeenDxfFiles_ReadBack()
+    {
+        string symDir = Path.Combine(SkillDir("interior-244"), "symbols");
+        var files = Directory.GetFiles(symDir, "luminaire-*.dxf").OrderBy(f => f).ToList();
+        Assert.Equal(17, files.Count);
+        foreach (string f in files)
+        {
+            using var fs = File.OpenRead(f);
+            var doc = new ACadSharp.IO.DxfReader(fs).Read();
+            Assert.True(doc.Entities.Count() > 0, Path.GetFileName(f));
+        }
+    }
+
+    [Fact]
     public void Check_NoRoom_RecommendedIssue_DeferredRulesSkippedLoudly()
     {
         var (code, stdout, stderr) = Run("check", "--drawing", _noRoom, "--skill", _skillCopy);

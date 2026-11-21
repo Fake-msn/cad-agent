@@ -414,6 +414,13 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **244 重新论证结论（用户要求）**：3d 控制性布点有标准依据（A.4.4-8"可"）；房名信号=5.2.5 要求；缺口＝生产灯具布置图属顶棚镜像视图（5.1.2）+A.4.12 深度余项（定位尺寸/材料/做法/设备协调）+图例几何（VISUAL）+顶棚标高 CH（3.10.8）。
 - 诚实边界：索引符号合规检查器未建（生成已有，校验 deferred）；文本近似居中（精确排版留视图层）；A.4.12 深度余项 deferred；灯具图例几何待 MinerU high 重转+视觉关联；跨文档符号导入仍 deferred。
 
+**3e 追加：灯具图例几何补齐（2026-11-21，MinerU vlm 重转后；全套件 513 测试含 3 真机）**：
+- 用户提供 API token（仅内存使用不落盘）→ v4 API model_version=vlm 重转 244/50786（图像分析启用）；CDN 下载 Python openssl 被阻断→curl schannel 绕过（无代理）；结果包+整表裁切入库 standards-src/_reparse/（gitignored）。
+- v2 content_list 表块 image_source 整表栅格＝图例几何载体（HTML 单元格仍空，视觉关联必需，预判证实）；行列线检测裁切 20 单格→**17 类灯具图例逐类目视核对**（名称↔图形映射确认，含变体）。
+- **矢量重建 17 类 DXF**（examples/skills/interior-244/symbols/luminaire-01..17.dxf，ACadSharp 生成+读回测试）；symbols.yaml 占位转真实文件+几何描述+来源链注记。近似边界：非精确描摹/涂黑与波浪折线近似/变体未单独建块/毫米级示意比例。
+- 50786 符号表裁切同批就绪（表4.1.2 等 60+ 表）——302 符号矢量化 deferred 独立切片。
+- MinerU API 录入能力首跑通（token 环境变量注入、批次上传/轮询/下载重试）——后续新标准录入可复用该管线。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
