@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CadAgent.Core;
+using CadAgent.Data.Handlers;
 
 namespace CadAgent.Data.Tests;
 
