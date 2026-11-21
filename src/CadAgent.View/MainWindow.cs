@@ -32,11 +32,24 @@ namespace CadAgent.View;
 /// 才可点；自审拒绝行内报错）+ 每事务签认状态；签认写 signoffs.json + 审计
 /// review-signed（身份默认 WindowsIdentityProvider + .cadagent/roles.yaml，
 /// 可注入 IIdentityProvider 供测试）。
+/// T8：左栏改为三 tab（图层/纠偏/裁定）。纠偏 tab：Scan → SemanticViewModel
+/// 扫描（overlay.Save + 审计 semantic-scan），不明确图层列表带证据（计数/名称
+/// 提示/样例句柄）+ 语义类下拉 + Map（HumanConfirmed 1.0 + 审计 semantic-map）
+/// + Isolate（画布隐藏其他层）。裁定 tab：规则列表（builtin）+ 强制力覆盖下拉/
+/// 豁免勾选 + 理由/解读框 + Apply（校验同 CLI，拒绝行内报错）；裁定成功 →
+/// 问题清单自动刷新（AdjudicationsChanged → Issues.RefreshAsync 联动）。
+/// 写审计：audit.db 存在 → 复用 T6 存储；缺失 → 首次写入惰性建库
+/// （打开窗口仍不建库，沿用 T6 只读回放约定）。skill 目录接线留 T10。
 /// </summary>
 public sealed class MainWindow : Window
 {
+    /// <summary>纠偏下拉可选语义类（Unknown 不是确认目标，排除）。</summary>
+    private static readonly string[] ClassOptions =
+        Enum.GetNames<SemanticClass>().Where(n => n != nameof(SemanticClass.Unknown)).ToArray();
+
     private readonly string _baseStatus = "";
     private string _diffSummary = "";
+    private TextBlock? _semanticHeader;
 
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null)
     {
@@ -256,6 +269,153 @@ public sealed class MainWindow : Window
         signoffPanel.Children.Add(signoffError);
         signoffPanel.Children.Add(signoffStatus); // LastChildFill
 
+        // T8：写审计存储——audit.db 存在 → 复用 T6 存储；缺失 → 惰性建库占位
+        // （首次 Append 才创建 .cadagent/audit.db；打开窗口不建库，沿用 T6 约定）。
+        IAuditStore writeAudit = auditStore is SqliteAuditStore
+            ? auditStore
+            : new LazyWriteAuditStore(auditDbPath);
+
+        // T8 纠偏 tab：Scan → 不明确图层列表（证据 + 类下拉 + Map + Isolate）。
+        // skill 目录接线留 T10（当前 builtin-only，与 T5 问题清单同口径）。
+        var semantic = new SemanticViewModel(vm.Session, vm.ProjectDir, Canvas, writeAudit, signoffIdentity);
+        Semantic = semantic;
+        semantic.SemanticChanged += UpdateSemanticPanel;
+
+        var semanticHeader = new TextBlock
+        {
+            Text = "语义纠偏",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4),
+            TextWrapping = TextWrapping.Wrap
+        };
+        _semanticHeader = semanticHeader;
+        var scan = new Button { Content = "Scan", Margin = new Thickness(4, 2) };
+        scan.Click += OnScanClick;
+        SemanticScanButton = scan;
+
+        var semanticError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        SemanticError = semanticError;
+
+        var ambiguousList = new ListBox
+        {
+            ItemTemplate = new FuncDataTemplate<AmbiguousLayer>((a, _) =>
+                a is null ? new Control() : BuildAmbiguousRow(a))
+        };
+        AmbiguousList = ambiguousList;
+
+        var semanticPanel = new DockPanel();
+        DockPanel.SetDock(semanticHeader, Dock.Top);
+        semanticPanel.Children.Add(semanticHeader);
+        DockPanel.SetDock(scan, Dock.Top);
+        semanticPanel.Children.Add(scan);
+        DockPanel.SetDock(semanticError, Dock.Top);
+        semanticPanel.Children.Add(semanticError);
+        semanticPanel.Children.Add(ambiguousList); // LastChildFill
+
+        // T8 裁定 tab：规则列表 + 强制力覆盖/豁免 + 理由/解读 + Apply；
+        // 裁定成功 → 问题清单自动刷新（事件联动，无需手动 Refresh）。
+        var adjudication = new AdjudicationViewModel(vm.ProjectDir, Array.Empty<string>(), writeAudit, signoffIdentity);
+        Adjudication = adjudication;
+        adjudication.AdjudicationsChanged += () =>
+        {
+            UpdateAdjudicationPanel();
+            _ = issues.RefreshAsync(); // 联动：裁定生效 → 问题清单重评
+        };
+
+        var adjudicationHeader = new TextBlock
+        {
+            Text = "规则裁定",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4)
+        };
+        var ruleList = new ListBox
+        {
+            ItemsSource = adjudication.Rules,
+            Height = 160,
+            ItemTemplate = new FuncDataTemplate<Rule>((r, _) =>
+                r is null ? new Control() : new TextBlock
+                {
+                    Text = $"{r.Id} · {r.Force} · {r.Source.Clause}",
+                    Margin = new Thickness(4, 2),
+                    TextWrapping = TextWrapping.Wrap
+                })
+        };
+        AdjudicationRuleList = ruleList;
+
+        var forceSelector = new ComboBox
+        {
+            ItemsSource = new[] { "(default)", "Mandatory", "Recommended", "Informational" },
+            SelectedIndex = 0,
+            Width = 150,
+            Margin = new Thickness(4, 2)
+        };
+        ForceOverrideSelector = forceSelector;
+        var exempt = new CheckBox { Content = "Exempt", Margin = new Thickness(4, 2) };
+        ExemptCheck = exempt;
+        var forceRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        forceRow.Children.Add(forceSelector);
+        forceRow.Children.Add(exempt);
+
+        var reason = new TextBox { Watermark = "Reason (必填)", Margin = new Thickness(4, 2) };
+        AdjudicationReason = reason;
+        var interpretation = new TextBox { Watermark = "Interpretation", Margin = new Thickness(4, 2) };
+        AdjudicationInterpretation = interpretation;
+        var apply = new Button { Content = "Apply", Margin = new Thickness(4, 2) };
+        apply.Click += OnAdjudicateClick;
+        AdjudicationApplyButton = apply;
+
+        var adjudicationError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        AdjudicationError = adjudicationError;
+
+        var adjudicationList = new ListBox
+        {
+            ItemsSource = adjudication.Adjudications,
+            ItemTemplate = new FuncDataTemplate<Adjudication>((a, _) =>
+                a is null ? new Control() : new TextBlock
+                {
+                    Text = $"{a.RuleId} → {(a.Exempt ? "exempt" : a.ForceOverride?.ToString() ?? "default")} · {a.Reason}",
+                    Margin = new Thickness(4, 2),
+                    TextWrapping = TextWrapping.Wrap
+                })
+        };
+        AdjudicationList = adjudicationList;
+
+        var adjudicationControls = new StackPanel { Spacing = 2 };
+        adjudicationControls.Children.Add(forceRow);
+        adjudicationControls.Children.Add(reason);
+        adjudicationControls.Children.Add(interpretation);
+        adjudicationControls.Children.Add(apply);
+
+        var adjudicationPanel = new DockPanel();
+        DockPanel.SetDock(adjudicationHeader, Dock.Top);
+        adjudicationPanel.Children.Add(adjudicationHeader);
+        DockPanel.SetDock(ruleList, Dock.Top);
+        adjudicationPanel.Children.Add(ruleList);
+        DockPanel.SetDock(adjudicationControls, Dock.Top);
+        adjudicationPanel.Children.Add(adjudicationControls);
+        DockPanel.SetDock(adjudicationError, Dock.Top);
+        adjudicationPanel.Children.Add(adjudicationError);
+        adjudicationPanel.Children.Add(adjudicationList); // LastChildFill：当前裁定列表
+
+        // T8：左栏三 tab（图层默认选中，T4 行为不变；未选中 tab 内容不进入视觉树）。
+        var tabs = new TabControl { Width = 220 };
+        tabs.Items.Add(new TabItem { Header = "图层", Content = panel });
+        tabs.Items.Add(new TabItem { Header = "纠偏", Content = semanticPanel });
+        tabs.Items.Add(new TabItem { Header = "裁定", Content = adjudicationPanel });
+        LeftTabs = tabs;
+
         var dock = new DockPanel();
         DockPanel.SetDock(status, Dock.Bottom);
         dock.Children.Add(status);
@@ -263,8 +423,8 @@ public sealed class MainWindow : Window
         dock.Children.Add(auditPanel);
         DockPanel.SetDock(signoffPanel, Dock.Bottom);
         dock.Children.Add(signoffPanel);
-        DockPanel.SetDock(panel, Dock.Left);
-        dock.Children.Add(panel);
+        DockPanel.SetDock(tabs, Dock.Left);
+        dock.Children.Add(tabs);
         DockPanel.SetDock(issuesPanel, Dock.Right);
         dock.Children.Add(issuesPanel);
         dock.Children.Add(new DrawingCanvas(Canvas)); // LastChildFill：画布占满其余区域
@@ -272,6 +432,9 @@ public sealed class MainWindow : Window
 
         Canvas.RenderInvalidated += OnCanvasInvalidated;
         UpdateIssuesPanel();
+        UpdateSemanticPanel();
+        UpdateAdjudicationPanel();
+        if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
     }
 
     /// <summary>画布视图模型（加载成功时非 null）——图层面板/选择联动入口。</summary>
@@ -333,6 +496,48 @@ public sealed class MainWindow : Window
 
     /// <summary>签认错误文本（角色拒绝/自审拒绝/未选事务等，可见时非空）。</summary>
     public TextBlock? SignoffError { get; }
+
+    /// <summary>左栏三 tab 容器（T8：图层/纠偏/裁定；加载成功时非 null）。</summary>
+    public TabControl? LeftTabs { get; }
+
+    /// <summary>语义纠偏视图模型（T8，加载成功时非 null）。</summary>
+    public SemanticViewModel? Semantic { get; }
+
+    /// <summary>规则裁定视图模型（T8，加载成功时非 null）。</summary>
+    public AdjudicationViewModel? Adjudication { get; }
+
+    /// <summary>纠偏扫描按钮（T8，headless 测试入口）。</summary>
+    public Button? SemanticScanButton { get; }
+
+    /// <summary>不明确图层列表（T8，headless 测试入口）。</summary>
+    public ListBox? AmbiguousList { get; }
+
+    /// <summary>纠偏错误文本（扫描/映射失败时可见）。</summary>
+    public TextBlock? SemanticError { get; }
+
+    /// <summary>裁定规则列表（T8，builtin+skill；headless 测试入口）。</summary>
+    public ListBox? AdjudicationRuleList { get; }
+
+    /// <summary>强制力覆盖下拉（T8：(default)/Mandatory/Recommended/Informational）。</summary>
+    public ComboBox? ForceOverrideSelector { get; }
+
+    /// <summary>豁免勾选（T8，与强制力覆盖互斥）。</summary>
+    public CheckBox? ExemptCheck { get; }
+
+    /// <summary>裁定理由输入框（T8，必填）。</summary>
+    public TextBox? AdjudicationReason { get; }
+
+    /// <summary>裁定解读输入框（T8，可选）。</summary>
+    public TextBox? AdjudicationInterpretation { get; }
+
+    /// <summary>裁定应用按钮（T8，headless 测试入口）。</summary>
+    public Button? AdjudicationApplyButton { get; }
+
+    /// <summary>裁定错误文本（校验拒绝/存储故障时可见）。</summary>
+    public TextBlock? AdjudicationError { get; }
+
+    /// <summary>当前裁定列表（T8，同 RuleId 最新裁定生效）。</summary>
+    public ListBox? AdjudicationList { get; }
 
     /// <summary>行模板：复选框（可见性）+ 色样 + 名称（计数）。Click → Toggle。</summary>
     private static CheckBox BuildLayerRow(LayerEntry entry, LayersViewModel layers)
@@ -634,6 +839,140 @@ public sealed class MainWindow : Window
         SignoffError.IsVisible = message is not null;
     }
 
+    /// <summary>
+    /// T8 纠偏行模板：图层名（计数）+ 名称提示 + 样例句柄 + 语义类下拉 +
+    /// Map（人工确认映射）+ Isolate（画布隔离显示）。
+    /// </summary>
+    private StackPanel BuildAmbiguousRow(AmbiguousLayer a)
+    {
+        var panel = new StackPanel { Spacing = 2, Margin = new Thickness(4) };
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"{a.LayerName} ({a.EntityCount})",
+            FontWeight = FontWeight.Bold,
+            TextWrapping = TextWrapping.Wrap
+        });
+        if (a.NameHint.Length > 0)
+            panel.Children.Add(new TextBlock
+            {
+                Text = a.NameHint,
+                FontSize = 11,
+                Foreground = Brushes.Gray,
+                TextWrapping = TextWrapping.Wrap
+            });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "样例: " + string.Join(", ", a.SampleHandles),
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var combo = new ComboBox
+        {
+            ItemsSource = ClassOptions,
+            PlaceholderText = "class",
+            Width = 110,
+            Margin = new Thickness(0, 2)
+        };
+        var map = new Button { Content = "Map", Margin = new Thickness(4, 2) };
+        map.Click += (_, _) => _ = MapCoreAsync(a.LayerName, combo, map);
+        var isolate = new Button { Content = "Isolate", Margin = new Thickness(4, 2) };
+        isolate.Click += (_, _) => Semantic!.IsolateLayer(a.LayerName);
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        row.Children.Add(combo);
+        row.Children.Add(map);
+        row.Children.Add(isolate);
+        panel.Children.Add(row);
+        return panel;
+    }
+
+    /// <summary>T8：Scan → 语义扫描（评估期间禁用按钮防重入）。</summary>
+    private async void OnScanClick(object? sender, RoutedEventArgs e)
+    {
+        if (Semantic is null || SemanticScanButton is null) return;
+        SemanticScanButton.IsEnabled = false;
+        try { await Semantic.ScanAsync(Array.Empty<string>()); }
+        finally { SemanticScanButton.IsEnabled = true; }
+    }
+
+    /// <summary>T8：Map → 人工确认映射。未选语义类 → 引导错误；失败行内展示。</summary>
+    private async Task MapCoreAsync(string layer, ComboBox combo, Button map)
+    {
+        if (Semantic is null) return;
+        if (combo.SelectedItem is not string className || !Enum.TryParse<SemanticClass>(className, out SemanticClass cls))
+        {
+            SetSemanticError("请先选择语义类");
+            return;
+        }
+        SetSemanticError(null);
+        map.IsEnabled = false;
+        try { await Semantic.MapAsync(layer, cls); }
+        finally { map.IsEnabled = true; }
+    }
+
+    /// <summary>T8：扫描/映射完成 → 重建不明确列表 + 计数头部 + 错误展示。</summary>
+    private void UpdateSemanticPanel()
+    {
+        if (Semantic is null || AmbiguousList is null) return;
+        AmbiguousList.ItemsSource = Semantic.Ambiguous;
+        if (_semanticHeader is not null)
+            _semanticHeader.Text =
+                $"语义纠偏 — {Semantic.Ambiguous.Count} ambiguous, {Semantic.AnnotationCount} annotations (v{Semantic.Version})";
+        SetSemanticError(Semantic.ErrorMessage);
+    }
+
+    private void SetSemanticError(string? message)
+    {
+        if (SemanticError is null) return;
+        SemanticError.Text = message ?? "";
+        SemanticError.IsVisible = message is not null;
+    }
+
+    /// <summary>
+    /// T8：Apply → 人工裁定。未选规则 → 引导错误；校验拒绝（互斥/reason 必填/
+    /// 孤儿）/存储故障 → 捕获异常行内展示（裁定与审计均未落盘）。
+    /// 成功 → AdjudicationsChanged 联动刷新当前裁定列表 + 问题清单。
+    /// </summary>
+    private async void OnAdjudicateClick(object? sender, RoutedEventArgs e)
+    {
+        if (Adjudication is null) return;
+        if (AdjudicationRuleList?.SelectedItem is not Rule rule)
+        {
+            SetAdjudicationError("Select a rule first");
+            return;
+        }
+        RuleForce? force = null;
+        if (ForceOverrideSelector is { SelectedIndex: > 0 } fs)
+            force = Enum.Parse<RuleForce>((string)fs.SelectedItem!);
+        bool exempt = ExemptCheck?.IsChecked == true;
+        SetAdjudicationError(null);
+        try
+        {
+            await Adjudication.AdjudicateAsync(rule.Id, force, exempt,
+                AdjudicationReason?.Text ?? "", AdjudicationInterpretation?.Text ?? "");
+        }
+        catch (Exception ex)
+        {
+            SetAdjudicationError(ex.Message);
+        }
+    }
+
+    /// <summary>T8：裁定成功 → 重建规则列表 + 当前裁定列表。</summary>
+    private void UpdateAdjudicationPanel()
+    {
+        if (Adjudication is null) return;
+        if (AdjudicationRuleList is not null) AdjudicationRuleList.ItemsSource = Adjudication.Rules;
+        if (AdjudicationList is not null) AdjudicationList.ItemsSource = Adjudication.Adjudications;
+    }
+
+    private void SetAdjudicationError(string? message)
+    {
+        if (AdjudicationError is null) return;
+        AdjudicationError.Text = message ?? "";
+        AdjudicationError.IsVisible = message is not null;
+    }
+
     /// <summary>T6：无 audit.db 时的只读空存储占位——视图绝不创建/写入审计库。</summary>
     private sealed class EmptyAuditStore : IAuditStore
     {
@@ -641,5 +980,36 @@ public sealed class MainWindow : Window
             throw new InvalidOperationException("视图为只读回放，不允许写入审计");
         public IReadOnlyList<AuditRecord> ReadAll() => Array.Empty<AuditRecord>();
         public bool VerifyChain(out string error) { error = ""; return true; }
+    }
+
+    /// <summary>
+    /// T8：无 audit.db 时的写审计占位——打开窗口不建库（沿用 T6 约定），
+    /// 首次 Append（扫描/映射/裁定）才惰性创建 SqliteAuditStore 落痕。
+    /// 创建前的 ReadAll/VerifyChain 表现为空库（只读回放语义不变）。
+    /// </summary>
+    private sealed class LazyWriteAuditStore : IAuditStore
+    {
+        private readonly string _dbPath;
+        private SqliteAuditStore? _inner;
+
+        public LazyWriteAuditStore(string dbPath) => _dbPath = dbPath;
+
+        private SqliteAuditStore Ensure()
+        {
+            if (_inner is null)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_dbPath))!);
+                _inner = new SqliteAuditStore(_dbPath);
+            }
+            return _inner;
+        }
+
+        public AuditRecord Append(AuditEntry e) => Ensure().Append(e);
+        public IReadOnlyList<AuditRecord> ReadAll() => _inner?.ReadAll() ?? Array.Empty<AuditRecord>();
+        public bool VerifyChain(out string error)
+        {
+            error = "";
+            return _inner is null || _inner.VerifyChain(out error);
+        }
     }
 }
