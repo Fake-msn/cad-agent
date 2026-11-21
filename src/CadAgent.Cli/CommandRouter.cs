@@ -223,11 +223,25 @@ public static partial class CommandRouter
             ? new RulePackAuditDecorator(audit, ruleSet.RulePackVersion)
             : audit;
         var result = Engine(agentDir, engineAudit, semanticGate, null, SymbolImportHandler(args)).Run(plan, drawing, session);
+        string? liveOut = null;
         if (!result.Ok) drawing.Reload();
-        else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
+        else
+        {
+            RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
+            var live = LiveReplay(args, agentDir, session, audit, op, drawing, plan, LivePackages(args), stderr);
+            if (!live.Ok)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new
+                {
+                    txId = result.TxId, ok = false, stepsDone = result.StepsDone, error = live.Error
+                }, JsonOpts));
+                return 1;
+            }
+            liveOut = live.OutPath;
+        }
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
-            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
+            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error, liveOut
         }, JsonOpts));
         return result.Ok ? 0 : 1;
     }

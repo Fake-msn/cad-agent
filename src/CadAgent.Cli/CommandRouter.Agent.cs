@@ -83,14 +83,23 @@ public static partial class CommandRouter
         var result = orch.RunAsync(intent, summary, drawing, session, allowedKinds, KindDocs,
             confirmPlan, confirmEgress,
             postSummaryProvider: () => DrawingSummarizer.Summarize(drawing, overlay)).GetAwaiter().GetResult();
+        string? liveOut = null;
+        bool liveOk = true;
+        if (result.Status == OrchestrationStatus.Executed)
+        {
+            var live = LiveReplay(args, agentDir, session, audit, op, drawing, result.Plan!, LivePackages(args), stderr);
+            liveOk = live.Ok;
+            liveOut = live.OutPath;
+        }
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             status = result.Status.ToString(),
             txId = result.TxId,
             error = result.Error,
             verificationRounds = result.VerificationRounds,
+            liveOut,
             usage = result.TotalUsage == null ? null : new { result.TotalUsage.PromptTokens, result.TotalUsage.CompletionTokens }
         }, SemanticJsonOpts));
-        return result.Status == OrchestrationStatus.Executed ? 0 : 1;
+        return result.Status == OrchestrationStatus.Executed && liveOk ? 0 : 1;
     }
 }
