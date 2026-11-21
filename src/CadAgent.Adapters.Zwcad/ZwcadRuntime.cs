@@ -87,9 +87,11 @@ public sealed class ZwcadRuntime : ICadRuntime
 
     public void Restart() => Run(() =>
     {
+        // 先关文档再 Quit：带开文档 Quit 会被 ZWCAD 判异常终止→下次启动弹修复对话框
+        try { _doc?.Close(false); } catch { /* 崩溃后 Close 可能失败，忽略 */ }
+        _doc = null;
         try { _app?.Quit(); } catch { /* 崩溃后 Quit 可能失败，忽略 */ }
         _app = null;
-        _doc = null;
     });
 
     // 3j 绘制操作：ModelSpace dynamic COM（ZWCAD 镜像 AutoCAD API）；
@@ -203,9 +205,10 @@ public sealed class ZwcadRuntime : ICadRuntime
         {
             Run(() =>
             {
+                try { _doc?.Close(false); } catch { /* 退出时忽略 */ }
+                _doc = null;
                 try { _app?.Quit(); } catch { /* 退出时忽略 */ }
                 _app = null;
-                _doc = null;
             });
         }
         catch { /* 队列已关闭等 */ }
