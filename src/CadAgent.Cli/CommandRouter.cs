@@ -55,6 +55,7 @@ public static partial class CommandRouter
                 case "review": return Review(args, positional, agentDir, session, stdout, stderr);
                 case "repl": return ReplLoop(args, Console.In, stdout, stderr);
                 case "export": return Export(args, agentDir, session, stdout, stderr);
+                case "vendor": return Vendor(positional, stdout, stderr);
                 default: return Usage(stderr);
             }
         }

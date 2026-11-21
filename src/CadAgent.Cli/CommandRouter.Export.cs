@@ -28,6 +28,8 @@ public static partial class CommandRouter
             : CreateZwcadIfAvailable(stderr);
         try
         {
+            if (runtime != null)
+                ExportGating(runtime, agentDir, session, audit, op, stderr);
             var svc = new ExportService(runtime, CountEntities);
             var result = svc.Export(drawing.SourcePath, outPath, session, audit, op);
             stdout.WriteLine(JsonSerializer.Serialize(new
