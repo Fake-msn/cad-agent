@@ -75,6 +75,8 @@ public sealed class DrawingCanvas : Control
         DiffOverlay? diff = ViewModel.DiffOverlay;
         if (diff is not null)
         {
+            // 对比模式刻意忽略 HiddenLayers：before 幽灵层直接遍历 diff.BeforeItems
+            // （快照全量），不走 VisibleItems——隐藏图层的历史状态也须可见才能完整对比。
             foreach (RenderItem before in diff.BeforeItems)
             {
                 bool removed = before.Handle.Length > 0 && diff.RemovedHandles.Contains(before.Handle);

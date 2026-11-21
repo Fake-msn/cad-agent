@@ -34,11 +34,14 @@ public sealed class AuditEntryVm
 
 /// <summary>
 /// 事务分组（计划4 T6）：以 tx-start 记录为界，按 PlanRef 归拢同事务的
-/// step/tx-commit/tx-failed/step-failed 记录（同一 PlanRef 重复执行 → 多个分组，
-/// 记录按 Seq 顺序落入最近一个未终结的同 PlanRef 分组）。
+/// step/tx-commit/tx-failed/step-failed/semantic-gate-refused 记录（同一 PlanRef
+/// 重复执行 → 多个分组，记录按 Seq 顺序落入最近一个未终结的同 PlanRef 分组）。
 /// TxId = tx-start SnapshotRef 的快照目录名（StepEngine 的 GUID 事务号，
 /// SnapshotStore.Find 可直接使用）；无快照路径时退化为 PlanRef。
-/// Steps 仅含成功的 "step" 记录；HasFailed 覆盖 step-failed 与 tx-failed。
+/// Steps 仅含成功的 "step" 记录；HasFailed 覆盖 step-failed、tx-failed 与
+/// semantic-gate-refused（StepEngine 语义闸口拒绝后留痕即返回，无 tx-failed/
+/// tx-commit 终结记录——该 kind 本身即失败终结，须关闭分组，避免灰色 open
+/// 并吞并后续同 PlanRef 记录）。
 /// </summary>
 public sealed class TxGroup
 {
@@ -62,7 +65,7 @@ public sealed class TxGroup
     public IReadOnlyList<AuditEntryVm> Steps => _entries.Where(e => e.Kind == "step").ToList();
 
     public bool HasCommit => _entries.Any(e => e.Kind == "tx-commit");
-    public bool HasFailed => _entries.Any(e => e.Kind is "step-failed" or "tx-failed");
+    public bool HasFailed => _entries.Any(e => e.Kind is "step-failed" or "tx-failed" or "semantic-gate-refused");
 
     /// <summary>时间线状态徽标：failed ✗ / commit ✓ / open（无终结记录）。</summary>
     public string Status => HasFailed ? "failed ✗" : HasCommit ? "commit ✓" : "open";
@@ -72,7 +75,7 @@ public sealed class TxGroup
     internal void Add(AuditEntryVm entry)
     {
         _entries.Add(entry);
-        if (entry.Kind is "tx-commit" or "tx-failed" or "step-failed") Closed = true;
+        if (entry.Kind is "tx-commit" or "tx-failed" or "step-failed" or "semantic-gate-refused") Closed = true;
     }
 }
 

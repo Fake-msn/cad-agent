@@ -3,6 +3,7 @@ using ACadSharp.Entities;
 using CadAgent.Core;
 using CadAgent.Data;
 using CadAgent.Data.Handlers;
+using CadAgent.Data.Semantic;
 using CadAgent.Data.Tests;
 using CadAgent.View.Rendering;
 using CadAgent.View.ViewModels;
@@ -74,6 +75,14 @@ public class AuditViewModelTests
         public OperatorIdentity Current { get; }
     }
 
+    /// <summary>声明语义需求的测试处理器（真实处理器均几何级；同 Core SemanticGateTests）。</summary>
+    private sealed class AwareHandler : IStepHandler, ISemanticAware
+    {
+        public string Kind => "need-wall";
+        public IReadOnlyList<SemanticClass> RequiredSemantics => new[] { SemanticClass.Wall };
+        public StepResult Apply(IDrawingSession s, JsonElement p) => new(true, "", "h1");
+    }
+
     private static StepPlan Plan(string planId, params (string Kind, string Json)[] steps)
     {
         var specs = new List<StepSpec>();
@@ -142,6 +151,45 @@ public class AuditViewModelTests
         Assert.False(g.HasCommit);
         Assert.Contains("✗", g.Status);
         Assert.Single(g.Steps); // the failed step is NOT a "step" record
+    }
+
+    [Fact]
+    public void Transactions_SemanticGateRefused_ClosesGroupAsFailed_LaterSamePlanRefDoesNotJoin()
+    {
+        using var f = new Fixture();
+        // 真实 StepEngine + 真实 SemanticGate（空叠加层 → 必拒绝）+ 语义需求处理器。
+        var gated = new StepEngine(f.Audit, f.Snapshots,
+            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+            new RoleChecker(), HandlerRegistry.All().Append(new AwareHandler()),
+            new SemanticGate(new SemanticOverlay()));
+        TxResult refused = gated.Run(Plan("pg", ("need-wall", "{}")), f.Session, "s1");
+        Assert.False(refused.Ok);
+        Assert.Equal("semantic-gate-refused", f.Audit.ReadAll()[^1].Entry.Kind);
+
+        // 拒绝后同 PlanRef 的后续记录（无新 tx-start）不得并入已终结的分组。
+        f.Audit.Append(new AuditEntry(DateTimeOffset.UtcNow, "tester", "Draw", "s1", "plan",
+            "step", "h-late", "{}", "", "", "", "pg"));
+        // 同 PlanRef 再次执行 → 全新分组。
+        TxResult later = gated.Run(Plan("pg",
+            ("add-line", """{"x1":0,"y1":60,"x2":100,"y2":60}""")), f.Session, "s1");
+        Assert.True(later.Ok);
+
+        AuditViewModel vm = f.MakeVm();
+        Assert.Equal(2, vm.Transactions.Count);
+        TxGroup g1 = vm.Transactions[0];
+        Assert.Equal(refused.TxId, g1.TxId);
+        Assert.True(g1.HasFailed);
+        Assert.False(g1.HasCommit);
+        Assert.Contains("✗", g1.Status);
+        Assert.Empty(g1.Steps); // 被拒步骤未执行；h-late 记录留在 Entries、不入组
+        Assert.Contains(vm.Entries, e => e.Target == "h-late");
+
+        TxGroup g2 = vm.Transactions[1];
+        Assert.Equal(later.TxId, g2.TxId);
+        Assert.NotEqual(g1.TxId, g2.TxId);
+        Assert.True(g2.HasCommit);
+        Assert.False(g2.HasFailed);
+        Assert.Single(g2.Steps);
     }
 
     [Fact]
