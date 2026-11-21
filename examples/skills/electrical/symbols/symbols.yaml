@@ -51,3 +51,32 @@ symbols:
   - { name: "物件(矩形)", file: elec-047.dxf, class: Auxiliary, description: "Object, general symbol (rectangle)；注4；说明列与45/46共用" }
   - { name: "有稳定输出电压的变换器", file: elec-048.dxf, class: Auxiliary, description: "Converter with stabilized output voltage；方框+对角线+左上正弦+右下u underline" }
   - { name: "频率由f1变到f2的变频器", file: elec-049.dxf, class: Auxiliary, description: "Frequency converter, changing from f1 to f2；方框+对角线+f1/f2（可用具体数值代替）" }
+  - { name: "直流/直流变换器", file: elec-050.dxf, class: Auxiliary, description: "DC/DC converter；方框+对角线+两侧DC线组" }
+  - { name: "整流器", file: elec-051.dxf, class: Auxiliary, description: "Rectifier；方框+对角线+左上正弦+右下DC" }
+  - { name: "逆变器", file: elec-052.dxf, class: Auxiliary, description: "Inverter；方框+对角线+左上DC+右下正弦" }
+  - { name: "整流器/逆变器", file: elec-053.dxf, class: Auxiliary, description: "Rectifier/Inverter；51+底部双向箭头" }
+  - { name: "原电池", file: elec-054.dxf, class: Auxiliary, description: "Primary cell；长线阳极短线阴极" }
+  - { name: "静止电能发生器", file: elec-055.dxf, class: Auxiliary, description: "Static generator, general symbol；方框+G" }
+  - { name: "光电发生器", file: elec-056.dxf, class: Auxiliary, description: "Photovoltaic generator；方框+G+电池线+入射双箭头" }
+  - { name: "剩余电流监视器", file: elec-057.dxf, class: Auxiliary, description: "Residual current monitor；方框+IΔ+圆×+漏斗形" }
+  - { name: "动合触点、开关", file: elec-058.dxf, class: Auxiliary, description: "Make contact, general symbol; Switch, general symbol；常开一般符号" }
+  - { name: "动断触点", file: elec-059.dxf, class: Auxiliary, description: "Break contact；常闭" }
+  - { name: "先断后合的转换触点", file: elec-060.dxf, class: Auxiliary, description: "Change-over break before make contact" }
+  - { name: "中间断开的转换触点", file: elec-061.dxf, class: Auxiliary, description: "Change-over contact with off-position" }
+  - { name: "先合后断的双向转换触点", file: elec-062.dxf, class: Auxiliary, description: "Change-over make before break contact, both ways；形式2=横置变体" }
+  - { name: "延时闭合的动合触点", file: elec-063.dxf, class: Auxiliary, description: "Make contact, delayed closing；吸合时延时闭合；左弧+弦" }
+  - { name: "延时断开的动合触点", file: elec-064.dxf, class: Auxiliary, description: "Make contact, delayed opening；释放时延时断开；右bulge弧+双弦" }
+  - { name: "延时断开的动断触点", file: elec-065.dxf, class: Auxiliary, description: "Break contact, delayed opening；吸合时延时断开" }
+  - { name: "延时闭合的动断触点", file: elec-066.dxf, class: Auxiliary, description: "Break contact, delayed closing；释放时延时闭合" }
+  - { name: "自动复位的手动按钮开关", file: elec-067.dxf, class: Auxiliary, description: "Switch, manually operated, push-button, automatic return；E形按钮 actuator+虚线连杆" }
+  - { name: "无自动复位的手动旋转开关", file: elec-068.dxf, class: Auxiliary, description: "Switch, manually operated, turning, stay-put；L形旋转 actuator+虚线连杆" }
+  - { name: "蘑菇头式应急按钮开关", file: elec-069.dxf, class: Auxiliary, description: "Push-button switch, type mushroom-head, key by operation；动合+自动复位；半圆蘑菇头" }
+  - { name: "防止无意操作的按钮开关", file: elec-070.dxf, class: Auxiliary, description: "Push-button switch, protected against unintentional operation；动合+保护罩 actuator" }
+  - { name: "热继电器动断触点", file: elec-071.dxf, class: Auxiliary, description: "Thermal relay or release, break contact；脉冲形热 actuator+虚线连杆" }
+  - { name: "液位控制开关动合触点", file: elec-072.dxf, class: Auxiliary, description: "Actuated by liquid level switch, make contact；浮球 actuator+虚线连杆" }
+  - { name: "液位控制开关动断触点", file: elec-073.dxf, class: Auxiliary, description: "Actuated by liquid level switch, break contact；浮球 actuator+虚线连杆" }
+  - { name: "带位置图示的多位开关", file: elec-074.dxf, class: Auxiliary, description: "Multi-position switch, with position diagram；最多四位；1 2 3 4位置图+虚线扇" }
+  - { name: "接触器主动合触点", file: elec-075.dxf, class: Auxiliary, description: "Contactor; Main make contact of a contactor；非操作位置触点断开；blade左小弧" }
+  - { name: "接触器主动断触点", file: elec-076.dxf, class: Auxiliary, description: "Contactor; Main break contact of a contactor；非操作位置触点闭合" }
+  - { name: "隔离器", file: elec-077.dxf, class: Auxiliary, description: "Disconnector; Isolator；动合+固定端横bar" }
+  - { name: "隔离开关", file: elec-078.dxf, class: Auxiliary, description: "Switch-disconnector; on-load isolating switch；77+blade枢轴小圆" }
