@@ -13,10 +13,12 @@ public sealed class SqliteAuditStore : IAuditStore, IDisposable
 {
     private readonly string _connectionString;
     private readonly object _writeLock = new();
+    private readonly Audit.AnchorService? _anchor;
 
-    public SqliteAuditStore(string dbPath)
+    public SqliteAuditStore(string dbPath, Audit.AnchorService? anchor = null)
     {
         _connectionString = $"Data Source={dbPath}";
+        _anchor = anchor;
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
@@ -101,6 +103,7 @@ public sealed class SqliteAuditStore : IAuditStore, IDisposable
                 ins.ExecuteNonQuery();
             }
             tx.Commit();
+            _anchor?.Update(seq, hash);
             return new AuditRecord(seq, e, prevHash, hash);
         }
     }
