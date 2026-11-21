@@ -62,6 +62,10 @@ public sealed class ComReplayService
                     p.GetProperty("text").GetString() ?? "", HandlerHelpers.Req(p, "height"),
                     HandlerHelpers.OptString(p, "layer"));
                 break;
+            case "add-circle":
+                _rt.AddCircle(HandlerHelpers.Req(p, "x"), HandlerHelpers.Req(p, "y"),
+                    HandlerHelpers.Req(p, "radius"), HandlerHelpers.OptString(p, "layer"));
+                break;
             case "insert-block":
                 _rt.AddInsert(p.GetProperty("block").GetString() ?? "",
                     HandlerHelpers.Req(p, "x"), HandlerHelpers.Req(p, "y"),

@@ -18,6 +18,7 @@ public static partial class CommandRouter
     private const string KindDocs = """
         add-line: 画直线 {x1,y1,x2,y2: number, layer?: string}
         add-text: 写单行文字 {x,y: number, text: string, height: number(mm), layer?: string}
+        add-circle: 画圆 {x,y: number, radius: number(mm), layer?: string}
         delete-entity: 删除实体 {handle: number|string}
         move-entity: 移动实体 {handle: number|string, dx,dy: number}（仅 Line/Text）
         change-layer: 改图层 {handle: number|string, layer: string}（不存在则创建）

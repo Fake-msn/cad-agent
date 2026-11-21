@@ -84,3 +84,23 @@ public sealed class AddTextHandler : IStepHandler
         return new StepResult(true, "", text.Handle.ToString());
     }
 }
+
+/// <summary>add-circle（3j 生成式绘制补全）：params {x,y,radius,layer?}。</summary>
+public sealed class AddCircleHandler : IStepHandler
+{
+    public string Kind => "add-circle";
+    public StepResult Apply(IDrawingSession session, JsonElement p)
+    {
+        var s = HandlerHelpers.AsDrawing(session);
+        double radius = HandlerHelpers.Req(p, "radius");
+        if (radius <= 0) return new StepResult(false, "radius 须为正数", "");
+        var circle = new Circle
+        {
+            Center = (XYZ)new XY(HandlerHelpers.Req(p, "x"), HandlerHelpers.Req(p, "y")),
+            Radius = radius,
+            Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
+        };
+        s.Doc.Entities.Add(circle);
+        return new StepResult(true, "", circle.Handle.ToString());
+    }
+}

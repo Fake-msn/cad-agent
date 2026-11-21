@@ -102,12 +102,27 @@ public sealed class ZwcadRuntime : ICadRuntime
 
     private static double[] Pt(double x, double y) => new[] { x, y, 0.0 };
 
+    /// <summary>图层幂等确保（镜像影子侧 ResolveLayer；厂商文档赋不存在层会 COM 报错）。</summary>
+    private void EnsureLayer(string layer)
+    {
+        try { dynamic l = _doc.Layers.Item(layer); if (l != null) return; }
+        catch { /* 不存在→创建 */ }
+        _doc.Layers.Add(layer);
+    }
+
+    private void SetLayer(dynamic e, string? layer)
+    {
+        if (layer == null) return;
+        EnsureLayer(layer);
+        e.Layer = layer;
+    }
+
     public void AddLine(double x1, double y1, double x2, double y2, string? layer = null) => Run(() =>
     {
         try
         {
             dynamic e = ModelSpace().AddLine(Pt(x1, y1), Pt(x2, y2));
-            if (layer != null) e.Layer = layer;
+            SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"AddLine 失败: {ex.Message}", ex); }
@@ -118,7 +133,7 @@ public sealed class ZwcadRuntime : ICadRuntime
         try
         {
             dynamic e = ModelSpace().AddText(text, Pt(x, y), height);
-            if (layer != null) e.Layer = layer;
+            SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"AddText 失败: {ex.Message}", ex); }
@@ -129,7 +144,7 @@ public sealed class ZwcadRuntime : ICadRuntime
         try
         {
             dynamic e = ModelSpace().AddCircle(Pt(x, y), radius);
-            if (layer != null) e.Layer = layer;
+            SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"AddCircle 失败: {ex.Message}", ex); }
@@ -140,7 +155,7 @@ public sealed class ZwcadRuntime : ICadRuntime
         try
         {
             dynamic e = ModelSpace().InsertBlock(Pt(x, y), blockName, scale, scale, scale, rotation);
-            if (layer != null) e.Layer = layer;
+            SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"AddInsert 失败: {ex.Message}", ex); }

@@ -74,11 +74,13 @@ public class ComReplayServiceTests : IDisposable
     {
         var svc = new ComReplayService(_rt);
         var res = svc.Replay(Plan("[{\"kind\":\"add-line\",\"params\":{\"x1\":0,\"y1\":0,\"x2\":10,\"y2\":10,\"layer\":\"L1\"}}," +
-            "{\"kind\":\"add-text\",\"params\":{\"x\":5,\"y\":5,\"text\":\"标注\",\"height\":3.5}}]"),
+            "{\"kind\":\"add-text\",\"params\":{\"x\":5,\"y\":5,\"text\":\"标注\",\"height\":3.5}}," +
+            "{\"kind\":\"add-circle\",\"params\":{\"x\":1,\"y\":2,\"radius\":3}}]"),
             DrawingSession.Load(_path));
         Assert.All(res, r => Assert.True(r.Ok));
         Assert.Contains("line:0,0,10,10,L1", _rt.Calls);
         Assert.Contains("text:5,5,标注,3.5,", _rt.Calls);
+        Assert.Contains("circle:1,2,3", _rt.Calls);
     }
 
     [Fact]
