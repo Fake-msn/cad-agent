@@ -1,0 +1,14 @@
+# excerpt 逐字自 extraction-244.md D5（5.2.5，JSON页44）。
+# 可查部分＝房名/编号存在性（RoomDetector 房名模式启发式）；编号圆圈6mm/字高比较/房间名称表 VISUAL deferred。
+id: R-244-5.2.5
+source:
+  standard: "JGJ/T 244-2011"
+  clause: "5.2.5"
+  excerpt: "平面图中应注写房间的名称或编号，编号应注写在直径为 6mm 细实线绘制的圆圈内，其字体大小应大于图中索引用文字标注，并应在同张图纸上列出房间名称表。"
+  verification: source-text
+modal: "应"
+force: recommended
+severity: medium
+scope: { discipline: interior, drawingType: any }
+check: { type: room-name, params: {} }
+suggestion: "平面图注写房间名称或编号；编号注于直径6mm细实线圆圈，字高大于索引用文字，同张图纸列房间名称表（圆圈格式/名称表检查 VISUAL deferred）"

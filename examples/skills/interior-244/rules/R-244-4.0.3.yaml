@@ -1,0 +1,15 @@
+# excerpt 逐字自 extraction-244.md D8（4.0.3，JSON页30）。
+# skill 符号治理的标准依据：自编图例不得与标准图例重复+须画出并说明。
+# 符号冲突检查器未建→NoChecker 结构化跳过。
+id: R-244-4.0.3
+source:
+  standard: "JGJ/T 244-2011"
+  clause: "4.0.3"
+  excerpt: "当采用本标准图例中未包括的建筑装饰材料时，可自编图例，但不得与本标准所列的图例重复，且在绘制时，应在适当位置画出该材料图例，并应加以说明。"
+  verification: source-text
+modal: "可／不得／应"
+force: recommended
+severity: medium
+scope: { discipline: interior, drawingType: any }
+check: { type: custom-legend-governance, params: {} }
+suggestion: "自编图例不得与标准图例重复，应在适当位置画出并加以说明；单一图例/图形过小/过复杂三种情况可不画图例但应加文字说明；符号冲突检查器 deferred（skill 符号机制治理依据）"
