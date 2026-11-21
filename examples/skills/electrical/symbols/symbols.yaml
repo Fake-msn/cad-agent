@@ -292,3 +292,27 @@ symbols:
   - { name: "电锁按键", file: elec-283.dxf, class: Auxiliary, description: "Button for electro-mechanic lock；双圆+E" }
   - { name: "电控锁", file: elec-284.dxf, class: Auxiliary, description: "Electro-mechanical lock；菱形+EL" }
   - { name: "投影机", file: elec-285.dxf, class: Auxiliary, description: "Projector；圆+内圆角框（直角近似）" }
+# --- 表4.1.3-6 建筑设备监控系统（3g W5）---
+  - { name: "温度传感器", file: elec-286.dxf, class: Auxiliary, description: "Temperature transmitter；T 框" }
+  - { name: "压力传感器", file: elec-287.dxf, class: Auxiliary, description: "Pressure transmitter；P 框" }
+  - { name: "湿度传感器", file: elec-288.dxf, class: Auxiliary, description: "Humidity transmitter；形式1=M框；形式2=H框" }
+  - { name: "压差传感器", file: elec-289.dxf, class: Auxiliary, description: "Differential pressure transmitter；形式1=PD框；形式2=ΔP框" }
+  - { name: "流量测量元件", file: elec-290.dxf, class: Auxiliary, description: "Measuring component, flowrate；圆GE+*位号" }
+  - { name: "流量变送器", file: elec-291.dxf, class: Auxiliary, description: "Transducer, flowrate；圆GT+*位号" }
+  - { name: "液位变送器", file: elec-292.dxf, class: Auxiliary, description: "Transducer, level；圆LT+*位号" }
+  - { name: "压力变送器", file: elec-293.dxf, class: Auxiliary, description: "Transducer, pressure；圆PT+*位号" }
+  - { name: "温度变送器", file: elec-294.dxf, class: Auxiliary, description: "Transducer, temperature；圆TT+*位号" }
+  - { name: "湿度变送器", file: elec-295.dxf, class: Auxiliary, description: "Transducer, humidity；形式1=圆MT+*；形式2=圆HT+*" }
+  - { name: "位置变送器", file: elec-296.dxf, class: Auxiliary, description: "Transducer, position；圆GT+*位号" }
+  - { name: "速率变送器", file: elec-297.dxf, class: Auxiliary, description: "Transducer, speed；圆ST+*位号" }
+  - { name: "压差变送器", file: elec-298.dxf, class: Auxiliary, description: "Transducer, differential pressure；形式1=圆PDT+*；形式2=圆ΔPT+*" }
+  - { name: "电流变送器", file: elec-299.dxf, class: Auxiliary, description: "Transducer, current；圆IT+*位号" }
+  - { name: "电压变送器", file: elec-300.dxf, class: Auxiliary, description: "Transducer, voltage；圆UT+*位号" }
+  - { name: "电能变送器", file: elec-301.dxf, class: Auxiliary, description: "Transducer, electric energy；圆ET+*位号" }
+  - { name: "模拟/数字变换器", file: elec-302.dxf, class: Auxiliary, description: "Converter, A/D；A/D 框" }
+  - { name: "数字/模拟变换器", file: elec-303.dxf, class: Auxiliary, description: "Converter, D/A；D/A 框" }
+  - { name: "热能表", file: elec-304.dxf, class: Auxiliary, description: "Heat meter；框+上隔线+HM" }
+  - { name: "燃气表", file: elec-305.dxf, class: Auxiliary, description: "Gas meter；框+上隔线+GM" }
+  - { name: "水表", file: elec-306.dxf, class: Auxiliary, description: "Water meter；框+上隔线+WM" }
+  - { name: "电动阀", file: elec-307.dxf, class: Auxiliary, description: "Electrical valve；圆M+领结阀体" }
+  - { name: "电磁阀", file: elec-308.dxf, class: Auxiliary, description: "Solenoid valve；方框M+领结阀体" }
