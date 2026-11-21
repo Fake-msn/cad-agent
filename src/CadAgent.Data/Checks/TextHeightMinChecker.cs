@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using ACadSharp.Entities;
 using CadAgent.Core;
 
 namespace CadAgent.Data.Checks;
@@ -25,23 +24,9 @@ public sealed class TextHeightMinChecker : IRuleChecker
         double minHan = CheckParams.Scalar(rule.Check.Params, "minHan", 3.5);
 
         var issues = new List<Issue>();
-        foreach (var e in doc.Entities)
+        // TextValues.Enumerate：TextEntity/MText 共享枚举（T5 提取，行为与原 switch 等价）。
+        foreach (var (handle, value, height) in TextValues.Enumerate(doc))
         {
-            string value;
-            double height;
-            switch (e)
-            {
-                case TextEntity text:
-                    value = text.Value ?? "";
-                    height = text.Height;
-                    break;
-                case MText mtext: // MText : Entity（非 TextEntity），两者都有 Value/Height，独立处理
-                    value = mtext.Value ?? "";
-                    height = mtext.Height;
-                    break;
-                default:
-                    continue;
-            }
             if (string.IsNullOrWhiteSpace(value)) continue;
 
             bool han = HasHan.IsMatch(value); // 含汉字（含混合文本）→ 汉字阈值（较严）
@@ -51,7 +36,7 @@ public sealed class TextHeightMinChecker : IRuleChecker
             issues.Add(new Issue(
                 rule.Id, rule.Source.Clause, rule.Source.Standard, rule.Source.Excerpt,
                 rule.Force, han ? RuleSeverity.Medium : rule.Severity,
-                new[] { e.Handle.ToString() },
+                new[] { handle },
                 han
                     ? $"文本 \"{value}\" 字高 {CheckParams.Format(height)}mm 小于汉字标注最小字高 {CheckParams.Format(min)}mm（不宜）。"
                     : $"文本 \"{value}\" 字高 {CheckParams.Format(height)}mm 小于字母/数字标注最小字高 {CheckParams.Format(min)}mm（不应）。",

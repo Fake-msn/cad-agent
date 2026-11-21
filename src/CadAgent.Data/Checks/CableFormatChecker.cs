@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using ACadSharp.Entities;
 using CadAgent.Core;
 
 namespace CadAgent.Data.Checks;
@@ -38,20 +37,9 @@ public sealed class CableFormatChecker : IRuleChecker
     {
         var doc = ((DrawingSession)session).Doc;
         var issues = new List<Issue>();
-        foreach (var e in doc.Entities)
+        // TextValues.Enumerate：TextEntity/MText 共享枚举（T5 提取，行为与原 switch 等价）。
+        foreach (var (handle, value, _) in TextValues.Enumerate(doc))
         {
-            string value;
-            switch (e)
-            {
-                case TextEntity text:
-                    value = text.Value ?? "";
-                    break;
-                case MText mtext: // MText : Entity（非 TextEntity），独立分支
-                    value = mtext.Value ?? "";
-                    break;
-                default:
-                    continue;
-            }
             if (!IsCandidate(value)) continue;
             if (IsFullForm(value)) continue; // 完整形候选不判（校验留后续）
             if (SimpleForm.IsMatch(value)) continue;
@@ -59,7 +47,7 @@ public sealed class CableFormatChecker : IRuleChecker
             issues.Add(new Issue(
                 rule.Id, rule.Source.Clause, rule.Source.Standard, rule.Source.Excerpt,
                 rule.Force, rule.Severity,
-                new[] { e.Handle.ToString() },
+                new[] { handle },
                 $"缆线标注 \"{value}\" 不符合格式 a b-c(d×e+f×g)i-jh（表4.1.5 序号8）；简写实例：BV-3×2.5-PC20-WC。",
                 rule.Suggestion,
                 "文本模式候选（型号前缀+×），简写形正则；完整形（含空格/+/括号）校验留后续；非缆线文本可能漏检"));

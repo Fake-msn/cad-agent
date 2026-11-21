@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using ACadSharp.Entities;
 using CadAgent.Core;
 
 namespace CadAgent.Data.Checks;
@@ -33,20 +32,9 @@ public sealed class SlotCodeChecker : IRuleChecker
         _ = CheckParams.StringSet(rule.Check.Params, "luminaireMounts");
 
         var issues = new List<Issue>();
-        foreach (var e in doc.Entities)
+        // TextValues.Enumerate：TextEntity/MText 共享枚举（T5 提取，行为与原 switch 等价）。
+        foreach (var (handle, value, _) in TextValues.Enumerate(doc))
         {
-            string value;
-            switch (e)
-            {
-                case TextEntity text:
-                    value = text.Value ?? "";
-                    break;
-                case MText mtext: // MText : Entity（非 TextEntity），独立分支
-                    value = mtext.Value ?? "";
-                    break;
-                default:
-                    continue;
-            }
             if (!CableFormatChecker.SimpleForm.IsMatch(value)) continue; // 仅缆线简写形候选
 
             string[] parts = value.Split('-');
@@ -61,18 +49,18 @@ public sealed class SlotCodeChecker : IRuleChecker
                 : null;
 
             if (method is not null && methods.Count > 0 && !methods.Contains(method))
-                issues.Add(BadCode(rule, e, value, method, "敷设方式", "表4.2.1-1", methods));
+                issues.Add(BadCode(rule, handle, value, method, "敷设方式", "表4.2.1-1", methods));
             if (position is not null && positions.Count > 0 && !positions.Contains(position))
-                issues.Add(BadCode(rule, e, value, position, "敷设部位", "表4.2.1-2", positions));
+                issues.Add(BadCode(rule, handle, value, position, "敷设部位", "表4.2.1-2", positions));
         }
         return issues;
     }
 
-    private static Issue BadCode(Rule rule, Entity e, string value, string code,
+    private static Issue BadCode(Rule rule, string handle, string value, string code,
         string slot, string table, HashSet<string> whitelist) =>
         new(rule.Id, rule.Source.Clause, rule.Source.Standard, rule.Source.Excerpt,
             rule.Force, rule.Severity,
-            new[] { e.Handle.ToString() },
+            new[] { handle },
             $"缆线标注 \"{value}\" {slot}代码 \"{code}\" 不在{table}白名单（{string.Join("、", whitelist.OrderBy(c => c, StringComparer.Ordinal))}）。",
             rule.Suggestion,
             "缆线简写形按 '-' 分段槽位判定（末段=部位、倒数第二段去数字=方式）；CE/CL 一码多义按槽位消歧；灯具安装尾码留 luminaire-format；非缆线文本可能漏检");
