@@ -41,22 +41,53 @@ public static class TemplateInstantiator
         {
             var substituted = new Dictionary<string, object>(step.Params.Count);
             foreach (var (key, value) in step.Params)
-            {
-                if (value is string s && PlaceholderPattern.Match(s) is { Success: true } m)
-                {
-                    var name = m.Groups[1].Value;
-                    if (!known.Contains(name))
-                        throw new InvalidSkillException(
-                            $"template '{t.Name}': unknown placeholder '{{{{{name}}}}}' in step '{step.Kind}' param '{key}'");
-                    substituted[key] = args[name];
-                }
-                else
-                {
-                    substituted[key] = value;
-                }
-            }
+                substituted[key] = SubstituteValue(value, args, known, t.Name, step.Kind, key);
             steps.Add(new StepSpec(step.Kind, JsonSerializer.SerializeToElement(substituted)));
         }
         return new StepPlan($"{t.Name}-{Guid.NewGuid():N}", steps);
+    }
+
+    /// <summary>
+    /// 递归替换（计划 3a 嵌套 params 契约）：string 整串精确占位→args 原样透传；
+    /// 映射（string 键或 YamlDotNet object 键）/列表递归处理；其他值原样。
+    /// 未知占位符在任意深度拒绝。单程替换（args 值含占位不再递归）。
+    /// </summary>
+    private static object SubstituteValue(object value, IReadOnlyDictionary<string, object> args,
+        HashSet<string> known, string templateName, string stepKind, string path)
+    {
+        switch (value)
+        {
+            case string s when PlaceholderPattern.Match(s) is { Success: true } m:
+            {
+                var name = m.Groups[1].Value;
+                if (!known.Contains(name))
+                    throw new InvalidSkillException(
+                        $"template '{templateName}': unknown placeholder '{{{{{name}}}}}' in step '{stepKind}' param '{path}'");
+                return args[name];
+            }
+            case IDictionary<string, object> map:
+            {
+                var result = new Dictionary<string, object>(map.Count);
+                foreach (var (k, v) in map)
+                    result[k] = SubstituteValue(v, args, known, templateName, stepKind, $"{path}.{k}");
+                return result;
+            }
+            case IDictionary<object, object> objMap:
+            {
+                var result = new Dictionary<string, object>(objMap.Count);
+                foreach (var (k, v) in objMap)
+                    result[k.ToString() ?? ""] = SubstituteValue(v, args, known, templateName, stepKind, $"{path}.{k}");
+                return result;
+            }
+            case IList<object> list:
+            {
+                var result = new List<object>(list.Count);
+                for (int i = 0; i < list.Count; i++)
+                    result.Add(SubstituteValue(list[i], args, known, templateName, stepKind, $"{path}[{i}]"));
+                return result;
+            }
+            default:
+                return value;
+        }
     }
 }
