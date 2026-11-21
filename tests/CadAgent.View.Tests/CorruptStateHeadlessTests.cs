@@ -3,8 +3,10 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using CadAgent.Core;
 using CadAgent.Data.Tests;
+using CadAgent.View.Controls;
 using CadAgent.View.ViewModels;
 using CSMath;
 
@@ -69,6 +71,35 @@ public class CorruptStateHeadlessTests
         return window;
     }
 
+    /// <summary>
+    /// Round-2 regression guard: the DrawingCanvas must remain the root DockPanel's
+    /// LAST child (LastChildFill) so it is arranged with real width/height even when
+    /// a degrade StateNote is present. A note appended after the canvas would steal
+    /// the fill slot and collapse the canvas to width 0 (Fit never runs).
+    /// </summary>
+    private static DrawingCanvas AssertCanvasFills(MainWindow window)
+    {
+        Dispatcher.UIThread.RunJobs(); // complete the headless layout pass
+        DrawingCanvas canvas = window.GetVisualDescendants().OfType<DrawingCanvas>().Single();
+        Assert.True(canvas.Bounds.Width > 0,
+            $"DrawingCanvas collapsed: layout width={canvas.Bounds.Width} (fill slot stolen?)");
+        Assert.True(canvas.Bounds.Height > 0,
+            $"DrawingCanvas collapsed: layout height={canvas.Bounds.Height}");
+        return canvas;
+    }
+
+    /// <summary>StateNote must be docked Bottom BELOW the canvas, not filling the center.</summary>
+    private static void AssertNoteDockedBottomNotFilling(MainWindow window, DrawingCanvas canvas)
+    {
+        TextBlock note = window.StateNote!;
+        Assert.Equal(Dock.Bottom, DockPanel.GetDock(note));
+        Assert.True(note.Bounds.Height > 0, "StateNote has no layout height");
+        Assert.True(note.Bounds.Height < canvas.Bounds.Height,
+            $"StateNote fills center: note height={note.Bounds.Height}, canvas height={canvas.Bounds.Height}");
+        Assert.True(note.Bounds.Y >= canvas.Bounds.Bottom - 0.5,
+            $"StateNote not below canvas: note.Y={note.Bounds.Y}, canvas.Bottom={canvas.Bounds.Bottom}");
+    }
+
     [AvaloniaFact]
     public void CorruptAuditDb_WindowOpens_EmptyTimeline_NoteShown_DrawingRenders()
     {
@@ -85,6 +116,8 @@ public class CorruptStateHeadlessTests
             Assert.True(window.StateNote!.IsVisible);
             Assert.Contains("审计库损坏", window.StateNote.Text);
             Assert.Empty(window.Audit!.Transactions); // degraded to empty timeline
+            DrawingCanvas canvas = AssertCanvasFills(window);
+            AssertNoteDockedBottomNotFilling(window, canvas);
         }
         finally { window.Close(); }
     }
@@ -105,6 +138,8 @@ public class CorruptStateHeadlessTests
             Assert.Contains("Draw", window.ErrorMessage);
             Assert.False(window.Signoff!.CanSign); // degraded default role = Draw
             Assert.False(window.ApproveButton!.IsEnabled);
+            DrawingCanvas canvas = AssertCanvasFills(window);
+            AssertNoteDockedBottomNotFilling(window, canvas);
         }
         finally { window.Close(); }
     }
@@ -123,6 +158,8 @@ public class CorruptStateHeadlessTests
             Assert.Contains("signoffs.json 损坏", window.ErrorMessage);
             Assert.Empty(window.Signoff!.Signoffs); // degraded to empty store
             Assert.True(window.Signoff.CanSign); // identity unaffected
+            DrawingCanvas canvas = AssertCanvasFills(window);
+            AssertNoteDockedBottomNotFilling(window, canvas);
         }
         finally { window.Close(); }
     }
@@ -145,6 +182,8 @@ public class CorruptStateHeadlessTests
             Assert.Empty(window.Audit!.Transactions);
             Assert.Empty(window.Signoff!.Signoffs);
             Assert.False(window.Signoff.CanSign);
+            DrawingCanvas canvas = AssertCanvasFills(window);
+            AssertNoteDockedBottomNotFilling(window, canvas);
         }
         finally { window.Close(); }
     }
@@ -158,6 +197,7 @@ public class CorruptStateHeadlessTests
         {
             Assert.Null(window.ErrorMessage);
             Assert.True(window.StateNote is null || !window.StateNote.IsVisible);
+            AssertCanvasFills(window); // healthy path: canvas still fills
         }
         finally { window.Close(); }
     }

@@ -598,16 +598,10 @@ public sealed class MainWindow : Window
         dock.Children.Add(tabs);
         DockPanel.SetDock(issuesPanel, Dock.Right);
         dock.Children.Add(issuesPanel);
-        dock.Children.Add(new DrawingCanvas(Canvas)); // LastChildFill：画布占满其余区域
-        Content = dock;
 
-        Canvas.RenderInvalidated += OnCanvasInvalidated;
-        UpdateIssuesPanel();
-        UpdateSemanticPanel();
-        UpdateAdjudicationPanel();
-        if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
-
-        // 最终审查修复③：状态文件损坏降级提示汇总（窗口已正常构造，图纸已渲染）。
+        // 最终审查修复③：状态文件损坏降级提示汇总（窗口照常构造、图纸照常渲染）。
+        // 必须先于 DrawingCanvas 加入：DockPanel LastChildFill 只填充最后一个子控件，
+        // 若注记后加会抢走填充位，画布（无 MeasureOverride，期望 0×0）被排成 0 宽。
         if (stateNotes.Count > 0)
         {
             ErrorMessage = string.Join("；", stateNotes);
@@ -622,6 +616,14 @@ public sealed class MainWindow : Window
             DockPanel.SetDock(note, Dock.Bottom);
             dock.Children.Add(note);
         }
+        dock.Children.Add(new DrawingCanvas(Canvas)); // LastChildFill：画布必须是最后一个子控件，占满其余区域
+        Content = dock;
+
+        Canvas.RenderInvalidated += OnCanvasInvalidated;
+        UpdateIssuesPanel();
+        UpdateSemanticPanel();
+        UpdateAdjudicationPanel();
+        if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
     }
 
     /// <summary>
