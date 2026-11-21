@@ -75,6 +75,8 @@ public class StepEngineTests : IDisposable
             ReloadCount++;
             if (FailReload) throw new IOException("模拟 reload 失败");
         }
+        public byte[] CaptureState() => System.Array.Empty<byte>();
+        public void RestoreState(byte[] state) { }
     }
 
     private static StepPlan Plan(params string[] kinds)

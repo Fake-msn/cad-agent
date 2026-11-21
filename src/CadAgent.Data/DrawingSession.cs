@@ -126,6 +126,22 @@ public sealed class DrawingSession : IDrawingSession
 
     public void Reload() => Doc = LoadDxf(SourcePath);
 
+    /// <summary>步级 undo（3b-ii）：内存 DXF 序列化捕获模型状态，不触磁盘文件。</summary>
+    public byte[] CaptureState()
+    {
+        using var ms = new MemoryStream();
+        DxfWriter.Write(ms, Doc);
+        return ms.ToArray();
+    }
+
+    /// <summary>从捕获状态恢复模型（内存 DXF 读回）。</summary>
+    public void RestoreState(byte[] state)
+    {
+        using var ms = new MemoryStream(state);
+        using var reader = new DxfReader(ms);
+        Doc = reader.Read();
+    }
+
     public DrawingSummary Summarize()
     {
         var layers = Doc.Layers.Select(l => l.Name).ToList();

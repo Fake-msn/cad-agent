@@ -8,6 +8,10 @@ public interface IDrawingSession
     string ComputeHash();
     void SaveWorking();
     void Reload();
+    /// <summary>步级 undo（3b-ii 加性）：捕获当前模型状态（内存序列化，不触磁盘）。</summary>
+    byte[] CaptureState();
+    /// <summary>恢复捕获的模型状态。</summary>
+    void RestoreState(byte[] state);
 }
 
 public sealed record StepSpec(string Kind, JsonElement Params);
@@ -70,9 +74,11 @@ public sealed class StepEngine
     private readonly RoleChecker _roles;
     private readonly Dictionary<string, IStepHandler> _handlers;
     private readonly ISemanticGate? _semanticGate;
+    private readonly ModelUndoStack? _undoStack;
 
     public StepEngine(IAuditStore audit, SnapshotStore snapshots, IIdentityProvider identity,
-        RoleChecker roles, IEnumerable<IStepHandler> handlers, ISemanticGate? semanticGate = null)
+        RoleChecker roles, IEnumerable<IStepHandler> handlers, ISemanticGate? semanticGate = null,
+        ModelUndoStack? undoStack = null)
     {
         _audit = audit;
         _snapshots = snapshots;
@@ -80,6 +86,7 @@ public sealed class StepEngine
         _roles = roles;
         _handlers = handlers.ToDictionary(h => h.Kind);
         _semanticGate = semanticGate;
+        _undoStack = undoStack;
     }
 
     public TxResult Run(StepPlan plan, IDrawingSession session, string sessionId)
@@ -136,6 +143,7 @@ public sealed class StepEngine
                     return new TxResult(txId, false, done, decision.Reason);
                 }
             }
+            _undoStack?.Push(session.CaptureState());
             StepResult result;
             string afterHash = beforeHash;
             try
@@ -189,6 +197,24 @@ public sealed class StepEngine
             throw;
         }
         Append(op, sessionId, "rollback", session.SourcePath, txId, before, session.ComputeHash(), txId, "");
+    }
+
+    /// <summary>
+    /// 步级 undo（3b-ii）：弹出最近一步执行前的模型快照并恢复，审计 step-undone。
+    /// 空栈→false（不审计）。会话内有效；跨会话撤回靠事务快照 Rollback。
+    /// </summary>
+    public bool UndoLastStep(IDrawingSession session, string sessionId)
+    {
+        if (_undoStack == null) return false;
+        byte[]? state = _undoStack.Pop();
+        if (state == null) return false;
+        var op = _identity.Current;
+        _roles.Ensure(op, Role.Draw);
+        string before = session.ComputeHash();
+        session.RestoreState(state);
+        Append(op, sessionId, "step-undone", session.SourcePath,
+            JsonSerializer.Serialize(new { remaining = _undoStack.Count }), before, session.ComputeHash(), "", "");
+        return true;
     }
 
     private void Append(OperatorIdentity op, string session, string kind, string target,
