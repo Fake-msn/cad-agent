@@ -63,6 +63,11 @@ public class SignoffTests
                 new FixedIdentity(new OperatorIdentity(account, role)),
                 new RoleChecker(), TxGroups, "s1");
 
+        public SignoffViewModel MakeVm(ReviewSignoffStore store, string account = "reviewer",
+            Role role = Role.Review) =>
+            new(Audit, store, new FixedIdentity(new OperatorIdentity(account, role)),
+                new RoleChecker(), TxGroups, "s1");
+
         public void Dispose()
         {
             Audit.Dispose();
@@ -276,6 +281,59 @@ public class SignoffTests
         Assert.Equal("boss", vm2.SignoffFor(f.Tx1Id)!.Operator);
     }
 
+    // ---- SignoffFor: time-latest (max Ts), not list position ----
+
+    [Fact]
+    public void SignoffFor_MultiSigner_ReturnsMaxTs_NotListPosition()
+    {
+        using var f = new Fixture();
+        var store = new ReviewSignoffStore(f.SignoffPath);
+        DateTimeOffset ts = DateTimeOffset.UtcNow;
+        // reviewer 的 Ts 更新但位于列表前部；boss 的 Ts 更旧却位于列表末位。
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "reviewer", Role.Review, true, "newer", ts.AddMinutes(2)));
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "boss", Role.Approve, false, "older", ts));
+        SignoffViewModel vm = f.MakeVm(store);
+
+        ReviewSignoff s = vm.SignoffFor(f.Tx1Id)!;
+        Assert.Equal("reviewer", s.Operator);
+        Assert.Equal("newer", s.Comment);
+        Assert.True(s.Approved);
+    }
+
+    [Fact]
+    public void SignoffFor_ResignUpsertInPlace_StillReturnsTimeLatest()
+    {
+        using var f = new Fixture();
+        var store = new ReviewSignoffStore(f.SignoffPath);
+        DateTimeOffset ts = DateTimeOffset.UtcNow;
+        // reviewer 签 → boss 签 → reviewer 重签（Upsert 原位替换 index 0，位置不变）。
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "reviewer", Role.Review, false, "first", ts));
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "boss", Role.Approve, true, "boss", ts.AddMinutes(1)));
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "reviewer", Role.Review, true, "resign", ts.AddMinutes(2)));
+        SignoffViewModel vm = f.MakeVm(store);
+
+        Assert.Equal(2, store.Items.Count);
+        Assert.Equal("reviewer", store.Items[0].Operator); // 原位替换，列表位置未变
+        ReviewSignoff s = vm.SignoffFor(f.Tx1Id)!;
+        Assert.Equal("reviewer", s.Operator);
+        Assert.Equal("resign", s.Comment);
+        Assert.True(s.Approved);
+    }
+
+    [Fact]
+    public void SignoffFor_EqualTs_TieGoesToLastInList()
+    {
+        using var f = new Fixture();
+        var store = new ReviewSignoffStore(f.SignoffPath);
+        DateTimeOffset ts = DateTimeOffset.UtcNow;
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "reviewer", Role.Review, true, "r", ts));
+        store.Upsert(new ReviewSignoff(f.Tx1Id, "boss", Role.Approve, false, "b", ts));
+        SignoffViewModel vm = f.MakeVm(store);
+
+        // Ts 相同 → 取列表中靠后的一条（稳定）。
+        Assert.Equal("boss", vm.SignoffFor(f.Tx1Id)!.Operator);
+    }
+
     // ---- Store persistence ----
 
     [Fact]
@@ -339,6 +397,40 @@ public class SignoffTests
             Assert.Equal(2, store.Items.Count);
             Assert.Equal("new", store.Items.Single(s => s.Operator == "reviewer").Comment);
             Assert.True(store.Items.Single(s => s.Operator == "reviewer").Approved);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Store_Load_DedupOperatorIsCaseInsensitive()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cadagent-signoff-dupci-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string path = Path.Combine(dir, "signoffs.json");
+            var ts = DateTimeOffset.UtcNow;
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Converters = { new JsonStringEnumConverter() }
+            };
+            // 同 TxId、账号仅大小写不同 → 与 Upsert 同一比较器（OrdinalIgnoreCase），保留末条。
+            string json = JsonSerializer.Serialize(new
+            {
+                Items = new[]
+                {
+                    new ReviewSignoff("tx1", "reviewer", Role.Review, false, "old", ts),
+                    new ReviewSignoff("tx1", "REVIEWER", Role.Review, true, "new", ts.AddMinutes(1))
+                }
+            }, options);
+            File.WriteAllText(path, json);
+
+            var store = new ReviewSignoffStore(path);
+            ReviewSignoff s = Assert.Single(store.Items);
+            Assert.Equal("REVIEWER", s.Operator); // 末条原样保留（含原始大小写）
+            Assert.Equal("new", s.Comment);
+            Assert.True(s.Approved);
         }
         finally { Directory.Delete(dir, true); }
     }

@@ -16,7 +16,8 @@ public sealed record ReviewSignoff(string TxId, string Operator, Role Role, bool
 /// Save 原子写（沿用 SemanticOverlay/AdjudicationSet 模式：同目录 tmp 写全量
 /// 再 Move 覆盖——写入中途崩溃时磁盘旧文件完整，签认不丢；失败时 tmp 可能残留，
 /// 可接受）。Upsert 仅改内存（同 TxId+Operator 替换，账号大小写不敏感），
-/// 由调用方决定何时 Save。Load 对磁盘重复键去重保留末条（与 Upsert 重放等价）。
+/// 由调用方决定何时 Save。Load 对磁盘重复键去重保留末条（与 Upsert 重放等价，
+/// 同一比较器：TxId 序数 + Operator OrdinalIgnoreCase）。
 /// </summary>
 public sealed class ReviewSignoffStore
 {
@@ -46,7 +47,7 @@ public sealed class ReviewSignoffStore
         }
         SignoffFile? file = JsonSerializer.Deserialize<SignoffFile>(File.ReadAllText(_path), JsonOpts);
         Items = (file?.Items ?? new List<ReviewSignoff>())
-            .GroupBy(x => (x.TxId, Account: x.Operator.ToLowerInvariant()))
+            .GroupBy(x => (x.TxId, x.Operator), TxOperatorComparer.Instance)
             .Select(g => g.Last())
             .ToList();
     }
@@ -72,5 +73,20 @@ public sealed class ReviewSignoffStore
     private sealed class SignoffFile
     {
         public List<ReviewSignoff> Items { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Load 去重键比较器：与 Upsert 完全一致——TxId 序数相等，
+    /// Operator 大小写不敏感（OrdinalIgnoreCase）。
+    /// </summary>
+    private sealed class TxOperatorComparer : IEqualityComparer<(string TxId, string Operator)>
+    {
+        public static readonly TxOperatorComparer Instance = new();
+
+        public bool Equals((string TxId, string Operator) x, (string TxId, string Operator) y) =>
+            x.TxId == y.TxId && string.Equals(x.Operator, y.Operator, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode((string TxId, string Operator) obj) =>
+            HashCode.Combine(obj.TxId, StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Operator));
     }
 }

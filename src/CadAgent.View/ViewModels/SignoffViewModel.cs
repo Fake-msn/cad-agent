@@ -49,9 +49,15 @@ public sealed class SignoffViewModel
     public IReadOnlyList<TxGroup> UnsignedTx =>
         _txGroups.Where(g => !_store.Items.Any(s => s.TxId == g.TxId)).ToList();
 
-    /// <summary>该事务最新一条签认（任意签认人）；null=未签认。</summary>
+    /// <summary>
+    /// 该事务时间最新的一条签认（任意签认人，Ts 最大者；Ts 相同取列表靠后一条——
+    /// 升序稳定排序保持同 Ts 的原始顺序，LastOrDefault 取末条）；null=未签认。
+    /// 按时间而非列表位置——Upsert 原位替换不改变位置，多签认人重签后仍返回
+    /// 时间最新的裁决。
+    /// </summary>
     public ReviewSignoff? SignoffFor(string txId) =>
-        _store.Items.LastOrDefault(s => s.TxId == txId);
+        _store.Items.Where(s => s.TxId == txId)
+            .OrderBy(s => s.Ts).LastOrDefault();
 
     /// <summary>签认完成 → UI 刷新。在调用方上下文触发。</summary>
     public event Action? SignoffsChanged;
