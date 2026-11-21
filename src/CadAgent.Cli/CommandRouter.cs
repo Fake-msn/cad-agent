@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CadAgent.Core;
@@ -50,6 +51,7 @@ public static partial class CommandRouter
                 case "check": return Check(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
                 case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
+                case "view": return ViewLaunch(args, project, stderr);
                 case "llm": return Llm(args, positional, agentDir, session, stdout, stderr);
                 case "agent": return Agent(args, agentDir, session, stdout, stderr);
                 case "review": return Review(args, positional, agentDir, session, stdout, stderr);
@@ -389,6 +391,45 @@ public static partial class CommandRouter
         var op = Identity(agentDir).Current;
         stdout.WriteLine($"{op.Account}\t{op.Role}");
         return 0;
+    }
+
+    /// <summary>
+    /// view（计划4 T1）：进程拉起 Avalonia 视图——dotnet CadAgent.View.dll（同目录，
+    /// Cli 对 View 的项目引用仅复制输出；Cli 代码不 using Avalonia）。
+    /// 图纸缺失/View 程序集缺失→stderr + exit 1；启动成功即 exit 0（不等待 UI 进程）。
+    /// T10：--skill 可重复直通 View 进程（BuildViewArgs 装配）；包校验先于进程拉起
+    /// （check --skill 先例：用法错误先于任何副作用，LoadRuleSet 异常由 Run 兜底）。
+    /// </summary>
+    private static int ViewLaunch(string[] args, string project, TextWriter stderr)
+    {
+        string drawing = RequireOption(args, "--drawing");
+        if (!File.Exists(drawing))
+        {
+            stderr.WriteLine($"图纸文件不存在: {drawing}");
+            return 1;
+        }
+        var skillDirs = GetOptionValues(args, "--skill");
+        LoadRuleSet(args, stderr); // 包非法/Id 冲突→抛异常（Run 兜底 stderr + exit 1，不拉起进程）
+        string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
+        if (!File.Exists(viewDll))
+        {
+            stderr.WriteLine($"未找到视图程序集: {viewDll}");
+            return 1;
+        }
+        Process.Start("dotnet", BuildViewArgs(viewDll, drawing, project, skillDirs));
+        return 0;
+    }
+
+    /// <summary>
+    /// T10：View 进程参数装配（arg-builder 单测覆盖）——--skill 可重复、按出现序
+    /// 追加；不带 --skill 时与 T1 字符串逐字一致。
+    /// </summary>
+    internal static string BuildViewArgs(string viewDll, string drawing, string project,
+        IReadOnlyList<string> skillDirs)
+    {
+        var sb = new System.Text.StringBuilder($"\"{viewDll}\" --drawing \"{drawing}\" --project \"{project}\"");
+        foreach (string dir in skillDirs) sb.Append($" --skill \"{dir}\"");
+        return sb.ToString();
     }
 
     private static string SemanticOverlayPath(string agentDir) =>
@@ -802,7 +843,7 @@ public static partial class CommandRouter
 
     private static int Usage(TextWriter stderr)
     {
-        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run> [参数] [--project <dir>]");
+        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run|view> [参数] [--project <dir>]");
         return 1;
     }
 
