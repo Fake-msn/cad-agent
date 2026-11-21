@@ -203,7 +203,7 @@ symbols:
   - { name: "线型差定温火灾探测器", file: elec-197.dxf, class: Auxiliary, description: "Line-type rate-of-rise and fixed temperature detector；方框+±+左右引线" }
   - { name: "光束感烟火灾探测器(线型发射部分)", file: elec-198.dxf, class: Auxiliary, description: "Beam smoke detector (line type, the part of launch)；方框S+左引线+右外箭头" }
   - { name: "光束感烟火灾探测器(线型接受部分)", file: elec-199.dxf, class: Auxiliary, description: "Beam smoke detector (line type, the part of reception)；方框S+左内箭头+右引线" }
-  - { name: "复合式感烟感温火灾探测器(点型)", file: elec-200.dxf, class: Auxiliary, description: "Combination type smoke and heat detector (point type)；方框竖分：左S右点" }
+  - { name: "复合式感温感烟火灾探测器(点型)", file: elec-200.dxf, class: Auxiliary, description: "Combination type smoke and heat detector (point type)；方框竖分：左S右点" }
   - { name: "光束感烟感温火灾探测器(线型发射部分)", file: elec-201.dxf, class: Auxiliary, description: "Infra-red beam line-type smoke and heat detector (emitter)；方框S|点+右外箭头" }
   - { name: "光束感烟感温火灾探测器(线型接受部分)", file: elec-202.dxf, class: Auxiliary, description: "Infra-red beam line-type smoke and heat detector (receiver)；方框S|点+左内箭头" }
   - { name: "手动火灾报警按钮", file: elec-203.dxf, class: Auxiliary, description: "Manual fire alarm call point；方框+Y漏斗" }
