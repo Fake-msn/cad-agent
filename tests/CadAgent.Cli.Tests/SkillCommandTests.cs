@@ -344,4 +344,30 @@ public class SkillCommandTests : IDisposable
         using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
         Assert.Equal("gb50001-2017.r1", p.RootElement.GetProperty("rulePackVersion").GetString());
     }
+
+    [Fact]
+    public void Scan_DanglingSkillOption_WarnsAndContinues()
+    {
+        // 2b-ii-b Task 2：尾随 --skill 无值→stderr 警告"忽略无值选项 --skill"，
+        // 宽容继续（不 exit 1），行为等同无 --skill（builtin-only）。
+        // 注意 --project 必须先于 --skill 给定，保证 --skill 真正尾随无值
+        // （Run helper 会在末尾追加 --project，尾随场景需直接调 CommandRouter.Run）。
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = CommandRouter.Run(
+            new[] { "semantic", "scan", "--drawing", _drawing, "--project", _project, "--skill" }, outW, errW);
+        Assert.Equal(0, code);
+        Assert.Contains("忽略无值选项 --skill", errW.ToString());
+    }
+
+    [Fact]
+    public void Check_DanglingSkillOption_WarnsSameExitAsWithout()
+    {
+        // check 同一 GetOptionValues 路径：警告可见且退出码与无 --skill 基线一致。
+        var (baseline, _, _) = Run("check", "--drawing", _drawing);
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = CommandRouter.Run(
+            new[] { "check", "--drawing", _drawing, "--project", _project, "--skill" }, outW, errW);
+        Assert.Equal(baseline, code);
+        Assert.Contains("忽略无值选项 --skill", errW.ToString());
+    }
 }

@@ -1,0 +1,16 @@
+# R-50786-5.1.3.yaml —— excerpt 逐字自 extraction-electrical.md H3（5.1.3，JSON页69）。
+# 主导专业用房 3.0mm 变体需图类判定（deferred，检查器 DetectionBasis 注记）。
+id: R-50786-5.1.3
+source:
+  standard: "GB/T 50786-2012"
+  clause: "5.1.3"
+  excerpt: "图样中本专业的汉字标注字高不宜小于 3.5mm，主导专业工艺、功能用房的汉字标注字高不宜小于 3.0mm，字母或数字标注字高不应小于 2.5mm"
+  verification: source-text
+modal: "不应／不宜"
+force: recommended
+severity: high
+scope: { discipline: electrical, drawingType: any }
+check:
+  type: text-height-min
+  params: { minLatin: 2.5, minHan: 3.5 }
+suggestion: "字母/数字标注字高不小于 2.5mm，本专业汉字标注字高不小于 3.5mm；主导专业工艺、功能用房汉字 3.0mm 变体需图类判定（deferred）；出图比例换算留计划3"

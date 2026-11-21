@@ -41,4 +41,5 @@ public sealed record Rule(
 public sealed class InvalidRuleException : Exception
 {
     public InvalidRuleException(string message) : base(message) { }
+    public InvalidRuleException(string message, Exception inner) : base(message, inner) { }
 }

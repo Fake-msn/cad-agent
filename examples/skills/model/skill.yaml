@@ -1,0 +1,7 @@
+# 信息模型制图规则包（JGJ/T 448-2018）——2D 施工图检查的低产出补充源（extraction-model.md §5）。
+# 第一 slice 仅图纸文件命名（R1，5.4.3 主干，TEXT 级）；条文逐字摘录，无 LaTeX 归一化需求。
+name: 信息模型制图（JGJ/T 448-2018）
+version: "1.0.0"
+discipline: any
+drawingType: any
+description: 信息模型制图 2D 补充规则包（图纸文件命名 5.4.3）；标准号外部核验待原件确认；专业代码白名单（GB/T 51301）未提供 deferred；图纸编号段表 5.4.3 的 5xxx 段待扫描复核（F3）不入库。

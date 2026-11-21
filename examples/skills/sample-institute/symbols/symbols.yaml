@@ -1,0 +1,10 @@
+# 示例符号元数据（入库示例，非真实院标）——演示 symbols/symbols.yaml 结构（2b-ii-b Task 10）。
+# lum.dxf 文件未随包提供：本 slice 仅校验元数据，不校验文件存在性（T9 裁定）；
+# 跨文档符号导入（含文件存在性校验）留计划3。
+# class 取 Auxiliary：SemanticClass 尚无 Lighting 成员（布灯语义类随计划3布灯处理器引入，
+# SymbolMetaTests 灯具符号先例同口径）；真实符号图库待用户提供（spec §12 开放项）。
+symbols:
+  - name: LUM
+    file: lum.dxf
+    class: Auxiliary
+    description: 示例灯具块（元数据演示，跨文档导入计划3）

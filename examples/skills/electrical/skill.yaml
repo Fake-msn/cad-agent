@@ -1,0 +1,8 @@
+# 建筑电气制图规则包（GB/T 50786-2012）——条文逐字摘录自 standards-src/extraction-electrical.md
+# （H3/D7/D8/D9，TEXT 级）；外层引号剥除沿用 builtin 先例，无 LaTeX 归一化需求。
+# 参照代号 4.2.4（D12）子类白名单庞大且一码多义，第一 slice 不入库（spec §12 注记）。
+name: 建筑电气制图（GB/T 50786-2012）
+version: "1.0.0"
+discipline: electrical
+drawingType: any
+description: 建筑电气制图 TEXT 条文规则包（最小字高/缆线标注格式/槽位代码白名单/灯具标注格式）；标准号外部核验待原件确认；符号本体规则 VISUAL deferred；别名待真实院标/天正电气图层核实后补充。

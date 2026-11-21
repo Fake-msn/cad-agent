@@ -1,6 +1,7 @@
 using ACadSharp;
 using ACadSharp.Entities;
 using ACadSharp.IO;
+using ACadSharp.Tables;
 using CSMath;
 
 namespace CadAgent.Data.Tests;
@@ -40,5 +41,17 @@ public static class DxfFixture
     {
         var line = new Line { StartPoint = (XYZ)new XY(0, 0), EndPoint = (XYZ)new XY(100, 100) };
         doc.Entities.Add(line);
+    }
+
+    /// <summary>
+    /// BlockRecord "LUM" with one diagonal line inside — insert-block fixture
+    /// (2b-ii-b Task 9). ACadSharp 3.8.35: new BlockRecord(name) + Entities.Add
+    /// + Doc.BlockRecords.Add; survives DxfWriter/DxfReader roundtrip.
+    /// </summary>
+    public static void AddLumBlock(CadDocument doc)
+    {
+        var block = new BlockRecord("LUM");
+        block.Entities.Add(new Line { StartPoint = new XYZ(-1, -1, 0), EndPoint = new XYZ(1, 1, 0) });
+        doc.BlockRecords.Add(block);
     }
 }

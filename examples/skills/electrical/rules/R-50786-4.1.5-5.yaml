@@ -1,0 +1,18 @@
+# R-50786-4.1.5-5.yaml —— excerpt = D7 操作句 + 序号5 格式注记（逐字自 extraction-electrical.md
+# D7 行，4.1.5 表4.1.5+续表；字段释义内嵌引文与反引号原样保留）。
+# luminaireMounts 白名单逐字自 D9 表4.2.1-3（11 项）；符号本体关联 VISUAL deferred。
+id: R-50786-4.1.5-5
+source:
+  standard: "GB/T 50786-2012"
+  clause: "4.1.5"
+  excerpt: "绘制图样时，宜采用表 4.1.5 的电气设备标注方式表示；序号5 灯具 `a-b (c×d×L)/e f`（\"a—数量b—型号c—每盏灯具的光源数量d—光源安装容量e—安装高度(m)'—'表示吸顶安装L—光源种类…f—安装方式,参见表4.2.1-3\"）"
+  verification: source-text
+modal: "宜"
+force: recommended
+severity: medium
+scope: { discipline: electrical, drawingType: any }
+check:
+  type: luminaire-format
+  params:
+    luminaireMounts: [SW, CS, DS, W, C, R, CR, WR, S, CL, HM]
+suggestion: "灯具标注按表4.1.5 序号5 格式 a-b(c×d×L)/e f（e=安装高度数值或'—'吸顶，f=安装方式代码∈表4.2.1-3）；符号附近关联与分数排版 VISUAL deferred"

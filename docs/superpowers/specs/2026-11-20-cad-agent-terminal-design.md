@@ -354,6 +354,15 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **LLM 起草 skill=计划3**：当前 skill 包均为人工编写/CLI promote 沉淀；LLM 起草院标 skill（含 Upsert 守卫调用侧强制、幻影映射拒绝）属计划3。
 - **2b-i 遗留状态（本计划承接后仍开放）**：全角＋标高候选窗缺口（候选正则仅 ASCII [+-]，全角符号不进入检查，扩字符类待裁定）；1 位小数标高报 High 已追认（与 11.8.4"注写到小数点后第三位"意图一致），补测试留后续；CommandRouter 已增至 942 行，skill 族提取独立文件留后续；promote aliases upsert 经 YamlDotNet 整体重序列化（原注释与额外未知键丢弃，计划规定行为，代码已注）。
 
+**计划2b-ii-b完成（电气 skill 端到端，2026-11-21 记录；端到端闭环测试 电气包 check（合规缆线不成 issue+槽位/字高违规引用 GB/T 50786-2012 条款，全 recommended exit 0）→rule adjudicate 升级槽位规则 mandatory→check exit 2→skill run lay-line 画线+insert-lum 插入图纸内 LUM 块（请求审计先于执行）→audit verify 绿→check 审计 rulePackVersion 含电气包@1.0.0、adjudicationHash 随裁定集变化 全绿，全套件 337 测试）**：
+
+- 已交付：CommandRouter skill 族提取（T1 纯移动行为不变：CommandRouter.cs 980→725 行 + CommandRouter.Skills.cs 265 行，245 测试守卫；T8 增 skill run 后两文件现 781+381 行）；遗留小项批关闭（aliases 全数字 class 拒绝+同包重复 layerName 拒绝、RuleLoader.LoadYaml 内层异常保留、CA1416 程序集级 SupportedOSPlatform("windows") 标注、尾随无值 --skill 警告不退出、builtin 治理测试钉 7 规则内容 SHA256——内容变更强制 RulePackVersion 修订升版）；5 新检查器（text-height-min/cable-format/slot-code-whitelist/luminaire-format/file-naming，候选保守、DetectionBasis 诚实边界、CE/CL 一码多义按槽位消歧）；电气包 4 规则（GB/T 50786-2012：5.1.3 最小字高/4.1.5 序号8 缆线格式/3.4.3 槽位白名单/4.1.5 序号5 灯具格式）+模型包 1 规则（JGJ/T 448-2018 5.4.3 文件命名），条文逐字摘录 TEXT 可核实（extraction-electrical.md H3/D7/D8/D9、extraction-model.md R1），情态冲突双录（3.4.3"应" vs 4.2.1"宜"，按较严应执行；force recommended 承载，mandatory 升级走人工裁定——E2E 演示）；步骤模板 steps/*.yaml（占位符整串 \z 精确替换、缺参/未知占位符拒绝、数值保持数值）+ skill run（模板实例化→StepEngine 执行，审计/快照/闸口全走既有引擎**无旁路**，请求审计 skill-run 先于执行；run --skill 入口校验+tx-start/tx-commit 审计 rulePackVersion 装饰器，不带 --skill 行为逐字不变）；symbols/symbols.yaml 符号元数据（严格校验、文件存在性不校验）+ insert-block 第六处理器（图纸内块引用、缺块失败留痕；跨文档符号导入留计划3）。
+- **VISUAL deferred 清单（不假装已检）**：符号本体图形规则、分数排版（分子/分母上下排版）、参照代号 4.2.4 子类白名单（D12，一码多义+庞大）、光源种类联动、专业代码白名单（GB/T 51301）——全部显式 deferred，检查器 DetectionBasis 注记在案。
+- **示例符号元数据**：sample-institute/symbols/symbols.yaml（LUM→lum.dxf，class Auxiliary——SemanticClass 尚无 Lighting 成员，布灯语义类随计划3布灯处理器引入；lum.dxf 未随包提供，存在性不校验，跨文档导入计划3）。示例 skill 仍非真实院标，E2E 只改临时副本、仓库示例零污染（测试断言；开放项不变）。
+- **已知遗留（计划3承接）**：ComputeHash Insert 投影仅基字段（InsertPoint/scale/rotation 变更不入哈希，随布灯处理器补齐）；run --skill 的 tx-failed 记录 paramsJson 仍裸 planId（装饰器仅覆盖 tx-start/tx-commit）；全角＋标高候选窗缺口（2b-i 遗留仍开放）；数字 class 空白绕过（" 3 " 含空白绕过全数字守卫后 Enum.TryParse 修剪接受）；insert-block scale 无零/负值校验（非数值抛错走引擎失败结果）；skill run 成功路径不做 run-regression 回归检查、run --skill 回归仍 builtin-only（第一 slice 裁定，回归口径留后续）。
+- **最终审查修复波关闭（2026-11-21）**：cable-format 候选收紧 `^[A-Z]{2,4}(?=[-\d])` + DetectionBasis 误旗边界披露（WDZ-YJY 多段前缀/MR100×50 尺寸形仍可能误旗，recommended 级 disclosed）；slot-code 3 段纯字母尾码按白名单成员资格定槽（∈methods∉positions→方式槽；双属/双不属→不判，宁漏勿滥）——原"裸字母方式码误槽"遗留关闭；RuleLoader.LoadDirectory 内层异常保留；CA1416 经 Directory.Build.props 统一程序集属性全仓清零（Core/AssemblyInfo.cs 移除避免重复）。全套件 342 测试。
+- **2b-ii 全部完成→计划3就绪**：skill 机制（2b-ii-a）+电气/模型规则数据、步骤模板与符号元数据（2b-ii-b）齐备；计划3 承接 LLM 配置与鉴权（§8）、中望 COM 适配器、保真导出+审计包（含哈希链外部锚）、厂商支持矩阵（§11）、步级 undo，及上列已知遗留与 2a/2b-i 开放项。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
