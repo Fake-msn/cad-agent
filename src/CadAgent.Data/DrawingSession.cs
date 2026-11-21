@@ -107,6 +107,10 @@ public sealed class DrawingSession : IDrawingSession
                 case ProxyEntity proxy:
                     sb.Append(FormattableString.Invariant($"|{proxy.ObjectName}|{proxy.DxfClass?.CppClassName}"));
                     break;
+                case Insert insert:
+                    sb.Append(FormattableString.Invariant(
+                        $"|I|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.InsertPoint.Z:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));
+                    break;
                 // Other entity types: base fields only (documented limitation; extend as handlers grow).
             }
             sb.Append('\n');
@@ -116,11 +120,30 @@ public sealed class DrawingSession : IDrawingSession
 
     public void SaveWorking()
     {
-        using var fs = File.Create(SourcePath);
-        DxfWriter.Write(fs, Doc);
+        // 原子写（合并前审查 Critical#1）：先写 tmp 再 Move——写中途崩溃不损持久工作副本
+        // （spec §12 load-if-exists 持久状态；同 SemanticOverlay/LlmConfigStore/Anchor 模式）。
+        string tmp = SourcePath + ".tmp";
+        using (var fs = File.Create(tmp)) DxfWriter.Write(fs, Doc);
+        File.Move(tmp, SourcePath, overwrite: true);
     }
 
     public void Reload() => Doc = LoadDxf(SourcePath);
+
+    /// <summary>步级 undo（3b-ii）：内存 DXF 序列化捕获模型状态，不触磁盘文件。</summary>
+    public byte[] CaptureState()
+    {
+        using var ms = new MemoryStream();
+        DxfWriter.Write(ms, Doc);
+        return ms.ToArray();
+    }
+
+    /// <summary>从捕获状态恢复模型（内存 DXF 读回）。</summary>
+    public void RestoreState(byte[] state)
+    {
+        using var ms = new MemoryStream(state);
+        using var reader = new DxfReader(ms);
+        Doc = reader.Read();
+    }
 
     public DrawingSummary Summarize()
     {

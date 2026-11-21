@@ -1,0 +1,11 @@
+# 灯具编号步骤模板（JGJ/T 244-2011 3.6.5/3.6.6-4 设备索引符号）。
+# prefix＝品种代号，标准明示归院标（3.6.5 条文说明）——必填参数，无默认不编造。
+# 执行经 label-luminaires 处理器（需已确认 Lighting 语义；正六边形长轴默认10mm∈[8,12]）。
+templates:
+  - name: label-luminaires
+    description: 为图纸内灯具 Insert 生成设备索引符号+编号（正六边形/细实线/长轴8~12mm，JGJ/T 244-2011 3.6.6-4）
+    params: [prefix]
+    sequence:
+      - kind: label-luminaires
+        params:
+          prefix: "{{prefix}}"

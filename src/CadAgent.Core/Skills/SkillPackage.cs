@@ -248,6 +248,12 @@ public static class SkillLoader
                 throw new InvalidSkillException("symbols.yaml: name must not be empty");
             if (string.IsNullOrWhiteSpace(entry.File))
                 throw new InvalidSkillException("symbols.yaml: file must not be empty");
+            // 合并前审查 Warning#4：skill 包为外部输入——file 穿越守卫（.. / rooted / 领分隔符拒绝；
+            // 包内相对子目录允许），同 DpapiKeyProtector.PathFor 模式。
+            if (entry.File.Contains("..") || Path.IsPathRooted(entry.File)
+                || entry.File.StartsWith('/') || entry.File.StartsWith('\\'))
+                throw new InvalidSkillException(
+                    $"symbols.yaml: file must be a package-relative path without '..': {entry.File}");
             // 全数字串拒绝（2b-ii-b Task 2，strict parity）：Enum.TryParse 会把 "3"
             // 解析为已定义数值——class 只接受枚举名（ignoreCase），先于 parse 拒绝。
             if (string.IsNullOrWhiteSpace(entry.Class) ||

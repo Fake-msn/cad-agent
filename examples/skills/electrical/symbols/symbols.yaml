@@ -1,0 +1,335 @@
+# GB/T 50786-2012 表4.1.2 强电图样常用图形符号（164 编号，本文件随批增长）。
+# 来源链：MinerU vlm 重转整表裁切 → 逐页目视转录（忽略水印）→ 矢量重建 DXF（近似几何，非精确描摹）。
+# 形式2/复合简化在 description 注记；证据裁切 standards-src/_reparse/gb50786/images/（gitignored）。
+symbols:
+  - { name: "导线组", file: elec-001.dxf, class: Auxiliary, description: "Group of connections；形式1=三斜tick示导线数；形式2=斜杠+数字3" }
+  - { name: "软连接", file: elec-002.dxf, class: Auxiliary, description: "Flexible connection" }
+  - { name: "端子", file: elec-003.dxf, class: Auxiliary, description: "Terminal" }
+  - { name: "端子板", file: elec-004.dxf, class: Auxiliary, description: "Terminal strip" }
+  - { name: "T型连接", file: elec-005.dxf, class: Auxiliary, description: "T-connection；形式2=连接点加实心圆点" }
+  - { name: "导线的双T连接", file: elec-006.dxf, class: Auxiliary, description: "Double junction of conductors；形式2=十字加实心圆点" }
+  - { name: "跨接连接", file: elec-007.dxf, class: Auxiliary, description: "Bridge connection；跨越连接，无连接点" }
+  - { name: "阴接触件、插座", file: elec-008.dxf, class: Auxiliary, description: "Contact, female；连接器阴接触件" }
+  - { name: "阳接触件、插头", file: elec-009.dxf, class: Auxiliary, description: "Contact, male；连接器阳接触件，涂黑块以密集线近似" }
+  - { name: "定向连接", file: elec-010.dxf, class: Auxiliary, description: "Directed connection" }
+  - { name: "进入线束的点", file: elec-011.dxf, class: Auxiliary, description: "Point of access to a bundle；不适用于表示电气连接" }
+  - { name: "电阻器", file: elec-012.dxf, class: Auxiliary, description: "Resistor, general symbol" }
+  - { name: "电容器", file: elec-013.dxf, class: Auxiliary, description: "Capacitor, general symbol" }
+  - { name: "半导体二极管", file: elec-014.dxf, class: Auxiliary, description: "Semiconductor diode, general symbol" }
+  - { name: "发光二极管", file: elec-015.dxf, class: Lighting, description: "Light emitting diode (LED)；一般符号+外射双箭头" }
+  - { name: "双向三极闸流晶体管", file: elec-016.dxf, class: Auxiliary, description: "Bidirectional triode thyristor; Triac；反并联双三角+门极；简化主要素" }
+  - { name: "PNP晶体管", file: elec-017.dxf, class: Auxiliary, description: "PNP transistor；发射极箭头指向基极竖bar" }
+  - { name: "电机", file: elec-018.dxf, class: Auxiliary, description: "Machine, general symbol；圆内实心五角星（见注2）" }
+  - { name: "三相笼式感应电动机", file: elec-019.dxf, class: Auxiliary, description: "Three-phase cage induction motor；M 3~ + 三上引线" }
+  - { name: "单相笼式感应电动机", file: elec-020.dxf, class: Auxiliary, description: "Single-phase cage induction motor；M 1~ + 二上引线+二右引线（绕组分相端子）" }
+  - { name: "三相绕线式转子感应电动机", file: elec-021.dxf, class: Auxiliary, description: "Induction motor, three-phase, with wound rotor；双圆+M 3~+三上三下引线" }
+  - { name: "双绕组变压器", file: elec-022.dxf, class: Auxiliary, description: "Transformer with two windings, general symbol；形式1=双圆相交+上下引线；形式2=绕组scallop可示瞬时极性" }
+  - { name: "绕组间有屏蔽的双绕组变压器", file: elec-023.dxf, class: Auxiliary, description: "Transformer with two windings and screen；双圆+屏蔽横线+带tick引线" }
+  - { name: "一个绕组上有中间抽头的变压器", file: elec-024.dxf, class: Auxiliary, description: "Transformer with center tap on one winding；双圆+中心抽头右引线" }
+  - { name: "星形—三角形连接的三相变压器", file: elec-025.dxf, class: Auxiliary, description: "Three-phase transformer, connection star-delta；上圆Y下圆三角" }
+  - { name: "具有4个抽头的星形—星形连接的三相变压器", file: elec-026.dxf, class: Auxiliary, description: "Three-phase transformer with four taps, connection star-star；双圆各Y+抽头数4注记+实心点" }
+  - { name: "单相变压器组成的三相变压器", file: elec-027.dxf, class: Auxiliary, description: "Three-phase bank of single-phase transformers, connection star-delta；星形—三角形连接；右侧Y/3/三角注记列" }
+  - { name: "具有分接开关的三相变压器", file: elec-028.dxf, class: Auxiliary, description: "Three-phase transformer with tap changer；星形—三角形；斜箭头+端部折步示分接开关" }
+  - { name: "三相变压器星形—星形—三角形连接", file: elec-029.dxf, class: Auxiliary, description: "Three-phase transformer, connection star-star-delta；三圆：上Y左下Y右下三角" }
+  - { name: "自耦变压器", file: elec-030.dxf, class: Auxiliary, description: "Auto-transformer, general symbol；单圆+绕组尾弧+上下引线；尾弧近似" }
+  - { name: "单相自耦变压器", file: elec-031.dxf, class: Auxiliary, description: "Auto-transformer, single-phase；单圆+尾弧+带tick引线" }
+  - { name: "三相自耦变压器星形连接", file: elec-032.dxf, class: Auxiliary, description: "Auto-transformer, three-phase, connection star；单圆+Y+尾弧+带tick引线" }
+  - { name: "可调压的单相自耦变压器", file: elec-033.dxf, class: Auxiliary, description: "Auto-transformer, single-phase with voltage regulation；31+斜箭头" }
+  - { name: "三相感应调压器", file: elec-034.dxf, class: Auxiliary, description: "Three-phase induction regulator；双圆相交+斜箭头+带tick引线" }
+  - { name: "电抗器", file: elec-035.dxf, class: Auxiliary, description: "Reactor, general symbol；形式1=上下半圆反 bulge+竖引线；形式2=四scallop" }
+  - { name: "电压互感器", file: elec-036.dxf, class: Auxiliary, description: "Voltage transformer；双圆相交+上下 plain 引线" }
+  - { name: "电流互感器", file: elec-037.dxf, class: Auxiliary, description: "Current transformer, general symbol；圆穿竖一次线+右二次双引线带tick" }
+  - { name: "具有两个铁心每个铁心一个次级绕组的电流互感器", file: elec-038.dxf, class: Auxiliary, description: "Current transformer with two cores with one secondary winding on each core；竖线+双圆+端端子小圆+各右引线带tick（见注3）" }
+  - { name: "在一个铁心上具有两个次级绕组的电流互感器", file: elec-039.dxf, class: Auxiliary, description: "Current transformer with two secondary windings on one core；双圆相交穿竖线+双右引线带tick；形式2铁心符号必须画出" }
+  - { name: "具有三条穿线一次导体的脉冲变压器或电流互感器", file: elec-040.dxf, class: Auxiliary, description: "Pulse or current transformer with three threaded primary conductors；圆+竖线+内3注记+右引线带tick" }
+  - { name: "三个电流互感器(四个次级引线引出)", file: elec-041.dxf, class: Auxiliary, description: "Three current transformers；斜一次线3注记+圆+右引线4注记" }
+  - { name: "具有两个铁心每个铁心一个次级绕组的三个电流互感器", file: elec-042.dxf, class: Auxiliary, description: "Three current transformers with two cores with one secondary winding on each core；竖链双圆+端端子+3/4注记（见注3）；简化主要素" }
+  - { name: "两个电流互感器导线L1和L3三个次级引线引出", file: elec-043.dxf, class: Auxiliary, description: "Two current transformers on L1 and L3, three secondary lines；圆+竖线+斜线2/3注记+右引线3+L1、L3注记" }
+  - { name: "具有两个铁心每个铁心一个次级绕组的两个电流互感器", file: elec-044.dxf, class: Auxiliary, description: "Two current transformers with two cores with one secondary winding on each core；竖链双圆+端端子+2/3注记+右引线3（见注3）" }
+  - { name: "物件(圆形)", file: elec-045.dxf, class: Auxiliary, description: "Object, general symbol (circle)；说明列与46/47共用：物件一般符号" }
+  - { name: "物件(方形)", file: elec-046.dxf, class: Auxiliary, description: "Object, general symbol (square)；说明列与45/47共用" }
+  - { name: "物件(矩形)", file: elec-047.dxf, class: Auxiliary, description: "Object, general symbol (rectangle)；注4；说明列与45/46共用" }
+  - { name: "有稳定输出电压的变换器", file: elec-048.dxf, class: Auxiliary, description: "Converter with stabilized output voltage；方框+对角线+左上正弦+右下u underline" }
+  - { name: "频率由f1变到f2的变频器", file: elec-049.dxf, class: Auxiliary, description: "Frequency converter, changing from f1 to f2；方框+对角线+f1/f2（可用具体数值代替）" }
+  - { name: "直流/直流变换器", file: elec-050.dxf, class: Auxiliary, description: "DC/DC converter；方框+对角线+两侧DC线组" }
+  - { name: "整流器", file: elec-051.dxf, class: Auxiliary, description: "Rectifier；方框+对角线+左上正弦+右下DC" }
+  - { name: "逆变器", file: elec-052.dxf, class: Auxiliary, description: "Inverter；方框+对角线+左上DC+右下正弦" }
+  - { name: "整流器/逆变器", file: elec-053.dxf, class: Auxiliary, description: "Rectifier/Inverter；51+底部双向箭头" }
+  - { name: "原电池", file: elec-054.dxf, class: Auxiliary, description: "Primary cell；长线阳极短线阴极" }
+  - { name: "静止电能发生器", file: elec-055.dxf, class: Auxiliary, description: "Static generator, general symbol；方框+G" }
+  - { name: "光电发生器", file: elec-056.dxf, class: Auxiliary, description: "Photovoltaic generator；方框+G+电池线+入射双箭头" }
+  - { name: "剩余电流监视器", file: elec-057.dxf, class: Auxiliary, description: "Residual current monitor；方框+IΔ+圆×+漏斗形" }
+  - { name: "动合触点、开关", file: elec-058.dxf, class: Auxiliary, description: "Make contact, general symbol; Switch, general symbol；常开一般符号" }
+  - { name: "动断触点", file: elec-059.dxf, class: Auxiliary, description: "Break contact；常闭" }
+  - { name: "先断后合的转换触点", file: elec-060.dxf, class: Auxiliary, description: "Change-over break before make contact" }
+  - { name: "中间断开的转换触点", file: elec-061.dxf, class: Auxiliary, description: "Change-over contact with off-position" }
+  - { name: "先合后断的双向转换触点", file: elec-062.dxf, class: Auxiliary, description: "Change-over make before break contact, both ways；形式2=横置变体" }
+  - { name: "延时闭合的动合触点", file: elec-063.dxf, class: Auxiliary, description: "Make contact, delayed closing；吸合时延时闭合；左弧+弦" }
+  - { name: "延时断开的动合触点", file: elec-064.dxf, class: Auxiliary, description: "Make contact, delayed opening；释放时延时断开；右bulge弧+双弦" }
+  - { name: "延时断开的动断触点", file: elec-065.dxf, class: Auxiliary, description: "Break contact, delayed opening；吸合时延时断开" }
+  - { name: "延时闭合的动断触点", file: elec-066.dxf, class: Auxiliary, description: "Break contact, delayed closing；释放时延时闭合" }
+  - { name: "自动复位的手动按钮开关", file: elec-067.dxf, class: Auxiliary, description: "Switch, manually operated, push-button, automatic return；E形按钮 actuator+虚线连杆" }
+  - { name: "无自动复位的手动旋转开关", file: elec-068.dxf, class: Auxiliary, description: "Switch, manually operated, turning, stay-put；L形旋转 actuator+虚线连杆" }
+  - { name: "蘑菇头式应急按钮开关", file: elec-069.dxf, class: Auxiliary, description: "Push-button switch, type mushroom-head, key by operation；动合+自动复位；半圆蘑菇头" }
+  - { name: "防止无意操作的按钮开关", file: elec-070.dxf, class: Auxiliary, description: "Push-button switch, protected against unintentional operation；动合+保护罩 actuator" }
+  - { name: "热继电器动断触点", file: elec-071.dxf, class: Auxiliary, description: "Thermal relay or release, break contact；脉冲形热 actuator+虚线连杆" }
+  - { name: "液位控制开关动合触点", file: elec-072.dxf, class: Auxiliary, description: "Actuated by liquid level switch, make contact；浮球 actuator+虚线连杆" }
+  - { name: "液位控制开关动断触点", file: elec-073.dxf, class: Auxiliary, description: "Actuated by liquid level switch, break contact；浮球 actuator+虚线连杆" }
+  - { name: "带位置图示的多位开关", file: elec-074.dxf, class: Auxiliary, description: "Multi-position switch, with position diagram；最多四位；1 2 3 4位置图+虚线扇" }
+  - { name: "接触器主动合触点", file: elec-075.dxf, class: Auxiliary, description: "Contactor; Main make contact of a contactor；非操作位置触点断开；blade左小弧" }
+  - { name: "接触器主动断触点", file: elec-076.dxf, class: Auxiliary, description: "Contactor; Main break contact of a contactor；非操作位置触点闭合" }
+  - { name: "隔离器", file: elec-077.dxf, class: Auxiliary, description: "Disconnector; Isolator；动合+固定端横bar" }
+  - { name: "隔离开关", file: elec-078.dxf, class: Auxiliary, description: "Switch-disconnector; on-load isolating switch；77+blade枢轴小圆" }
+  - { name: "带自动释放功能的隔离开关", file: elec-079.dxf, class: Auxiliary, description: "Switch-disconnector, automatic release；78+涂黑释放块" }
+  - { name: "断路器", file: elec-080.dxf, class: Auxiliary, description: "Circuit breaker, general symbol；动合+×标记" }
+  - { name: "带隔离功能断路器", file: elec-081.dxf, class: Auxiliary, description: "Circuit breaker with disconnector function；80+顶部星号" }
+  - { name: "剩余电流动作断路器", file: elec-082.dxf, class: Auxiliary, description: "Residual current operated circuit-breaker；80+IΔ注记" }
+  - { name: "带隔离功能的剩余电流动作断路器", file: elec-083.dxf, class: Auxiliary, description: "Residual current operated circuit-breaker with disconnector function；81+IΔ注记" }
+  - { name: "继电器线圈、驱动器件", file: elec-084.dxf, class: Auxiliary, description: "Relay coil, general symbol; operating device, general symbol；矩形+上下引线" }
+  - { name: "缓慢释放继电器线圈", file: elec-085.dxf, class: Auxiliary, description: "Relay coil of a slow-releasing relay；84+左涂黑块" }
+  - { name: "缓慢吸合继电器线圈", file: elec-086.dxf, class: Auxiliary, description: "Relay coil of a slow-operating relay；84+左×块" }
+  - { name: "热继电器的驱动器件", file: elec-087.dxf, class: Auxiliary, description: "Operating device of a thermal relay；84+内钩形" }
+  - { name: "熔断器", file: elec-088.dxf, class: Auxiliary, description: "Fuse, general symbol；竖矩形+上下引线" }
+  - { name: "熔断器式隔离器", file: elec-089.dxf, class: Auxiliary, description: "Fuse-disconnector; Fuse isolator；动合+blade斜矩形+顶bar；斜矩形近似" }
+  - { name: "熔断器式隔离开关", file: elec-090.dxf, class: Auxiliary, description: "Fuse switch-disconnector; On-load isolating fuse switch；89+枢轴小圆" }
+  - { name: "火花间隙", file: elec-091.dxf, class: Auxiliary, description: "Spark gap；相对双箭头留隙" }
+  - { name: "避雷器", file: elec-092.dxf, class: Auxiliary, description: "Surge diverter; Lightning arrester；竖矩形+内下箭头+引线" }
+  - { name: "多功能电器(CPS)", file: elec-093.dxf, class: Auxiliary, description: "Multi-ple-function switching device；控制与保护开关电器；功能符号组合可省略不采用要素" }
+  - { name: "电压表", file: elec-094.dxf, class: Auxiliary, description: "Voltmeter；圆+V" }
+  - { name: "电度表(瓦时计)", file: elec-095.dxf, class: Auxiliary, description: "Watt-hour meter；矩形+上隔线+Wh" }
+  - { name: "复费率电度表", file: elec-096.dxf, class: Auxiliary, description: "Multi-rate watt-hour meter；示出二费率：双隔线+Wh" }
+  - { name: "信号灯", file: elec-097.dxf, class: Lighting, description: "Lamp, general symbol；圆内×（见注5）" }
+  - { name: "音响信号装置", file: elec-098.dxf, class: Auxiliary, description: "Acoustic signalling device, general symbol；电喇叭/电铃/单击电铃/电动汽车笛；上半圆+三腿" }
+  - { name: "蜂鸣器", file: elec-099.dxf, class: Auxiliary, description: "Buzzer；下半圆+顶线+双腿" }
+  - { name: "发电站(规划的)", file: elec-100.dxf, class: Auxiliary, description: "Generating station, planned；空方形" }
+  - { name: "发电站(运行的)", file: elec-101.dxf, class: Auxiliary, description: "Generating station, in service or unspecified；斜线填充方形" }
+  - { name: "热电联产发电站(规划的)", file: elec-102.dxf, class: Auxiliary, description: "Combined electric and heat generated station, planned；方形+右双竖线" }
+  - { name: "热电联产发电站(运行的)", file: elec-103.dxf, class: Auxiliary, description: "Combined electric and heat generated station, in service or unspecified；左半斜线填充+右双竖线" }
+  - { name: "变电站、配电所(规划的)", file: elec-104.dxf, class: Auxiliary, description: "Substation, planned；空圆；可加详细类型说明" }
+  - { name: "变电站、配电所(运行的)", file: elec-105.dxf, class: Auxiliary, description: "Substation, in service or unspecified；斜线填充圆" }
+  - { name: "接闪杆", file: elec-106.dxf, class: Auxiliary, description: "Air-termination rod；实心点" }
+  - { name: "架空线路", file: elec-107.dxf, class: Auxiliary, description: "Over-head line；横线+中圆" }
+  - { name: "电力电缆井/人孔", file: elec-108.dxf, class: Auxiliary, description: "Manhole for underground chamber；方形穿横线" }
+  - { name: "手孔", file: elec-109.dxf, class: Auxiliary, description: "Hand hole for underground chamber；矩形+中竖线穿横线" }
+  - { name: "电缆梯架、托盘和槽盒线路", file: elec-110.dxf, class: Auxiliary, description: "Line of cable ladder, cable tray, cable trunking；三平行实线+端tick" }
+  - { name: "电缆沟线路", file: elec-111.dxf, class: Auxiliary, description: "Line of cable trench；三平行虚线+端tick" }
+  - { name: "中性线", file: elec-112.dxf, class: Auxiliary, description: "Neutral conductor；横线+斜tick+实心点" }
+  - { name: "保护线", file: elec-113.dxf, class: Auxiliary, description: "Protective conductor；横线+斜tick+顶bar" }
+  - { name: "保护线和中性线共用线", file: elec-114.dxf, class: Auxiliary, description: "Combined protective and neutral conductor；PEN：点+bar" }
+  - { name: "带中性线和保护线的三相线路", file: elec-115.dxf, class: Auxiliary, description: "Three-phase wiring with neutral conductor and protective conductor；三斜tick+N点+PE bar" }
+  - { name: "向上配线或布线", file: elec-116.dxf, class: Auxiliary, description: "Wiring going upwards；横线+端点+右上箭头" }
+  - { name: "向下配线或布线", file: elec-117.dxf, class: Auxiliary, description: "Wiring going downwards；横线+端点+左下箭头" }
+  - { name: "垂直通过配线或布线", file: elec-118.dxf, class: Auxiliary, description: "Wiring passing through vertically；点+双向斜箭头" }
+  - { name: "由下引来配线或布线", file: elec-119.dxf, class: Auxiliary, description: "Wiring from the below；横线+端点+左下引来箭头" }
+  - { name: "由上引来配线或布线", file: elec-120.dxf, class: Auxiliary, description: "Wiring from the above；横线+端点+右上引来箭头" }
+  - { name: "连接盒、接线盒", file: elec-121.dxf, class: Auxiliary, description: "Connection box; Junction box；圆+实心点" }
+  - { name: "电动机启动器", file: elec-122.dxf, class: Auxiliary, description: "Motor starter, general symbol；方框+顶V口；形式2=MS框（平面图）" }
+  - { name: "星-三角启动器", file: elec-123.dxf, class: Auxiliary, description: "Star-delta-starter；122+内三角；形式2=SDS框" }
+  - { name: "带自耦变压器的启动器", file: elec-124.dxf, class: Auxiliary, description: "Starter with auto-transformer；122+内圆+波浪穿线；形式2=SAT框" }
+  - { name: "带可控硅整流器的调节-启动器", file: elec-125.dxf, class: Auxiliary, description: "Starter-regulator with thyristors；122+内二极管+斜箭头；形式2=ST框" }
+  - { name: "电源插座、插孔", file: elec-126.dxf, class: Auxiliary, description: "Socket outlet (power), general symbol; Receptacle outlet (power), general symbol；不带保护极；半圆+顶茎（见注6）" }
+  - { name: "多个电源插座", file: elec-127.dxf, class: Auxiliary, description: "Multiple socket outlet (power)；符号表示三个插座；形式1=弧+斜杠+3；形式2=三叠弧+竖线" }
+  - { name: "带保护极的电源插座", file: elec-128.dxf, class: Auxiliary, description: "Socket outlet (power) with protective contact；半圆+顶横bar+茎" }
+  - { name: "单相二、三极电源插座", file: elec-129.dxf, class: Auxiliary, description: "Single phase two or three poles socket outlet (power)；半圆+横bar+竖茎" }
+  - { name: "带保护极和单极开关的电源插座", file: elec-130.dxf, class: Auxiliary, description: "Socket outlet (power) with protection pole and single pole switch；128+开关折角" }
+  - { name: "带隔离变压器的电源插座", file: elec-131.dxf, class: Auxiliary, description: "Socket outlet (power) with isolating transformer；剃须插座：半圆+上圆+茎" }
+  - { name: "开关(单联单控)", file: elec-132.dxf, class: Auxiliary, description: "Switch, general symbol；平面图一般符号：圆+斜blade" }
+  - { name: "双联单控开关", file: elec-133.dxf, class: Auxiliary, description: "Double single control switch；blade双tick" }
+  - { name: "三联单控开关", file: elec-134.dxf, class: Auxiliary, description: "Triple single control switch；blade三tick" }
+  - { name: "n联单控开关", file: elec-135.dxf, class: Auxiliary, description: "n single control switch, n>3；圆+blade单tick+n注记" }
+  - { name: "带指示灯的开关", file: elec-136.dxf, class: Auxiliary, description: "Switch with pilot light；带指示灯的单联单控开关：圆内×" }
+  - { name: "带指示灯双联单控开关", file: elec-137.dxf, class: Auxiliary, description: "Double single control switch with pilot light；136+双tick" }
+  - { name: "带指示灯的三联单控开关", file: elec-138.dxf, class: Auxiliary, description: "Triple single control switch with pilot light；136+三tick" }
+  - { name: "带指示灯的n联单控开关", file: elec-139.dxf, class: Auxiliary, description: "n single control switch with pilot light, n>3；136+单tick+n" }
+  - { name: "单极限时开关", file: elec-140.dxf, class: Auxiliary, description: "Period limiting switch, single pole；圆+折blade+t注记" }
+  - { name: "单极声光控开关", file: elec-141.dxf, class: Auxiliary, description: "Sound and light control switch, single pole；圆+折blade+SL注记" }
+  - { name: "双控单极开关", file: elec-142.dxf, class: Auxiliary, description: "Two-way single pole switch；圆+上下双折blade" }
+  - { name: "单极拉线开关", file: elec-143.dxf, class: Auxiliary, description: "Pull-cord single pole switch；圆+blade+端上箭头（拉线）" }
+  - { name: "风机盘管三速开关", file: elec-144.dxf, class: Auxiliary, description: "Three-speed fan coil switch；圆+blade+端T bar" }
+  - { name: "按钮", file: elec-145.dxf, class: Auxiliary, description: "Push-button；双同心圆" }
+  - { name: "带指示灯的按钮", file: elec-146.dxf, class: Auxiliary, description: "Push-button with indicator lamp；双圆+内×" }
+  - { name: "防止无意操作的按钮", file: elec-147.dxf, class: Auxiliary, description: "Push-button protected against unintentional operation；双圆+右保护罩（打碎玻璃罩式）" }
+  - { name: "灯", file: elec-148.dxf, class: Lighting, description: "Lamp, general symbol；圆内×（见注7）" }
+  - { name: "应急疏散指示标志灯", file: elec-149.dxf, class: Lighting, description: "Emergency exit indicating luminaires；矩形+E" }
+  - { name: "应急疏散指示标志灯(向右)", file: elec-150.dxf, class: Lighting, description: "Emergency exit indicating luminaires (right)；矩形+右箭头" }
+  - { name: "应急疏散指示标志灯(向左)", file: elec-151.dxf, class: Lighting, description: "Emergency exit indicating luminaires (left)；矩形+左箭头" }
+  - { name: "应急疏散指示标志灯(向左、向右)", file: elec-152.dxf, class: Lighting, description: "Emergency exit indicating luminaires (left, right)；矩形+双向双箭头" }
+  - { name: "专用电路上的应急照明灯", file: elec-153.dxf, class: Lighting, description: "Emergency lighting luminaire on special circuit；实心点+×四射线" }
+  - { name: "自带电源的应急照明灯", file: elec-154.dxf, class: Lighting, description: "Self-contained emergency lighting luminaire；153+方框" }
+  - { name: "荧光灯(单管)", file: elec-155.dxf, class: Lighting, description: "Fluorescent lamp, general symbol；单管横线+端tick" }
+  - { name: "二管荧光灯", file: elec-156.dxf, class: Lighting, description: "Luminaire with two fluorescent tubes；双平行线+端tick" }
+  - { name: "三管荧光灯", file: elec-157.dxf, class: Lighting, description: "Luminaire with three fluorescent tubes；三平行线+端tick" }
+  - { name: "多管荧光灯", file: elec-158.dxf, class: Lighting, description: "Luminaire with many fluorescent tubes；n>3：单线+斜杠+n注记" }
+  - { name: "单管格栅灯", file: elec-159.dxf, class: Lighting, description: "Grille lamp with one fluorescent tubes；矩形+内单管tick线" }
+  - { name: "双管格栅灯", file: elec-160.dxf, class: Lighting, description: "Grille lamp with two fluorescent tubes；矩形+内双管线" }
+  - { name: "三管格栅灯", file: elec-161.dxf, class: Lighting, description: "Grille lamp with three fluorescent tubes；矩形+内三管线" }
+  - { name: "投光灯", file: elec-162.dxf, class: Lighting, description: "Projector, general symbol；圆内×+左包弧" }
+  - { name: "聚光灯", file: elec-163.dxf, class: Lighting, description: "Spot light；162+右向平行双箭头" }
+  - { name: "风扇、风机", file: elec-164.dxf, class: Auxiliary, description: "Fan；方框+圆+双叶弧" }
+# --- 表4.1.3-1 通信及综合布线系统（3g W1）---
+  - { name: "总配线架(柜)", file: elec-165.dxf, class: Auxiliary, description: "Main distribution frame；MDF 框" }
+  - { name: "光纤配线架(柜)", file: elec-166.dxf, class: Auxiliary, description: "Fiber distribution frame；ODF 框" }
+  - { name: "中间配线架(柜)", file: elec-167.dxf, class: Auxiliary, description: "Mid distribution frame；IDF 框" }
+  - { name: "建筑物配线架(柜)(有跳线连接)", file: elec-168.dxf, class: Auxiliary, description: "Building distributor (jumpered)；双竖框+X跳线+BD；形式2=单X+竖线" }
+  - { name: "楼层配线架(柜)(有跳线连接)", file: elec-169.dxf, class: Auxiliary, description: "Floor distributor (jumpered)；双竖框+X跳线+FD；形式2=单X+竖线" }
+  - { name: "建筑群配线架(柜)", file: elec-170.dxf, class: Auxiliary, description: "Campus distributor；CD 框" }
+  - { name: "建筑物配线架(柜)", file: elec-171.dxf, class: Auxiliary, description: "Building distributor；BD 框" }
+  - { name: "楼层配线架(柜)", file: elec-172.dxf, class: Auxiliary, description: "Floor distributor；FD 框" }
+  - { name: "集线器", file: elec-173.dxf, class: Auxiliary, description: "Hub；HUB 框" }
+  - { name: "交换机", file: elec-174.dxf, class: Auxiliary, description: "Switchboard；SW 框" }
+  - { name: "集合点", file: elec-175.dxf, class: Auxiliary, description: "Consolidation point；椭圆CP（圆近似）" }
+  - { name: "光纤连接盘", file: elec-176.dxf, class: Auxiliary, description: "Line interface unit；LIU 框" }
+  - { name: "电话插座", file: elec-177.dxf, class: Auxiliary, description: "Telephone socket；形式1=圆TP；形式2=开口框+茎TP" }
+  - { name: "数据插座", file: elec-178.dxf, class: Auxiliary, description: "Data socket；形式1=圆TD；形式2=开口框+茎TD" }
+  - { name: "信息插座", file: elec-179.dxf, class: Auxiliary, description: "Information socket；形式1=圆TO；形式2=开口框+茎TO" }
+  - { name: "n孔信息插座", file: elec-180.dxf, class: Auxiliary, description: "Information socket with many outlets；n为孔数：TO单孔/2TO二孔；圆nTO" }
+  - { name: "多用户信息插座", file: elec-181.dxf, class: Auxiliary, description: "Information socket for many users；圆+MUTO 文字" }
+# --- 表4.1.3-2 火灾自动报警系统（3g W2）---
+  - { name: "火灾报警控制器", file: elec-182.dxf, class: Auxiliary, description: "Fire alarm device；框+★（见注1：★可以C集中型/Z区域型/G通用/S可燃气体字母代替）" }
+  - { name: "控制和指示设备", file: elec-183.dxf, class: Auxiliary, description: "control and indicating equipment；框+★（见注2：★可以RS/RD/I/O/P/T/SI/M/SB/D/FI/CRT/FPA/MT/BO/TP字母代替）" }
+  - { name: "感温火灾探测器(点型)", file: elec-184.dxf, class: Auxiliary, description: "Heat detector (point type)；方框+点+上茎" }
+  - { name: "感温火灾探测器(点型、非地址码型)", file: elec-185.dxf, class: Auxiliary, description: "Heat detector (point, non-addressable)；184+N" }
+  - { name: "感温火灾探测器(点型、防爆型)", file: elec-186.dxf, class: Auxiliary, description: "Heat detector (point, explosion-proof)；184+EX" }
+  - { name: "感温火灾探测器(线型)", file: elec-187.dxf, class: Auxiliary, description: "Heat detector (line type)；方框+点+左右引线" }
+  - { name: "感烟火灾探测器(点型)", file: elec-188.dxf, class: Auxiliary, description: "Smoke detector (point type)；方框+S形" }
+  - { name: "感烟火灾探测器(点型、非地址码型)", file: elec-189.dxf, class: Auxiliary, description: "Smoke detector (point, non-addressable)；188+N" }
+  - { name: "感烟火灾探测器(点型、防爆型)", file: elec-190.dxf, class: Auxiliary, description: "Smoke detector (point, explosion-proof)；188+EX" }
+  - { name: "感光火灾探测器(点型)", file: elec-191.dxf, class: Auxiliary, description: "Optical flame detector (point type)；方框+∧" }
+  - { name: "红外感光火灾探测器(点型)", file: elec-192.dxf, class: Auxiliary, description: "Infra-red optical flame detector (point type)；方框+三角" }
+  - { name: "紫外感光火灾探测器(点型)", file: elec-193.dxf, class: Auxiliary, description: "UV optical flame detector (point type)；方框+∧+竖茎" }
+  - { name: "可燃气体探测器(点型)", file: elec-194.dxf, class: Auxiliary, description: "Combustible gas detector (point type)；方框+点+放射线" }
+  - { name: "复合式感光感烟火灾探测器(点型)", file: elec-195.dxf, class: Auxiliary, description: "Combination type optical flame and smoke detector (point type)；方框竖分：左∧右S" }
+  - { name: "复合式感光感温火灾探测器(点型)", file: elec-196.dxf, class: Auxiliary, description: "Combination type optical flame and heat detector (point type)；方框竖分：左∧右点茎" }
+  - { name: "线型差定温火灾探测器", file: elec-197.dxf, class: Auxiliary, description: "Line-type rate-of-rise and fixed temperature detector；方框+±+左右引线" }
+  - { name: "光束感烟火灾探测器(线型发射部分)", file: elec-198.dxf, class: Auxiliary, description: "Beam smoke detector (line type, the part of launch)；方框S+左引线+右外箭头" }
+  - { name: "光束感烟火灾探测器(线型接受部分)", file: elec-199.dxf, class: Auxiliary, description: "Beam smoke detector (line type, the part of reception)；方框S+左内箭头+右引线" }
+  - { name: "复合式感温感烟火灾探测器(点型)", file: elec-200.dxf, class: Auxiliary, description: "Combination type smoke and heat detector (point type)；方框竖分：左S右点" }
+  - { name: "光束感烟感温火灾探测器(线型发射部分)", file: elec-201.dxf, class: Auxiliary, description: "Infra-red beam line-type smoke and heat detector (emitter)；方框S|点+右外箭头" }
+  - { name: "光束感烟感温火灾探测器(线型接受部分)", file: elec-202.dxf, class: Auxiliary, description: "Infra-red beam line-type smoke and heat detector (receiver)；方框S|点+左内箭头" }
+  - { name: "手动火灾报警按钮", file: elec-203.dxf, class: Auxiliary, description: "Manual fire alarm call point；方框+Y漏斗" }
+  - { name: "消火栓启泵按钮", file: elec-204.dxf, class: Auxiliary, description: "Pump starting button in hydrant；203+下点" }
+  - { name: "火警电话", file: elec-205.dxf, class: Auxiliary, description: "Alarm telephone；方框+内听筒弧" }
+  - { name: "火警电话插孔", file: elec-206.dxf, class: Auxiliary, description: "Jack for two-way telephone；对讲电话插孔：双圆+点" }
+  - { name: "带火警电话插孔的手动报警按钮", file: elec-207.dxf, class: Auxiliary, description: "Manual station with jack for two-way telephone；方框+左Y+右◎" }
+  - { name: "火警电铃", file: elec-208.dxf, class: Auxiliary, description: "Fire bell；梯形+内铃弧" }
+  - { name: "火灾发声警报器", file: elec-209.dxf, class: Auxiliary, description: "Audible fire alarm；梯形+内喇叭+波弧" }
+  - { name: "火灾光警报器", file: elec-210.dxf, class: Auxiliary, description: "Visual fire alarm；梯形+内灯泡" }
+  - { name: "火灾声光警报器", file: elec-211.dxf, class: Auxiliary, description: "Audible and visual fire alarm；梯形竖分：左喇叭右灯" }
+  - { name: "火灾应急广播扬声器", file: elec-212.dxf, class: Auxiliary, description: "Fire emergency broadcast loud-speaker；梯形+内音箱锥" }
+  - { name: "水流指示器(组)", file: elec-213.dxf, class: Auxiliary, description: "Flow switch；形式1=方框+斜箭头；形式2=圆L" }
+  - { name: "压力开关", file: elec-214.dxf, class: Auxiliary, description: "Pressure switch；方框+P" }
+  - { name: "70℃动作的常开防火阀", file: elec-215.dxf, class: Auxiliary, description: "Normally open fire damper, 70℃ close；竖框+Θ+70℃" }
+  - { name: "280℃动作的常开排烟阀", file: elec-216.dxf, class: Auxiliary, description: "Normally open exhaust valve, 280℃ close；竖框+Θ+280℃" }
+  - { name: "280℃动作的常闭排烟阀", file: elec-217.dxf, class: Auxiliary, description: "Normally closed exhaust valve, 280℃ open；竖框+Φ+280℃" }
+  - { name: "加压送风口", file: elec-218.dxf, class: Auxiliary, description: "Pressurized air outlet；竖框+Φ" }
+  - { name: "排烟口", file: elec-219.dxf, class: Auxiliary, description: "Exhaust port；竖框+Φ+SE" }
+# --- 表4.1.3-3 有线电视及卫星电视接收系统（3g W3）---
+  - { name: "天线", file: elec-220.dxf, class: Auxiliary, description: "Antenna, general symbol；V+茎" }
+  - { name: "带馈线的抛物面天线", file: elec-221.dxf, class: Auxiliary, description: "Antenna, parabolic, with feeder；抛物弧+馈线盒+横线" }
+  - { name: "有本地天线引入的前端", file: elec-222.dxf, class: Auxiliary, description: "Head end with local antenna；圆+内▽+下茎（一条馈线支路）" }
+  - { name: "无本地天线引入的前端", file: elec-223.dxf, class: Auxiliary, description: "Head end without local antenna；圆+内▽+上下茎（一入一出）" }
+  - { name: "放大器、中继器", file: elec-224.dxf, class: Auxiliary, description: "Amplifier, general symbol；方框+三角指向传输方向" }
+  - { name: "双向分配放大器", file: elec-225.dxf, class: Auxiliary, description: "Dual way distribution amplifier；双三角对向" }
+  - { name: "均衡器", file: elec-226.dxf, class: Auxiliary, description: "Equalizer；横线+菱形" }
+  - { name: "可变均衡器", file: elec-227.dxf, class: Auxiliary, description: "Variable equalizer；226+斜箭头" }
+  - { name: "固定衰减器", file: elec-228.dxf, class: Auxiliary, description: "Attenuator, fixed loss；方框A+引线" }
+  - { name: "可变衰减器", file: elec-229.dxf, class: Auxiliary, description: "Attenuator, variable loss；228+斜箭头" }
+  - { name: "解调器", file: elec-230.dxf, class: Auxiliary, description: "Demodulator；框+三角+左箭头；形式2=DEM框" }
+  - { name: "调制器", file: elec-231.dxf, class: Auxiliary, description: "Modulator；框+三角+右箭头；形式2=MO框" }
+  - { name: "调制解调器", file: elec-232.dxf, class: Auxiliary, description: "Modem；框+三角+双向箭头；形式2=MOD框" }
+  - { name: "分配器(两路)", file: elec-233.dxf, class: Auxiliary, description: "Splitter, general symbol (2-way)；半圆+两出路" }
+  - { name: "分配器(三路)", file: elec-234.dxf, class: Auxiliary, description: "Splitter, general symbol (3-way)；半圆+三出路" }
+  - { name: "分配器(四路)", file: elec-235.dxf, class: Auxiliary, description: "Splitter, general symbol (4-way)；半圆+四出路" }
+  - { name: "分支器(一个信号分支)", file: elec-236.dxf, class: Auxiliary, description: "Tap-off, general symbol (1 branch)；横线+圆+下茎" }
+  - { name: "分支器(两个信号分支)", file: elec-237.dxf, class: Auxiliary, description: "Tap-off, general symbol (2 branches)；横线+圆+上下茎" }
+  - { name: "分支器(四个信号分支)", file: elec-238.dxf, class: Auxiliary, description: "Tap-off, general symbol (4 branches)；横线+圆+双上双下茎" }
+  - { name: "混合器(两路)", file: elec-239.dxf, class: Auxiliary, description: "Combiner, general symbol (2-way)；信息流左到右：左入两路+半圆+右出" }
+  - { name: "电视插座", file: elec-240.dxf, class: Auxiliary, description: "Television socket；形式1=圆TV；形式2=开口框+茎TV" }
+# --- 表4.1.3-4 广播系统（3g W4）---
+  - { name: "传声器", file: elec-241.dxf, class: Auxiliary, description: "Microphone, general symbol；开右圆+竖bar" }
+  - { name: "扬声器", file: elec-242.dxf, class: Auxiliary, description: "Loudspeaker, general symbol；音箱锥（见注1：C吸顶/R嵌入/W壁挂安装字母旁注）" }
+  - { name: "嵌入式安装扬声器箱", file: elec-243.dxf, class: Auxiliary, description: "Flush-type loudspeaker box；圆+内音箱锥" }
+  - { name: "扬声器箱、音箱、声柱", file: elec-244.dxf, class: Auxiliary, description: "Loudspeaker box；框+内音箱锥（见注1）" }
+  - { name: "号筒式扬声器", file: elec-245.dxf, class: Auxiliary, description: "Horn；小圆+左开三角" }
+  - { name: "调谐器、无线电接收机", file: elec-246.dxf, class: Auxiliary, description: "Tuner; radio receiver；方框+顶天线V" }
+  - { name: "放大器(广播)", file: elec-247.dxf, class: Auxiliary, description: "Amplifier, general symbol；方框+三角（见注2：A扩大机/PRA前置/AP功率字母旁注）" }
+  - { name: "传声器插座", file: elec-248.dxf, class: Auxiliary, description: "Microphone socket；开口框+茎+M" }
+# --- 表4.1.3-5 安全技术防范系统（3g W4）---
+  - { name: "摄像机", file: elec-249.dxf, class: Auxiliary, description: "Camera；梯形机身+左镜头stub" }
+  - { name: "彩色摄像机", file: elec-250.dxf, class: Auxiliary, description: "Color camera；249+三dot" }
+  - { name: "彩色转黑白摄像机", file: elec-251.dxf, class: Auxiliary, description: "Color to black and white camera；249+dot+斜箭头" }
+  - { name: "带云台的摄像机", file: elec-252.dxf, class: Auxiliary, description: "Camera with pan/tilt unit；249+下云台三角" }
+  - { name: "有室外防护罩的摄像机", file: elec-253.dxf, class: Auxiliary, description: "Camera with outdoor protective cover；249+OH" }
+  - { name: "网络(数字)摄像机", file: elec-254.dxf, class: Auxiliary, description: "Network camera；249+IP" }
+  - { name: "红外摄像机", file: elec-255.dxf, class: Auxiliary, description: "Infrared camera；249+JR" }
+  - { name: "红外带照明灯摄像机", file: elec-256.dxf, class: Auxiliary, description: "Infrared camera with light；249+JR+右上×灯框" }
+  - { name: "半球形摄像机", file: elec-257.dxf, class: Auxiliary, description: "Hemispherical camera；形式1=249+H；形式2=半球罩+内框" }
+  - { name: "全球摄像机", file: elec-258.dxf, class: Auxiliary, description: "Spherical camera；形式1=249+R；形式2=圆+内框" }
+  - { name: "监视器", file: elec-259.dxf, class: Auxiliary, description: "Monitor；双框（内屏圆角近似直角）" }
+  - { name: "彩色监视器", file: elec-260.dxf, class: Auxiliary, description: "Color monitor；259+三dot" }
+  - { name: "读卡器", file: elec-261.dxf, class: Auxiliary, description: "Card reader；框+右上斜槽线" }
+  - { name: "键盘读卡器", file: elec-262.dxf, class: Auxiliary, description: "Card reader with keypad；框+KP" }
+  - { name: "保安巡查打卡器", file: elec-263.dxf, class: Auxiliary, description: "Guard tour station；框+内∩拱" }
+  - { name: "紧急脚挑开关", file: elec-264.dxf, class: Auxiliary, description: "Deliberately-operated device (foot)；圆+内check" }
+  - { name: "紧急按钮开关", file: elec-265.dxf, class: Auxiliary, description: "Deliberately-operated device (manual)；双圆" }
+  - { name: "门磁开关", file: elec-266.dxf, class: Auxiliary, description: "Magnetically operated protective switch；圆+内U" }
+  - { name: "玻璃破碎探测器", file: elec-267.dxf, class: Auxiliary, description: "Glass-break detector (surface contact)；菱形+B" }
+  - { name: "振动探测器", file: elec-268.dxf, class: Auxiliary, description: "Vibration detector (structural or inertia)；菱形+A" }
+  - { name: "被动红外入侵探测器", file: elec-269.dxf, class: Auxiliary, description: "Passive infrared intrusion detector；左向三角+JR" }
+  - { name: "微波入侵探测器", file: elec-270.dxf, class: Auxiliary, description: "Microwave intrusion detector；左向三角+M" }
+  - { name: "被动红外/微波双技术探测器", file: elec-271.dxf, class: Auxiliary, description: "IR/M dual-technology detector；左向三角+IR/M" }
+  - { name: "主动红外探测器", file: elec-272.dxf, class: Auxiliary, description: "Active infrared intrusion detector；Tx---IR---Rx（发射接收分别为Tx、Rx）" }
+  - { name: "遮挡式微波探测器", file: elec-273.dxf, class: Auxiliary, description: "Microwave fence detector；Tx---M---Rx" }
+  - { name: "埋入线电场扰动探测器", file: elec-274.dxf, class: Auxiliary, description: "Buried line field disturbance detector；双框---L---" }
+  - { name: "弯曲或振动电缆探测器", file: elec-275.dxf, class: Auxiliary, description: "Flex or shock sensitive cable detector；双框---C---" }
+  - { name: "激光探测器", file: elec-276.dxf, class: Auxiliary, description: "Laser detector；双框---LD---" }
+  - { name: "对讲系统主机", file: elec-277.dxf, class: Auxiliary, description: "Main control module for flat intercom electrical control system；框+左圆+右四tick" }
+  - { name: "对讲电话分机", file: elec-278.dxf, class: Auxiliary, description: "Interphone handset；框+左铃弧+右四tick" }
+  - { name: "可视对讲机", file: elec-279.dxf, class: Auxiliary, description: "Video entry security intercom；框+左双框屏+右四tick" }
+  - { name: "可视对讲户外机", file: elec-280.dxf, class: Auxiliary, description: "Video intercom outdoor unit；框+屏+锥+右箭头" }
+  - { name: "指纹识别器", file: elec-281.dxf, class: Auxiliary, description: "Finger print verifier；圆+内指纹弧" }
+  - { name: "磁力锁", file: elec-282.dxf, class: Auxiliary, description: "Magnetic lock；菱形+M" }
+  - { name: "电锁按键", file: elec-283.dxf, class: Auxiliary, description: "Button for electro-mechanic lock；双圆+E" }
+  - { name: "电控锁", file: elec-284.dxf, class: Auxiliary, description: "Electro-mechanical lock；菱形+EL" }
+  - { name: "投影机", file: elec-285.dxf, class: Auxiliary, description: "Projector；圆+内圆角框（直角近似）" }
+# --- 表4.1.3-6 建筑设备监控系统（3g W5）---
+  - { name: "温度传感器", file: elec-286.dxf, class: Auxiliary, description: "Temperature transmitter；T 框" }
+  - { name: "压力传感器", file: elec-287.dxf, class: Auxiliary, description: "Pressure transmitter；P 框" }
+  - { name: "湿度传感器", file: elec-288.dxf, class: Auxiliary, description: "Humidity transmitter；形式1=M框；形式2=H框" }
+  - { name: "压差传感器", file: elec-289.dxf, class: Auxiliary, description: "Differential pressure transmitter；形式1=PD框；形式2=ΔP框" }
+  - { name: "流量测量元件", file: elec-290.dxf, class: Auxiliary, description: "Measuring component, flowrate；圆GE+*位号" }
+  - { name: "流量变送器", file: elec-291.dxf, class: Auxiliary, description: "Transducer, flowrate；圆GT+*位号" }
+  - { name: "液位变送器", file: elec-292.dxf, class: Auxiliary, description: "Transducer, level；圆LT+*位号" }
+  - { name: "压力变送器", file: elec-293.dxf, class: Auxiliary, description: "Transducer, pressure；圆PT+*位号" }
+  - { name: "温度变送器", file: elec-294.dxf, class: Auxiliary, description: "Transducer, temperature；圆TT+*位号" }
+  - { name: "湿度变送器", file: elec-295.dxf, class: Auxiliary, description: "Transducer, humidity；形式1=圆MT+*；形式2=圆HT+*" }
+  - { name: "位置变送器", file: elec-296.dxf, class: Auxiliary, description: "Transducer, position；圆GT+*位号" }
+  - { name: "速率变送器", file: elec-297.dxf, class: Auxiliary, description: "Transducer, speed；圆ST+*位号" }
+  - { name: "压差变送器", file: elec-298.dxf, class: Auxiliary, description: "Transducer, differential pressure；形式1=圆PDT+*；形式2=圆ΔPT+*" }
+  - { name: "电流变送器", file: elec-299.dxf, class: Auxiliary, description: "Transducer, current；圆IT+*位号" }
+  - { name: "电压变送器", file: elec-300.dxf, class: Auxiliary, description: "Transducer, voltage；圆UT+*位号" }
+  - { name: "电能变送器", file: elec-301.dxf, class: Auxiliary, description: "Transducer, electric energy；圆ET+*位号" }
+  - { name: "模拟/数字变换器", file: elec-302.dxf, class: Auxiliary, description: "Converter, A/D；A/D 框" }
+  - { name: "数字/模拟变换器", file: elec-303.dxf, class: Auxiliary, description: "Converter, D/A；D/A 框" }
+  - { name: "热能表", file: elec-304.dxf, class: Auxiliary, description: "Heat meter；框+上隔线+HM" }
+  - { name: "燃气表", file: elec-305.dxf, class: Auxiliary, description: "Gas meter；框+上隔线+GM" }
+  - { name: "水表", file: elec-306.dxf, class: Auxiliary, description: "Water meter；框+上隔线+WM" }
+  - { name: "电动阀", file: elec-307.dxf, class: Auxiliary, description: "Electrical valve；圆M+领结阀体" }
+  - { name: "电磁阀", file: elec-308.dxf, class: Auxiliary, description: "Solenoid valve；方框M+领结阀体" }
+# --- 表4.1.4 电气线路线型符号（3g W6）---
+  - { name: "信号线路", file: elec-309.dxf, class: Auxiliary, description: "Signal line；表4.1.4#1；形式1=实线+上标S；形式2=—S—嵌标" }
+  - { name: "控制线路", file: elec-310.dxf, class: Auxiliary, description: "Control line；表4.1.4#2；形式2=—C—" }
+  - { name: "应急照明线路", file: elec-311.dxf, class: Auxiliary, description: "Emergency lighting line；表4.1.4#3；形式2=—EL—" }
+  - { name: "保护接地线", file: elec-312.dxf, class: Auxiliary, description: "Protective earthing conductor；表4.1.4#4；形式2=—PE—" }
+  - { name: "接地线", file: elec-313.dxf, class: Auxiliary, description: "Earthing conductor；表4.1.4#5；形式2=—E—" }
+  - { name: "接闪线、接闪带、接闪网", file: elec-314.dxf, class: Auxiliary, description: "Air-termination line/strip/mesh；表4.1.4#6；形式2=—LP—" }
+  - { name: "电话线路", file: elec-315.dxf, class: Auxiliary, description: "Telephone line；表4.1.4#7；形式2=—TP—" }
+  - { name: "数据线路", file: elec-316.dxf, class: Auxiliary, description: "Data line；表4.1.4#8；形式2=—TD—" }
+  - { name: "有线电视线路", file: elec-317.dxf, class: Auxiliary, description: "Cable TV line；表4.1.4#9；形式2=—TV—" }
+  - { name: "广播线路", file: elec-318.dxf, class: Auxiliary, description: "Broadcast line；表4.1.4#10；形式2=—BC—" }
+  - { name: "视频线路", file: elec-319.dxf, class: Auxiliary, description: "Video line；表4.1.4#11；形式2=—V—" }
+  - { name: "综合布线系统线路", file: elec-320.dxf, class: Auxiliary, description: "Generic cabling system line；表4.1.4#12；形式2=—GCS—" }
+  - { name: "消防电话线路", file: elec-321.dxf, class: Auxiliary, description: "Fire telephone line；表4.1.4#13；形式2=—F—" }
+  - { name: "50V以下的电源线路", file: elec-322.dxf, class: Auxiliary, description: "Power line below 50V；表4.1.4#14；形式2=—D—" }
+  - { name: "直流电源线路", file: elec-323.dxf, class: Auxiliary, description: "DC power line；表4.1.4#15；形式2=—DC—" }
+  - { name: "光缆", file: elec-324.dxf, class: Auxiliary, description: "Optical cable, general symbol；表4.1.4#16；横线+中圆斜杠（∅近似）" }

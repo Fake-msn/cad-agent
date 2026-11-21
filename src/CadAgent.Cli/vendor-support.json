@@ -1,0 +1,28 @@
+{
+  "entries": [
+    {
+      "vendor": "ZWCAD",
+      "versionRange": "2025",
+      "adapterVersion": "1.0",
+      "status": "Verified",
+      "verifiedAt": "2026-11-21",
+      "testCoverage": "COM GetInfo/Open/SaveAs/Close 真机 + DXF→DWG ACadSharp 读回实体数往返（ZwcadRuntimeTests）"
+    },
+    {
+      "vendor": "AutoCAD",
+      "versionRange": "2024-2026",
+      "adapterVersion": "0.0",
+      "status": "CompatibleUnverified",
+      "verifiedAt": null,
+      "testCoverage": "适配器未实现；COM 接口族与中望同源（调查证据），待真机验证"
+    },
+    {
+      "vendor": "TArch",
+      "versionRange": "T20-T30",
+      "adapterVersion": "0.0",
+      "status": "Unsupported",
+      "verifiedAt": null,
+      "testCoverage": "天正运行时适配器预留；原生对象解析走 ACadSharp 社区逆向（issue 1131）"
+    }
+  ]
+}

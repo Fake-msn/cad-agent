@@ -43,13 +43,21 @@ public static partial class CommandRouter
                 case "intake": return Intake(positional[1], agentDir, session, stdout, stderr);
                 case "run": return RunPlan(args, positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rollback": return Rollback(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
-                case "audit": return AuditVerify(agentDir, stdout, stderr);
+                case "audit": return positional.Length > 1 && positional[1] == "package"
+                    ? AuditPackage(args, agentDir, stdout, stderr)
+                    : AuditVerify(args, agentDir, stdout, stderr);
                 case "roles": return RolesShow(agentDir, stdout);
                 case "semantic": return Semantic(args, positional, agentDir, session, stdout, stderr);
                 case "check": return Check(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
                 case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
                 case "view": return ViewLaunch(args, project, stderr);
+                case "llm": return Llm(args, positional, agentDir, session, stdout, stderr);
+                case "agent": return Agent(args, agentDir, session, stdout, stderr);
+                case "review": return Review(args, positional, agentDir, session, stdout, stderr);
+                case "repl": return ReplLoop(args, Console.In, stdout, stderr);
+                case "export": return Export(args, agentDir, session, stdout, stderr);
+                case "vendor": return Vendor(positional, stdout, stderr);
                 default: return Usage(stderr);
             }
         }
@@ -88,7 +96,7 @@ public static partial class CommandRouter
         GetOption(args, name) ?? throw new ArgumentException($"缺少必需选项 {name}");
 
     private static SqliteAuditStore OpenAudit(string agentDir) =>
-        new(Path.Combine(agentDir, "audit.db"));
+        new(Path.Combine(agentDir, "audit.db"), new CadAgent.Core.Audit.AnchorService(agentDir));
 
     private static IIdentityProvider Identity(string agentDir) =>
         new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml")));
@@ -129,9 +137,24 @@ public static partial class CommandRouter
         return report.Level switch { GateLevel.Green => 0, GateLevel.Yellow => 2, _ => 3 };
     }
 
-    private static StepEngine Engine(string agentDir, IAuditStore audit, ISemanticGate? semanticGate = null) =>
+    private static StepEngine Engine(string agentDir, IAuditStore audit, ISemanticGate? semanticGate = null,
+        ModelUndoStack? undoStack = null, IStepHandler? extraHandler = null) =>
         new(audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
-            Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate);
+            IdentityOverride ?? Identity(agentDir), new RoleChecker(),
+            extraHandler == null ? HandlerRegistry.All() : HandlerRegistry.All().Concat(new[] { extraHandler }).ToList(),
+            semanticGate, undoStack);
+
+    /// <summary>
+    /// 3h：--skill 包符号导入处理器（insert-symbol）。无 --skill→null（kind 不注册，
+    /// 计划含 insert-symbol 时响亮失败"未注册的步骤类型"）；包非法→加载异常经 Run 兜底。
+    /// </summary>
+    private static IStepHandler? SymbolImportHandler(string[] args)
+    {
+        var dirs = GetOptionValues(args, "--skill");
+        if (dirs.Count == 0) return null;
+        var packages = dirs.Select(SkillLoader.LoadDirectory).ToList();
+        return new ImportSymbolHandler(packages);
+    }
 
     /// <summary>
     /// run --skill 接线（2b-ii-b T8，加性）：入口先经 LoadRuleSet 校验包加载
@@ -201,12 +224,26 @@ public static partial class CommandRouter
         IAuditStore engineAudit = skillLoaded
             ? new RulePackAuditDecorator(audit, ruleSet.RulePackVersion)
             : audit;
-        var result = Engine(agentDir, engineAudit, semanticGate).Run(plan, drawing, session);
+        var result = Engine(agentDir, engineAudit, semanticGate, null, SymbolImportHandler(args)).Run(plan, drawing, session);
+        string? liveOut = null;
         if (!result.Ok) drawing.Reload();
-        else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
+        else
+        {
+            RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
+            var live = LiveReplay(args, agentDir, session, audit, op, drawing, plan, LivePackages(args), stderr);
+            if (!live.Ok)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new
+                {
+                    txId = result.TxId, ok = false, stepsDone = result.StepsDone, error = live.Error
+                }, JsonOpts));
+                return 1;
+            }
+            liveOut = live.OutPath;
+        }
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
-            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error
+            txId = result.TxId, ok = result.Ok, stepsDone = result.StepsDone, error = result.Error, liveOut
         }, JsonOpts));
         return result.Ok ? 0 : 1;
     }
@@ -314,16 +351,39 @@ public static partial class CommandRouter
         return 0;
     }
 
-    private static int AuditVerify(string agentDir, TextWriter stdout, TextWriter stderr)
+    private static int AuditVerify(string[] args, string agentDir, TextWriter stdout, TextWriter stderr)
     {
         using var audit = OpenAudit(agentDir);
-        if (audit.VerifyChain(out string error))
+        if (!audit.VerifyChain(out string error))
         {
-            stdout.WriteLine($"审计链完整，共 {audit.ReadAll().Count} 条记录");
-            return 0;
+            stderr.WriteLine(error);
+            return 1;
         }
-        stderr.WriteLine(error);
-        return 1;
+        var all = audit.ReadAll();
+        stdout.WriteLine($"审计链完整，共 {all.Count} 条记录");
+        if (args.Contains("--anchor"))
+        {
+            var anchor = new CadAgent.Core.Audit.AnchorService(agentDir);
+            long headSeq = all.Count > 0 ? all[^1].Seq : 0;
+            string headHash = all.Count > 0 ? all[^1].Hash : "";
+            var status = anchor.Verify(headSeq, headHash);
+            switch (status)
+            {
+                case CadAgent.Core.Audit.AnchorStatus.Ok:
+                    stdout.WriteLine("外部锚校验通过（无截断/伪造）");
+                    return 0;
+                case CadAgent.Core.Audit.AnchorStatus.Missing:
+                    stderr.WriteLine("警示: 外部锚未启用（anchor.json 缺失）");
+                    return 0;
+                case CadAgent.Core.Audit.AnchorStatus.Stale:
+                    stderr.WriteLine("警示: 外部锚滞后（db 超前锚，崩溃窗口尾记录无锚保护）；审计包 manifest 如实记 Stale");
+                    return 0;
+                default:
+                    stderr.WriteLine($"外部锚校验失败: {status}（尾截断或伪造）");
+                    return 1;
+            }
+        }
+        return 0;
     }
 
     private static int RolesShow(string agentDir, TextWriter stdout)
@@ -569,7 +629,8 @@ public static partial class CommandRouter
             new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
             new ElevationChecker(), new LayerNameChecker(),
             new TextHeightMinChecker(), new CableFormatChecker(), new SlotCodeChecker(),
-            new LuminaireFormatChecker(), new FileNamingChecker()
+            new LuminaireFormatChecker(), new FileNamingChecker(),
+            new RoomNameChecker()
         };
         var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
             .FirstOrDefault(g => g.Count() > 1);

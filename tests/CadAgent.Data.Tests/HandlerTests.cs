@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ACadSharp.Entities;
 using CadAgent.Core;
 using CadAgent.Data.Handlers;
 
@@ -112,9 +113,20 @@ public class HandlerTests : IDisposable
     }
 
     [Fact]
-    public void Registry_ContainsAllSixKinds()
+    public void Registry_ContainsAllNineKinds()
     {
         var kinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet();
-        Assert.Equal(new[] { "add-line", "add-text", "delete-entity", "move-entity", "change-layer", "insert-block" }.ToHashSet(), kinds);
+        Assert.Equal(new[] { "add-line", "add-text", "add-circle", "delete-entity", "move-entity", "change-layer", "insert-block", "layout-lighting", "label-luminaires" }.ToHashSet(), kinds);
+    }
+
+    [Fact]
+    public void AddCircle_CreatesCircle_RejectsNonPositiveRadius()
+    {
+        var add = new AddCircleHandler().Apply(_session, P("""{"x":5,"y":6,"radius":2.5}"""));
+        Assert.True(add.Ok);
+        var c = Assert.Single(_session.Doc.Entities.OfType<Circle>());
+        Assert.Equal(2.5, c.Radius);
+        Assert.Equal(5, c.Center.X);
+        Assert.False(new AddCircleHandler().Apply(_session, P("""{"x":0,"y":0,"radius":0}""")).Ok);
     }
 }

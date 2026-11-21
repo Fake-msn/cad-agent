@@ -32,6 +32,8 @@ public class SemanticGateTests : IDisposable
             System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(SourcePath)));
         public void SaveWorking() { SaveCount++; File.WriteAllText(SourcePath, "v" + SaveCount); }
         public void Reload() { }
+        public byte[] CaptureState() => System.Array.Empty<byte>();
+        public void RestoreState(byte[] state) { }
     }
 
     private sealed class FixedIdentity : IIdentityProvider

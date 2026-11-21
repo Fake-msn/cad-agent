@@ -379,6 +379,118 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **③损坏状态文件优雅降级（T10 承诺兑现，§9 不崩 UI）**：MainWindow 构造三处 try/catch——audit.db 损坏→空时间线+"审计库损坏，时间线不可用"；roles.yaml 损坏→默认 Draw 角色+提示；signoffs.json 损坏→空签认存储+提示（后续 Save 原子写覆盖修复）。提示汇总入 MainWindow.ErrorMessage + 可见 StateNote 文本块；窗口照常打开、图纸照常渲染。注：audit.db 损坏时写审计占位首次 Append 仍会失败（审计先行不变量——编辑被拒并报错，不静默绕过审计）。
 - **打包小项**：SetActiveTool 补 _editBusy 硬闸（在途编辑期间工具切换忽略，RaiseEvent 绕过 IsEnabled 亦被挡）；plan4-ui-protocol.md 悬空"附录 A"引用改为内联等价描述。
 - **仍延迟的 minors（记录在案，不阻塞）**：issues-refresh 审计 parity（视图 Refresh 不留 check 审计，CLI check 留痕）；view run-regression（视图编辑成功后不做内置规则回归警告，CLI run 有）；_diffBusy 结构性守卫（Diff 加载期间仅 IsEnabled 禁用，未加标志位硬闸）；Issues.RefreshAsync in-flight 并发守卫（按钮禁用为 UI 态）；空图层不显示于图层面板（LayersViewModel 以 renderItems 构造，无实体层不出现）；计划预览（④纠偏计划视图预览依赖计划3 LLM caller）。其余各 Task parked minors 见控制者 ledger。
+**计划3a 完成（硬前置 + LLM 基础设施，2026-11-21 记录；全套件 411 测试）**：
+- 硬前置六项关闭（本侧_chat T1-T5）：ComputeHash Insert 投影（point/scale/rotation/block）；SemanticClass.Lighting + ISemanticContextGate 实体级闸口（加性，targetHandle 精确到实体，null 退化操作级）；嵌套 params 递归占位替换契约；handle 契约字符串/数字统一；跨进程审计 BEGIN IMMEDIATE + busy 重试。
+- LLM 基础设施（采纳主会话计划 2026-11-21-cad-agent-llm-infrastructure.md 为执行权威，本侧接管内联执行 Task 2-8）：ProviderProfile/LlmConfigStore（主会话 Task 1 已交付）；DpapiKeyProtector（CurrentUser 加密 + env CADAGENT_LLM_API_KEY 优先 + 穿越守卫）；ILlmClient 契约 + OpenAiClient（mock 测试，401/403→LlmAuthException，错误消息脱敏）；Discovery/Presets（OpenAI/DashScope/Ollama）/HttpEndpointProbe/GuessVisionCapable 启发式；LlmProbe（补全 + 1×1 PNG 视觉探针，ChatRequest.ImageUrl 加性）；UsageMeter（会话预算帽 + 套餐窗口重置）；CLI llm add/list/use/remove/test（LlmClientFactory 可注入，审计 llm-profile-added/used/removed/probe 全无密钥）；E2E 全生命周期密钥安全（配置全文扫描 + 审计链 + env override）。
+- **3b 承接**：编排（读图→计划生成→确认循环→执行→读回迭代）；llm-call 审计 + UsageMeter 接线；数据出境首次确认执行（EgressPolicy 模型未建——3b 补）；vision 渲染（3b 文本摘要读图先行，视觉渲染留 3c COM 导出/计划4）；签认/步级 undo。
+- **3c 承接**：中望 COM 适配器（ICadRuntime）+ 保真导出 + 审计包（含哈希链外部锚）+ 厂商支持矩阵。
+- 诚实边界：DPAPI Windows-only（跨平台留后续）；vision heuristic 保守（最终靠探针）；套餐窗口第一 slice 从首次 Record 起算；Ollama 探测 heuristic；llm test 实弹冒烟待用户配置真实 key。
+
+**计划3b-i 完成（编排循环核心，2026-11-21 记录；全套件 438 测试）**：
+- EgressPolicy（§8.5）：项目 local-only.txt 硬约束 > profile 策略 > 首次云端确认（cloud-consent.json 持久化）；localhost 一等公民。
+- DrawingSummarizer：有界确定性文本摘要（图层/实体计数/文本清单前50/块名/语义标注×来源计数+人工映射含 HumanConfirmed 标记）；视觉渲染留 3c/计划4。
+- AgentPlanParser：```json 围栏/裸 JSON 提取 + planId 缺省注入 + StepPlanParser schema + kind 白名单（LLM 幻觉挡在引擎外）。
+- AgentOrchestrator：出境闸→预算前置→LLM 计划→校验→人工确认→StepEngine 执行→失败一次重规划（错误反馈）→仍失败 Escalated；llm-call 审计（model/usage/attempt/planId，无图纸内容无密钥）；agent-run/egress-blocked/egress-consent/plan-rejected 全事件。
+- CLI agent 命令：--yes 自动确认（测试路径）/ stdin 交互确认（手动冒烟待真实终端）；LlmClientFactory 注入；六处理器 kindDocs。
+- E2E：多步计划执行+审计全链+consent 持久化（二次调用不再询问）+配置/审计全文密钥扫描。
+- **3b-ii 承接**：审查签认（review 角色+职责分离+驳回回滚）；步级 undo（会话内模型 undo 栈）；REPL 交互会话。
+- 诚实边界：交互确认 stdin 路径测试不覆盖（--yes 全测）；重规划上限 1 次（裁定）；意图文本不入审计（隐私）；读图仅文本摘要（视觉 deferred）。
+
+**计划3b-ii 完成（签认+步级撤回+REPL，2026-11-21 记录；全套件 453 测试）**：
+- IDrawingSession 加性 CaptureState/RestoreState（内存 DXF 往返，不触磁盘）；ModelUndoStack 会话内快照栈；StepEngine 加性 undoStack 参数+UndoLastStep（审计 step-undone，空栈 false）。
+- review signoff：Review 角色强制；职责分离（签认人≠执行人，SnapshotRef 含 txId 溯源）；防重复签认；驳回→既有快照回滚（review-rejected+rollback 双留痕）；批准不改图纸。
+- REPL 交互会话：持久 DrawingSession+undo 栈；意图→编排（egress 确认与计划确认两道独立 stdin 闸门）；:undo/:rollback/:status/:quit；repl-session 起止审计；StringReader 注入全离线测试。
+- 测试稳定性根因修复：ClearAllPools 进程级与 xUnit 集合并行互斥→Cli/Core 测试程序集禁用套件内并行（三连跑全绿验证）。
+- **3b 全部完成→3c 就绪**：中望 COM 适配器（ICadRuntime）+保真导出+审计包（含哈希链外部锚）+厂商支持矩阵；3d 布灯基准。
+- 诚实边界：步级 undo 会话内（跨会话事务快照兜底既有）；REPL 视觉反馈留计划4；IdentityOverride 仅测试注入。
+
+**计划3c 完成（COM 适配+保真导出+审计包+厂商矩阵，2026-11-21 记录；全套件 475 测试含 3 真机）**：
+- ICadRuntime 厂商无关契约（Core）；ZwcadRuntime 独立适配器项目：dynamic COM（ProgID ZWCAD.Application，不编译期引用 interop DLL）+ 专用 STA 线程任务队列串行化 + CadRuntimeException + Restart 崩溃重启。
+- 保真导出 ExportService：厂商 Open→SaveAs DWG→ACadSharp 读回计数闸口（不过闸拒绝+审计）；COM 崩溃 Restart 一次重试；无厂商→DXF 降级交付+显式风险审计（不假装等价）；CLI export + RuntimeFactory 注入。
+- 审计外部锚 AnchorService：HMACSHA256 + DPAPI CurrentUser 密钥；每次 Append 更新 anchor.json；验锚检测尾截断（DB head seq < anchor seq）与伪造（HMAC 不符）；CLI audit verify --anchor + audit package（manifest+内容，**不含 llm 配置/密钥/锚密钥**）。
+- 厂商支持矩阵 vendor-support.json：ZWCAD 2025 **Verified（2026-11-21 真机证据：GetInfo/Open/SaveAs/Close + DXF→DWG 读回往返 + 保真 E2E）**；AutoCAD CompatibleUnverified（适配器未实现）；TArch Unsupported（预留）；vendor list + export gating 警示+审计（不阻止，决策权归人）。
+- **3d 布灯基准就绪**；计划4 Avalonia 视图待写。
+- 诚实边界：锚密钥本机 DPAPI（跨机验锚需密钥分发留后续）；往返校验第一 slice 实体计数+文本抽样（几何逐点留后续）；SaveAs 默认格式（版本参数留后续）；AutoCAD 适配器未实现。
+
+**计划3d 完成（布灯基准——第二期场景泛化验证，2026-11-21 记录；全套件 492 测试含 3 真机）**：
+- RoomDetector（Data/Semantic）：房名文本精确匹配模式列表（客厅/卧室/厨房等13类）→锚点；区域=锚点 10m 半径内 Wall 类线（叠加层标注或图层约定）端点 bbox；无墙/退化 bbox→6m×6m 默认区域显式 Assumed=true；Room 标注 GeometryInference 0.6（低于闸口 0.8，须人工确认）；集成 SemanticScanner（剪枝前）+ DrawingSummarizer 房间段（LLM 规划依据）。
+- layout-lighting 第七处理器：确定性网格（x+spacing/2 起步、不越界），每点 Insert(block)，可选 layer；ISemanticAware 声明 RequiredSemantics=[Room]——**语义闸口首次实战**：scan 推断 0.6 拒执行（semantic-gate-refused 留痕→有界重规划一次仍拒→Escalated），人工 map 确认 1.0 放行；点位数上限 10000 防脏参数；块不存在/非正参数→失败结果。KindDocs agent/repl 共用更新。
+- 灯具 skill 包 examples/skills/lighting（示例院标，非真实）：layer-name 规则 + E-LITE→Lighting 别名（SemanticClass.Lighting 既有）；**GB 50034 未提供——间距/照度不编造可执行条款**，仅 suggestion 注记人工审查项。
+- 基准 E2E 全链（离线 fake LLM）：建筑底图→scan（Wall/Room 推断）→摘要房间段（6000×4000 非 assumed）→map 确认→agent 布灯 6 点位落 E-LITE→审查签认（职责分离）→降级导出读回 6 Insert→审计包 manifest chainVerified+anchorStatus Ok（无密钥泄漏）→验锚通过；第二链：驳回→事务回滚→灯具清零（要求③在布灯场景复验）。
+- **计划3 全部完成（3a/3b/3c/3d）→计划4 Avalonia 视图就绪**（渲染+基础手动编辑+审计回放+签认纠偏 GUI）。
+- 诚实边界：房间区域为 bbox 启发式（精确多边形重建留后续）；照度计算未做（设计标准缺失）；灯具符号跨文档导入仍未做（块须已在图纸内，既有 deferred）；房名模式列表为起点（真实图纸自定义房名走人工纠偏流程）；基准用 fake LLM（真实 API key 冒烟为用户动作）。
+
+**计划3e 完成（JGJ/T 244-2011 落地：真实条文规则包+灯具编号，2026-11-21 记录；全套件 512 测试含 3 真机）**：
+- **244 标准核验**：用户提供 MinerU JSON+原件 PDF；封面+住建部公告第1053号+备案号 J1216-2011 齐全（四份中首份封面齐全），74页与官方书目一致，现行有效未被替代。正文零"必须/严禁"→入库规则全 recommended/informational，零 mandatory。提取底稿 standards-src/extraction-244.md（D1-D12 逐字+页码）。
+- **MinerU 图例缺失根因核查（用户质疑触发）**：四份 JSON 元数据均 `_backend=hybrid, _ocr_enable=true, _effort=medium, v3.4.4`——hybrid=VLM+原生文本提取混合后端（多模态模型已参与），OCR 已启用；**根因＝effort medium 自动关闭图像分析**（MinerU 3.x 文档化行为），非"未选 VLM/未调 OCR"。补救＝effort high/xhigh 重转 244/50786 开启图像分析→图例视觉关联（用户侧 MinerU 服务动作；项目侧 MinerU API 后续能力）。
+- **label-luminaires 第八处理器**：设备索引符号（3.6.5/3.6.6-4）——正六边形+水平内径线、细实线 W25、长轴 8~12mm 参数校验、内注编号+品种代号；prefix 必填无默认（品种代号标准明示归院标，3.6.5 条文说明）；编号确定性（Insert Handle 升序）；字高≥2.5mm；**ISemanticAware=[Lighting]——Lighting 类首次闸口实战**（无确认拒/别名 0.8 放行）。
+- **room-name 检查器（5.2.5）**：房名/编号存在性（RoomDetector 同口径启发式）；编号圆圈6mm/字高比较/房间名称表 VISUAL deferred（DetectionBasis 注记）；StandardsEngine 注册。
+- **interior-244 skill 包（真实条文）**：R-244-5.2.5（room-name 可查）+ R-244-4.0.9/3.6.5/A.4.12/4.0.3（**NoChecker 结构化跳过诚实登记** VISUAL/深度 deferred，跳过不静默）；symbols 17 类灯具目录（表4.0.9 名称逐字，class Lighting，几何占位待重转）；steps/label-luminaires 模板；aliases 空（244 不规定图层名，不编造）。
+- **编号 E2E**：布灯→**再 scan**（时序关键：布灯前 scan 无 E-LITE Insert 可标）→skill run 编号 6 符号 L1..L6→签认→验链；闸口变体无 Lighting→Escalated+semantic-gate-refused。
+- **244 重新论证结论（用户要求）**：3d 控制性布点有标准依据（A.4.4-8"可"）；房名信号=5.2.5 要求；缺口＝生产灯具布置图属顶棚镜像视图（5.1.2）+A.4.12 深度余项（定位尺寸/材料/做法/设备协调）+图例几何（VISUAL）+顶棚标高 CH（3.10.8）。
+- 诚实边界：索引符号合规检查器未建（生成已有，校验 deferred）；文本近似居中（精确排版留视图层）；A.4.12 深度余项 deferred；灯具图例几何待 MinerU high 重转+视觉关联；跨文档符号导入仍 deferred。
+
+**3e 追加：灯具图例几何补齐（2026-11-21，MinerU vlm 重转后；全套件 513 测试含 3 真机）**：
+- 用户提供 API token（仅内存使用不落盘）→ v4 API model_version=vlm 重转 244/50786（图像分析启用）；CDN 下载 Python openssl 被阻断→curl schannel 绕过（无代理）；结果包+整表裁切入库 standards-src/_reparse/（gitignored）。
+- v2 content_list 表块 image_source 整表栅格＝图例几何载体（HTML 单元格仍空，视觉关联必需，预判证实）；行列线检测裁切 20 单格→**17 类灯具图例逐类目视核对**（名称↔图形映射确认，含变体）。
+- **矢量重建 17 类 DXF**（examples/skills/interior-244/symbols/luminaire-01..17.dxf，ACadSharp 生成+读回测试）；symbols.yaml 占位转真实文件+几何描述+来源链注记。近似边界：非精确描摹/涂黑与波浪折线近似/变体未单独建块/毫米级示意比例。
+- 50786 符号表裁切同批就绪（表4.1.2 等 60+ 表）——302 符号矢量化 deferred 独立切片。
+- MinerU API 录入能力首跑通（token 环境变量注入、批次上传/轮询/下载重试）——后续新标准录入可复用该管线。
+
+**计划3f 完成（50786 表4.1.2 强电符号矢量化 164/164，2026-11-21 记录；全套件 515 测试含 3 真机）**：
+- 6 批逐页目视转录（p10-p32 整表裁切，忽略斜向水印；[YS84] 等 OCR 噪声格忽略；名称取说明列中文+英文）→ elec-001..164.dxf 入 examples/skills/electrical/symbols/ + symbols.yaml 目录（emit 自生成器注册表，单一事实源）。
+- 覆盖：导线/连接/端子族、二极/晶体/电机/变压器/互感器族、变换器/触点/开关/保护器件族、表计/信号/电站/防雷/电缆线路族、配线标识/插座/开关平面族、按钮/灯/应急/荧光/格栅/投光/聚光/风扇族。灯具类 class=Lighting（15/97/148-163），其余 Auxiliary。
+- 读回测试：目录条目数==DXF 文件数==164 + 每文件 DxfReader entities>0 + electrical skill validate 保持 0。
+- 诚实边界：近似重建非精确描摹；涂黑/斜线填充以密集线近似；形式2 不单独建块（description 注记）；复合符号（#16/#42/#93 等）取主要素简化注记；45/46/47 说明列共用按图形区分命名；4.1.3-x 弱电符号表/4.1.4 线型符号**留后续切片**（裁切已就绪）。
+
+**计划3g 完成（50786 弱电符号矢量化 144/144，2026-11-21 记录；全套件 515 测试含 3 真机；符号总 308）**：
+- 表4.1.3-1 通信/综合布线 17 + 4.1.3-2 火灾报警 38 + 4.1.3-3 有线电视/卫星 21 + 4.1.3-4 广播 8 + 4.1.3-5 安防 37 + 4.1.3-6 设备监控 23 = **144**；连续编号 elec-165..308 并入 electrical symbols.yaml（表边界注释）。
+- **MinerU 漏提取兜底**：p34/p39 续表在 v1/v2 均 0 行（空占位块）——zip 内 origin.pdf 经 pypdfium2 整页渲染（150dpi）恢复全部漏行（com#13-17、tv#11-21 等）；整页渲染 p33-45 入库 _reparse/gb50786/pages/（gitignored）。**管线教训：表裁切可能截断/漏提，整页渲染是核对兜底**。
+- 火灾注1/注2 字母替代清单（C/Z/G/S；RS/RD/I/O/P/T/SI/M/SB/D/FI/CRT/FPA/MT/BO/TP）、广播注1/注2（C/R/W；A/PRA/AP）入 description。
+- 诚实边界：同 3f 近似重建口径；湿度/压差等形式1/2 字母差异取形式1+注记；**4.1.4 线型符号仍 deferred**（p45 表已渲染就绪，3 行起）。
+
+**3g 追加：MinerU 重摘核实（2026-11-21，用户要求；批次 932d27ce）**：
+- 用户指出源 PDF 弱电表非空——证实。重跑 vlm 摘取：按表合计 17/38/21/8/37/23 与首跑及转录**完全一致**；归一化名称多重集对比**零残差**（144=144）。
+- **漏提取真相修正**：p34/p39 的 0 行表块＝**重复碎片块**（两跑稳定复现）；续表行实际**合并进首页表块 HTML**（p33 含 17 行名、p38 含 21 行名）——名称从未缺失；**截断的是 image_source 裁切**（止于页边界），故几何须整页渲染兜底（此前结论"名称漏提取"修正为"裁切截断+碎片块"）。
+- 核实发现并修正 1 处转录词序错误：#19 源文"复合式**感温感烟**火灾探测器"（原目录误作"感烟感温"）→ 目录已修正再生成。
+- 管线定论：MinerU 表 HTML 名称可信（两跑一致）；表裁切几何不可信（截断）；整页渲染（pypdfium2）为几何核对唯一兜底。
+
+**3g 追加 W6：表4.1.4 线型符号 16/16（2026-11-21；符号总 324；515 测试绿）**：
+- 信号/控制/应急照明/保护接地/接地/接闪/电话/数据/有线电视/广播/视频/综合布线/消防电话/50V以下电源/直流电源 15 类＝实线+上标字母（形式2 嵌标 —X— 注记）；#16 光缆＝横线+中圆斜杠（∅近似）。
+- elec-309..324；**50786 图形符号全表覆盖完成**（4.1.2 强电164 + 4.1.3-1..6 弱电144 + 4.1.4 线型16 = 324）；4.1.5 标注方式/4.2.x 文字符号为非图形（既有格式规则覆盖部分，其余 deferred）。
+
+**计划3h 完成（跨文档符号导入，2026-11-21 记录；全套件 530 测试含 3 真机；§12 长期 deferred 项清除）**：
+- **insert-symbol 第九处理器**（Data ImportSymbolHandler）：skill 包 symbols.yaml 按名解析（OrdinalIgnoreCase 首包命中；**不接受任意路径参数**）→源 DXF 读取→**白名单重建克隆 Line/Circle/Arc/TextEntity**（不赌 Entity.Clone 的外来表引用；Arc:Circle 继承序注意）→建块（块名=符号名，中文块名往返验证）/复用块幂等→Insert(scale/rotation/layer)；未知符号/缺文件/不支持类型响亮失败（先校验后变更）。
+- CLI 接线：Engine extraHandler 可选参；run/agent/repl 经 --skill 注入（**agent/repl allowedKinds 同步含注入 kind**，否则计划解析期拒）；skill run 包目录为位置参数→SkillRunImportHandler(skillDir+--skill 去重)；KindDocs 加行。无 --skill 时 insert-symbol 不注册→解析期 Failed（诚实）。
+- interior-244 加 steps/place-luminaire 模板（symbol/x/y）；E2E：建筑底图→scan/map Room→模板导入 3 筒灯（1 块 3 Insert）→签认→验链；未知符号失败零变更。
+- 几何导入不声明 ISemanticAware（语义确认仍 scan/map）；执行经 StepEngine 审计/快照管线无旁路。
+- **符号库 324+17 自此真正落图**；诚实边界：白名单四类之外类型拒收（随库扩展再扩）；重建克隆非精确 Clone（属性子集：几何+文本值/高/旋转）。
+
+**计划3i 完成（补核心 A：读回迭代环，2026-11-21 记录；全套件 546 测试含 3 真机）**：
+- **核心环闭合**："读图→决策→操作→**读回→迭代**"——执行成功后 post-summary+前后哈希 diff 喂回 LLM 验证（AgentOrchestrator.VerifyLoopAsync）；{"verdict":"ok"}→Executed；纠正计划→白名单+人工确认+执行→再验证；有界默认 2 轮（构造器可配）。
+- 诚实降级：验证轮预算耗尽→Executed+agent-verify budget-skipped 审计（执行已提交不谎报失败）；验证响应不可解析/纠正执行失败/轮耗尽→Escalated 交人工（不信任完成）；逐轮 llm-call（attempt 递增）+agent-verify（verdict/round）审计。
+- CLI seam：agent/repl 注入 postSummaryProvider=完整 DrawingSummarizer 摘要（Core 默认最小 diff 不引用 Data）；stdout 加 verificationRounds。
+- **契约变更 sanctioned**：Executed 含验证调用——旧一次性执行测试的 usage/Calls 断言同步更新；fake 客户端按 system prompt"验证智能体"识别验证请求回 verdict ok。
+- 缺口 B（活 CAD 执行）/C（生成式验证，并入 B 基准）→**计划 3j 待写**（用户裁定 A→B，C 并入 B）。
+
+**计划3j 完成（补核心 B+C：COM 绘制执行+生成式真机基准，2026-11-21 记录；全套件 559 测试含 5 真机）**：
+- **ICadRuntime 绘制操作**：AddLine/AddText/AddCircle/AddInsert/EnsureBlock/EntityCount；ZwcadRuntime dynamic COM 真机核定签名：**Blocks.Add(origin, Name)**（与 AutoCAD 文档序相反）、**ModelSpace.InsertBlock**（非 AddInsert）、**赋不存在层须先 Layers.Add**（0x80200014 根因）。
+- **ComReplayService 计划级 COM 重放**（第二执行通道）：kind→COM 映射（生成类 add-line/add-text/add-circle/insert-block/layout-lighting/label-luminaires/insert-symbol）；几何与 handler 同源 GeometryKit（网格/六边形/文本放置共享，防双写漂移）；编辑类 kind 响亮不支持（第一 slice）。
+- **--live 接线**（run/agent/repl/skill run）：tx 提交后从**事务前快照**开活会话→重放→逐 step com-replay 审计→**读回计数闸口**（vendor vs 影子，分歧=com-replay-divergence 响亮失败）→SaveAs <drawing>.live.dwg→com-replay-committed；无厂商/重放失败/异常→审计+stderr+exit 1。影子副本仍为审计事实源（双通道均经审计管线）。
+- **add-circle 第十处理器**（生成式绘制补全；注册表 9 静态+insert-symbol 动态）。
+- **C 生成式真机基准**：LLM 读摘要产轴线/房间名/柱圆**生成式几何计划**（非符号导入）→agent --live→活 ZWCAD 落图→live.dwg ACadSharp 读回断言（AXIS 层线/客厅文字/r250 圆/7 实体）→com-replay×3+committed+agent-verify+验链+密钥不入审计。
+- 诚实边界：重放第一 slice 仅生成类（编辑类 delete/move/change-layer 不支持响亮失败）；读回闸口为计数级（几何逐点比对仍 deferred）；--live 交付为 .live.dwg 旁路文件（不覆盖源/工作副本）。
+- **用户核心质疑三缺口全部闭合**：读回环(3i)/活 CAD 执行(3j)/生成式验证(3j 基准)。计划 4 视图就绪。
+
+**合并前质量门禁（2026-11-21，code-review-csharp 扩展审查 main..3j 全量 82 文件 +5860 行；用户裁定修 Critical+Warning）**：
+- 审查结论：1 Critical / 3 Warning / 4 Info；无安全漏洞类 Critical（密钥 DPAPI/参数化 SQL/出境闸/哈希链+HMAC 锚核查通过）。
+- **Critical#1 已修**：DrawingSession.SaveWorking 改 tmp+Move 原子写（原 File.Create 先截断，崩溃可损持久工作副本）；回归 SaveWorkingAtomicTests。
+- **Warning#2 已修**：AnchorStatus 增 Stale（db 超前锚=commit→anchor.Update 崩溃窗口尾记录无锚保护）；Verify 显式 Stale 不谎报 Ok；CLI verify --anchor 警示 exit 0（同 Missing 先例）；审计包 manifest 如实记 Stale；回归 MergeGateReviewFixesTests.AnchorLag。
+- **Warning#3 已修**：llm add 增 --key-stdin（标准输入读密钥，不进 argv/shell history）；--key 便利路径保留（暴露面注记）；回归 KeyStdinTests。
+- **Warning#4 已修**：SkillPackage.LoadSymbols 符号 file 穿越守卫（.. / rooted / 领分隔符拒绝；包内相对子目录允许）；回归三场景。
+- **Info 注记（不修，宿主化时处理）**：①OpenAiClient 每实例 HttpClient（CLI 短命进程可接受，宿主化改 IHttpClientFactory）；②CLI 边界 GetAwaiter().GetResult() 有意同步（无同步上下文）；③EgressPolicy loopback 集偏严（fail-safe 方向正确，可选 IPAddress.IsLoopback 完备化）；④COM 通道 BlockText 丢 rotation（当前符号库 rotation=0 无实际分歧，扩旋转符号时补）。
+- 修复后全套件 **566 测试连绿两次含 5 真机**（首跑单败为瞬态文件锁竞争，复跑稳定）。
+- **ZWCAD"套件损坏"弹窗核查（用户报告）**：崩溃重启机制为计划内（spec §9 Restart+重试），弹窗本身非预期——根因 Dispose/Restart 带开文档 Quit 致 ZWCAD 判异常终止；已修先 Close(false) 再 Quit（dc031fa→acb99f6）。
 
 ## 附录：调查证据来源
 
