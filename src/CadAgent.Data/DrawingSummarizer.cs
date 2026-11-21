@@ -1,13 +1,14 @@
 using System.Text;
 using ACadSharp.Entities;
 using CadAgent.Core;
+using CadAgent.Data.Semantic;
 
 namespace CadAgent.Data;
 
 /// <summary>
 /// LLM 读图文本摘要（3b-i；视觉渲染留 3c COM 导出/计划4）。
 /// 有界（maxChars 截断）、确定性（ordinal 排序）：源/版本/图层/实体类型计数/
-/// 文本清单（前50）/块名/语义叠加层摘要（类×来源计数+人工映射）。
+/// 文本清单（前50）/块名/房间段（3d，RoomDetector 启发式）/语义叠加层摘要（类×来源计数+人工映射）。
 /// </summary>
 public static class DrawingSummarizer
 {
@@ -47,6 +48,17 @@ public static class DrawingSummarizer
             .ToList();
         if (blocks.Count > 0)
             sb.Append("块: ").Append(string.Join(", ", blocks)).Append('\n');
+
+        var rooms = RoomDetector.Detect(session, overlay);
+        if (rooms.Count > 0)
+        {
+            sb.Append("房间: ");
+            sb.Append(string.Join("; ", rooms
+                .OrderBy(r => r.Name, StringComparer.Ordinal)
+                .Select(r => FormattableString.Invariant(
+                    $"{r.Name}@({r.X:0},{r.Y:0}) {r.Width:0}×{r.Depth:0}mm{(r.Assumed ? "[assumed]" : "")}"))));
+            sb.Append('\n');
+        }
 
         if (overlay == null)
         {
