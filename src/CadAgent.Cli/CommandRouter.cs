@@ -136,9 +136,23 @@ public static partial class CommandRouter
     }
 
     private static StepEngine Engine(string agentDir, IAuditStore audit, ISemanticGate? semanticGate = null,
-        ModelUndoStack? undoStack = null) =>
+        ModelUndoStack? undoStack = null, IStepHandler? extraHandler = null) =>
         new(audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
-            IdentityOverride ?? Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate, undoStack);
+            IdentityOverride ?? Identity(agentDir), new RoleChecker(),
+            extraHandler == null ? HandlerRegistry.All() : HandlerRegistry.All().Concat(new[] { extraHandler }).ToList(),
+            semanticGate, undoStack);
+
+    /// <summary>
+    /// 3h：--skill 包符号导入处理器（insert-symbol）。无 --skill→null（kind 不注册，
+    /// 计划含 insert-symbol 时响亮失败"未注册的步骤类型"）；包非法→加载异常经 Run 兜底。
+    /// </summary>
+    private static IStepHandler? SymbolImportHandler(string[] args)
+    {
+        var dirs = GetOptionValues(args, "--skill");
+        if (dirs.Count == 0) return null;
+        var packages = dirs.Select(SkillLoader.LoadDirectory).ToList();
+        return new ImportSymbolHandler(packages);
+    }
 
     /// <summary>
     /// run --skill 接线（2b-ii-b T8，加性）：入口先经 LoadRuleSet 校验包加载
@@ -208,7 +222,7 @@ public static partial class CommandRouter
         IAuditStore engineAudit = skillLoaded
             ? new RulePackAuditDecorator(audit, ruleSet.RulePackVersion)
             : audit;
-        var result = Engine(agentDir, engineAudit, semanticGate).Run(plan, drawing, session);
+        var result = Engine(agentDir, engineAudit, semanticGate, null, SymbolImportHandler(args)).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
         stdout.WriteLine(JsonSerializer.Serialize(new

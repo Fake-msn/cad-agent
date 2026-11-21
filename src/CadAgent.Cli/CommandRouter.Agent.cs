@@ -24,6 +24,7 @@ public static partial class CommandRouter
         insert-block: 插入图纸内已有块 {block: string, x,y: number, scale?: number, rotation?: number(弧度)}
         layout-lighting: 房间网格布灯 {x,y,width,depth,spacing: number(mm), block: string, layer?: string}（需已确认 Room 语义；点位=区域内 spacing 网格）
         label-luminaires: 灯具编号/设备索引符号 {prefix: string(品种代号,归院标), block?: string, start?: number, symbolSize?: number(8~12mm,默认10), layer?: string}（需已确认 Lighting 语义；正六边形符号 JGJ/T 244-2011 3.6.6-4）
+        insert-symbol: 跨文档导入 skill 符号并插入 {symbol: string(符号名,须 --skill 包内), x,y: number, scale?: number, rotation?: number(弧度), layer?: string}（建块/复用块；Line/Circle/Arc/Text 白名单）
         """;
 
     private static int Agent(string[] args, string agentDir, string session, TextWriter stdout, TextWriter stderr)
@@ -53,12 +54,15 @@ public static partial class CommandRouter
         if (File.Exists(overlayPath) && overlay == null) return 1;
 
         string summary = DrawingSummarizer.Summarize(drawing, overlay);
-        var allowedKinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet(StringComparer.Ordinal);
+        var importHandler = SymbolImportHandler(args);
+        var allowedKinds = HandlerRegistry.All().Select(h => h.Kind)
+            .Concat(importHandler != null ? new[] { importHandler.Kind } : Array.Empty<string>())
+            .ToHashSet(StringComparer.Ordinal);
         ISemanticGate? gate = overlay != null ? new SemanticGate(overlay) : null;
 
         ILlmClient client = LlmClientFactory?.Invoke(profile, key) ?? new OpenAiClient(profile, key);
         var orch = new AgentOrchestrator(client, new UsageMeter(profile.Limits), new EgressPolicy(agentDir),
-            Engine(agentDir, audit, gate), audit, Identity(agentDir), profile.Model, profile);
+            Engine(agentDir, audit, gate, null, importHandler), audit, Identity(agentDir), profile.Model, profile);
 
         Func<StepPlan, bool> confirmPlan = plan =>
         {

@@ -135,7 +135,7 @@ public static partial class CommandRouter
             if (overlay is null) return 1;
             semanticGate = new SemanticGate(overlay);
         }
-        var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
+        var result = Engine(agentDir, audit, semanticGate, null, SymbolImportHandler(args)).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
