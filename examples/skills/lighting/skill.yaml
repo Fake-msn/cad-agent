@@ -1,0 +1,8 @@
+# 照明布置示例 skill（非真实院标）——3d 布灯基准演示包。
+# GB 50034 照明设计标准未提供：间距/照度要求不入库为可执行规则（不编造条款），
+# 仅在 suggestion 中注明为人工审查项；真实院标/照明标准待用户提供后编码替换。
+name: 照明布置（示例院标）
+version: "1.0.0"
+discipline: electrical
+drawingType: any
+description: 布灯基准示例 skill（非真实院标）：灯具图层命名规则 + E-LITE→Lighting 别名；配合 layout-lighting 处理器（需已确认 Room 语义）。间距/照度为人工审查项（GB 50034 未提供，不编造可执行条款）。

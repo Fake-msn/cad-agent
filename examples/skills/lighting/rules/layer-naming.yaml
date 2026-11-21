@@ -1,0 +1,14 @@
+# 示例规则（非真实院标条文）——灯具图层命名；excerpt 为虚构示例条款。
+# 布灯间距（示例建议 ≤3m）无对应检查器，不伪造 check——列为人工审查项（suggestion 注记）。
+id: R-LIGHT-LAYER
+source:
+  standard: "示例院标（非真实）"
+  clause: "2.0"
+  excerpt: "示例条款：灯具布置应位于专用电气图层，图层名汉英不得混用（演示用）"
+  verification: source-text
+modal: "不得"
+force: recommended
+severity: medium
+scope: { discipline: electrical, drawingType: any }
+check: { type: layer-name, params: { mode: charset } }
+suggestion: "灯具置于专用电气图层（如 E-LITE），命名纯汉字或纯英文（示例建议）；布灯间距建议≤3m 为人工审查项（GB 50034 未提供，无自动检查）"

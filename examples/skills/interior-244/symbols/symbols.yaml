@@ -1,0 +1,22 @@
+# 表4.0.9 常用灯光照明图例目录（JGJ/T 244-2011，名称逐字，17类）。
+# 图例几何 VISUAL deferred：MinerU effort=medium 关闭图像分析致图例单元格空；
+# effort high 重转+视觉关联后补真实 DXF（file 为占位路径，存在性不强制——2b-ii-b T9 裁定）。
+# class Lighting：SemanticClass.Lighting（3a 已建）；跨文档符号导入仍 deferred（spec §12）。
+symbols:
+  - { name: 艺术吊灯, file: deferred/luminaire-01.dxf, class: Lighting, description: "表4.0.9 序号1；图例几何待视觉关联" }
+  - { name: 吸顶灯, file: deferred/luminaire-02.dxf, class: Lighting, description: "表4.0.9 序号2；图例几何待视觉关联" }
+  - { name: 筒灯, file: deferred/luminaire-03.dxf, class: Lighting, description: "表4.0.9 序号3；图例几何待视觉关联" }
+  - { name: 射灯, file: deferred/luminaire-04.dxf, class: Lighting, description: "表4.0.9 序号4；图例几何待视觉关联" }
+  - { name: 轨道射灯, file: deferred/luminaire-05.dxf, class: Lighting, description: "表4.0.9 序号5；图例几何待视觉关联" }
+  - { name: 格栅射灯, file: deferred/luminaire-06.dxf, class: Lighting, description: "表4.0.9 序号6；图例几何待视觉关联" }
+  - { name: 格栅荧光灯, file: deferred/luminaire-07.dxf, class: Lighting, description: "表4.0.9 序号7；图例几何待视觉关联" }
+  - { name: 暗藏灯带, file: deferred/luminaire-08.dxf, class: Lighting, description: "表4.0.9 序号8；图例几何待视觉关联" }
+  - { name: 壁灯, file: deferred/luminaire-09.dxf, class: Lighting, description: "表4.0.9 序号9；图例几何待视觉关联" }
+  - { name: 台灯, file: deferred/luminaire-10.dxf, class: Lighting, description: "表4.0.9 序号10；图例几何待视觉关联" }
+  - { name: 落地灯, file: deferred/luminaire-11.dxf, class: Lighting, description: "续表4.0.9 序号11；图例几何待视觉关联" }
+  - { name: 水下灯, file: deferred/luminaire-12.dxf, class: Lighting, description: "续表4.0.9 序号12；MinerU 唯一栅格图例项，待视觉关联" }
+  - { name: 踏步灯, file: deferred/luminaire-13.dxf, class: Lighting, description: "续表4.0.9 序号13；图例几何待视觉关联" }
+  - { name: 荧光灯, file: deferred/luminaire-14.dxf, class: Lighting, description: "续表4.0.9 序号14；图例几何待视觉关联" }
+  - { name: 投光灯, file: deferred/luminaire-15.dxf, class: Lighting, description: "续表4.0.9 序号15；图例几何待视觉关联" }
+  - { name: 泛光灯, file: deferred/luminaire-16.dxf, class: Lighting, description: "续表4.0.9 序号16；图例几何待视觉关联" }
+  - { name: 聚光灯, file: deferred/luminaire-17.dxf, class: Lighting, description: "续表4.0.9 序号17；图例几何待视觉关联" }

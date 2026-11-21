@@ -1,0 +1,15 @@
+# excerpt 逐字自 extraction-244.md D2（3.6.5，JSON页18；几何参数 3.6.6-4 页19）。
+# 生成已实现（label-luminaires 处理器，正六边形+水平内径线/细实线/长轴8~12mm）；
+# 符号合规检查器未建→NoChecker 结构化跳过。品种代号归院标（3.6.5 条文说明明示不统一）。
+id: R-244-3.6.5
+source:
+  standard: "JGJ/T 244-2011"
+  clause: "3.6.5"
+  excerpt: "表示各类设备（含设备、设施、家具、灯具等）的品种及对应的编号，应在图样上使用设备索引符号（图 3.6.5）。"
+  verification: source-text
+modal: "应"
+force: recommended
+severity: medium
+scope: { discipline: interior, drawingType: any }
+check: { type: equipment-index-symbol, params: {} }
+suggestion: "设备（含灯具）用索引符号：正六边形+水平内径线、细实线、长轴8~12mm、内注设备编号及品种代号（3.6.6-4）；label-luminaires 步骤可生成；品种代号白名单归院标 skill（标准明示不统一）；符号合规检查器 deferred"
