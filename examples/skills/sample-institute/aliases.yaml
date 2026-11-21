@@ -1,0 +1,4 @@
+# 示例别名（非真实院标）——演示 skill 别名接入语义扫描（human > skill > builtin）。
+aliases:
+  - layerName: W-示例墙
+    class: Wall

@@ -103,11 +103,15 @@ public class LayerNameCheckerTests : IDisposable
         finally { File.Delete(path); }
     }
 
+    // 2b-ii-a T4 硬化（控制者裁定，唯一获准的既有测试修改）：原 UnknownMode_ReturnsEmpty
+    // 期望空列表（2b-i T6 的静默隔离行为）；现行为故意改为非空未知 mode 抛 ArgumentException，
+    // 由 RuleEngine 隔离捕获并记账跳过原因（skill 包可传任意 params，静默空转会掩盖配置错误）。
+    // 空 mode 行为不变（仍空列表），见 CheckerHardeningTests.LayerName_EmptyMode_ReturnsEmpty_Unchanged。
     [Fact]
-    public void UnknownMode_ReturnsEmpty()
+    public void UnknownMode_Throws()
     {
-        var issues = new LayerNameChecker().Check(Make("bogus"), DrawingSession.Load(_path), new SemanticOverlay());
-        Assert.Empty(issues); // 未知模式→空列表（检查器隔离，不抛异常）
+        Assert.Throws<ArgumentException>(() =>
+            new LayerNameChecker().Check(Make("bogus"), DrawingSession.Load(_path), new SemanticOverlay()));
     }
 
     [Fact]

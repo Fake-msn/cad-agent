@@ -1,0 +1,13 @@
+# 示例规则（非真实院标条文）——演示 mandatory 图层字符集规则；excerpt 为虚构示例条款。
+id: SK-SAMPLE-001
+source:
+  standard: "示例院标（非真实）"
+  clause: "1.0"
+  excerpt: "示例条款：图层名汉英不得混用（演示用）"
+  verification: source-text
+modal: "不得"
+force: mandatory
+severity: high
+scope: { discipline: architecture, drawingType: any }
+check: { type: layer-name, params: { mode: charset } }
+suggestion: "统一图层命名为纯汉字或纯英文（示例建议，非真实院标要求）"
