@@ -22,7 +22,11 @@ public sealed record StepTemplate(
 /// </summary>
 public static class TemplateInstantiator
 {
-    private static readonly Regex PlaceholderPattern = new(@"^\{\{([^{}]+)\}\}$", RegexOptions.Compiled);
+    // 整串精确锚定用 \z 而非 $：.NET 的 $ 也匹配末尾 \n 之前，会把 "{{x1}}\n"
+    // （YAML literal 块标量可达形态）误判为精确占位。\z 钉死字符串绝对末尾。
+    // 内含空白形态 "{{ x1 }}" 匹配占位形状但 name（" x1 "）不在 ParamNames →
+    // 未知占位符拒绝——刻意的 strict 解读：占位符不做内空白修剪。
+    private static readonly Regex PlaceholderPattern = new(@"^\{\{([^{}]+)\}\}\z", RegexOptions.Compiled);
 
     public static StepPlan Instantiate(StepTemplate t, IReadOnlyDictionary<string, object> args)
     {

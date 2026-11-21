@@ -123,6 +123,28 @@ public class StepTemplateTests
     }
 
     [Fact]
+    public void Instantiate_TrailingNewline_KnownName_KeptVerbatim_NotSubstituted()
+    {
+        // .NET `$` 也匹配末尾 \n 之前——必须用 \z 钉死整串精确性（YAML 块标量可达此形态）。
+        var t = new StepTemplate("t", "", new[] { "x1" },
+            new[] { new TemplateStep("k", new Dictionary<string, object> { ["x1"] = "{{x1}}\n" }) });
+        var plan = TemplateInstantiator.Instantiate(t, new Dictionary<string, object> { ["x1"] = 7 });
+        var p = plan.Steps[0].Params.GetProperty("x1");
+        Assert.Equal(JsonValueKind.String, p.ValueKind);
+        Assert.Equal("{{x1}}\n", p.GetString());
+    }
+
+    [Fact]
+    public void Instantiate_TrailingNewline_UnknownName_KeptVerbatim_NoThrow()
+    {
+        // "{{bogus}}\n" 非整串精确占位→原样保留，不得按未知占位符拒绝。
+        var t = new StepTemplate("t", "", new[] { "x1" },
+            new[] { new TemplateStep("k", new Dictionary<string, object> { ["v"] = "{{bogus}}\n" }) });
+        var plan = TemplateInstantiator.Instantiate(t, new Dictionary<string, object> { ["x1"] = 0 });
+        Assert.Equal("{{bogus}}\n", plan.Steps[0].Params.GetProperty("v").GetString());
+    }
+
+    [Fact]
     public void Instantiate_MultipleSteps_OrderPreserved_TemplateNotMutated()
     {
         var t = new StepTemplate("t", "", new[] { "x" },
@@ -215,6 +237,30 @@ public class StepTemplateLoaderTests : IDisposable
         Assert.Equal(1.5, p.GetProperty("x1").GetDouble());
         Assert.Equal(9, p.GetProperty("x2").GetInt32());
         Assert.Equal("0", p.GetProperty("tag").GetString());
+    }
+
+    [Fact]
+    public void Load_BlockScalarParam_TrailingNewline_RoundTripKeptVerbatim()
+    {
+        // YAML literal 块标量（x1: | + {{x1}}）→ "{{x1}}\n"：非整串精确占位，实例化后原样保留。
+        // 文件须以换行结尾（clip chomping 保留该尾 \n）；raw string 不含闭合delimiter前换行，显式补上。
+        WriteSteps("block.yaml", """
+            templates:
+              - name: blocky
+                params: [x1]
+                sequence:
+                  - kind: add-line
+                    params:
+                      x1: |
+                        {{x1}}
+            """ + "\n");
+        var pkg = SkillLoader.LoadDirectory(_dir);
+        var t = Assert.Single(pkg.Steps);
+        Assert.Equal("{{x1}}\n", t.Sequence[0].Params["x1"]);
+        var plan = TemplateInstantiator.Instantiate(t, new Dictionary<string, object> { ["x1"] = 5 });
+        var p = plan.Steps[0].Params.GetProperty("x1");
+        Assert.Equal(JsonValueKind.String, p.ValueKind);
+        Assert.Equal("{{x1}}\n", p.GetString());
     }
 
     [Fact]
