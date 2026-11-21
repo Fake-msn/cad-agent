@@ -29,10 +29,14 @@ public sealed class ReviewSignoffStore
 
     private readonly string _path;
 
-    public ReviewSignoffStore(string path)
+    /// <summary>
+    /// 构造即 Load（缺失→空）。loadOnConstruct=false 供损坏降级（最终审查修复③）：
+    /// 磁盘文件损坏时以空列表启动（不读坏文件），后续 Save 原子写覆盖修复。
+    /// </summary>
+    public ReviewSignoffStore(string path, bool loadOnConstruct = true)
     {
         _path = path;
-        Load();
+        if (loadOnConstruct) Load();
     }
 
     public List<ReviewSignoff> Items { get; private set; } = new();

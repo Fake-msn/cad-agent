@@ -147,6 +147,59 @@ public class IntegrationHeadlessTests
         finally { window.Close(); }
     }
 
+    [AvaloniaFact]
+    public async Task ToolSwitch_DuringInFlightEdit_Ignored()
+    {
+        // Final review bundled minor: SetActiveTool must check _editBusy — toolbar
+        // tool buttons route through it, and RaiseEvent bypasses IsEnabled=false.
+        using var f = new Fixture();
+        var vm = new MainViewModel(f.DxfPath, f.ProjectDir);
+        Assert.Null(vm.ErrorMessage);
+        var gate = new SemaphoreSlim(1, 1);
+        var window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)), gate);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        try
+        {
+            ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 20, 20); // anchor
+
+            await gate.WaitAsync(); // hold the gate: the edit stays in flight
+            var tcs = new TaskCompletionSource();
+            void Handler() => tcs.TrySetResult();
+            window.Edit!.EditCompleted += Handler;
+            try
+            {
+                ClickCanvasAtWorld(window, 80, 30); // commit -> busy, blocked on gate
+                Dispatcher.UIThread.RunJobs();
+                Assert.False(window.EditToolbar!.IsEnabled);
+
+                // Tool switch attempts while busy: ignored, ActiveTool unchanged.
+                ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.Equal(EditTool.Line, window.Edit.ActiveTool);
+                ToolButton(window, "Select").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.Equal(EditTool.Line, window.Edit.ActiveTool);
+
+                gate.Release();
+                await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally
+            {
+                window.Edit.EditCompleted -= Handler;
+                if (gate.CurrentCount == 0) gate.Release();
+            }
+
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.Equal(2, window.Canvas!.Items.Count); // exactly ONE line added
+            // After completion tool switching works again.
+            ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(EditTool.Text, window.Edit.ActiveTool);
+        }
+        finally { window.Close(); }
+    }
+
     // ---- 2) --skill passthrough wiring ----
 
     [AvaloniaFact]

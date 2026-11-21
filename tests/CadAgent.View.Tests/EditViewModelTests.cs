@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ACadSharp;
+using ACadSharp.Classes;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using CadAgent.Core;
@@ -489,5 +490,123 @@ public class EditViewModelTests
         Assert.Null(diff.ErrorMessage); // off-thread session read never sees a torn Doc
         Assert.True(second.Ok, second.Error);
         Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    // ---- Admission gate (final review fix 1): mirror CLI RunPlan at the edit boundary ----
+
+    /// <summary>
+    /// Red fixture: a proxy-only-unknown drawing. ACadSharp 3.8.35 ProxyEntity has a
+    /// public ctor + settable DxfClass; the DxfWriter/DxfReader roundtrip preserves it
+    /// as a ProxyEntity (verified), so Summarize().Unknowns is non-empty and
+    /// GateDetector.Inspect with EmptySupportMatrix yields Red (all unknowns unsupported).
+    /// </summary>
+    private static string RedDxf() => DxfFixture.CreateTempDxf(doc =>
+    {
+        doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+        doc.Entities.Add(new ProxyEntity
+        {
+            DxfClass = new DxfClass
+            {
+                DxfName = "TCH_WALL",
+                CppClassName = "TCH_WALL",
+                ApplicationName = "Tangent",
+                ClassNumber = 500,
+                IsAnEntity = true,
+                DwgVersion = ACadVersion.AC1027
+            }
+        });
+    });
+
+    [Fact]
+    public async Task RedDrawing_Refused_RunRejectedAudit_NoTx_DrawingUntouched()
+    {
+        string dxf = RedDxf();
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-red-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(projectDir, ".cadagent"));
+        try
+        {
+            DrawingSession session = DrawingSession.Load(dxf);
+            // Fixture sanity: the proxy survives the roundtrip and the gate decision is Red.
+            GateReport report = GateDetector.Inspect(session.Summarize(), new EmptySupportMatrix());
+            Assert.Equal(GateLevel.Red, report.Level);
+            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
+            var snapshots = new SnapshotStore(Path.Combine(projectDir, ".cadagent", "snapshots"));
+            var vm = new EditViewModel(session, audit, snapshots,
+                new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+                new RoleChecker(), projectDir);
+            byte[] fileBefore = await File.ReadAllBytesAsync(dxf);
+            int countBefore = session.Doc.Entities.Count;
+
+            EditResult r = await vm.DrawLineAsync(0, 0, 50, 50);
+
+            Assert.False(r.Ok);
+            Assert.Equal("", r.TxId);
+            Assert.Contains("T3", r.Error); // T3 conversion guidance (CLI parity)
+            Assert.Equal(r.Error, vm.ErrorMessage);
+            Assert.Empty(vm.RecentTxIds);
+            Assert.Equal(fileBefore, await File.ReadAllBytesAsync(dxf)); // no execution, no save
+            Assert.Equal(countBefore, session.Doc.Entities.Count);
+            List<AuditRecord> records = audit.ReadAll().ToList();
+            AuditRecord req = Assert.Single(records, x => x.Entry.Kind == "view-edit");
+            AuditRecord rejected = Assert.Single(records, x => x.Entry.Kind == "run-rejected");
+            Assert.True(req.Seq < rejected.Seq); // request audit first, then refusal
+            Assert.Equal("view", rejected.Entry.Source);
+            Assert.Equal(session.SourcePath, rejected.Entry.Target);
+            Assert.Equal(req.Entry.BeforeHash, rejected.Entry.BeforeHash);
+            Assert.Equal(rejected.Entry.BeforeHash, rejected.Entry.AfterHash); // refusal changes nothing
+            JsonElement p = Params(rejected);
+            Assert.Equal("Red", p.GetProperty("level").GetString());
+            Assert.Equal(report.Unsupported.Count, p.GetProperty("unsupportedCount").GetInt32());
+            Assert.DoesNotContain(records, x => x.Entry.Kind == "tx-start");
+            Assert.DoesNotContain(records, x => x.Entry.Kind == "step");
+            Assert.DoesNotContain(records, x => x.Entry.Kind == "tx-commit");
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(dxf);
+            if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task RedDrawing_GateCheckedOnEveryApply_EachRefusalAudited()
+    {
+        string dxf = RedDxf();
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-red2-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(projectDir, ".cadagent"));
+        try
+        {
+            DrawingSession session = DrawingSession.Load(dxf);
+            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
+            var vm = new EditViewModel(session, audit, new SnapshotStore(Path.Combine(projectDir, ".cadagent", "snapshots")),
+                new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+                new RoleChecker(), projectDir);
+
+            Assert.False((await vm.DrawLineAsync(0, 0, 1, 1)).Ok);
+            Assert.False((await vm.AddTextAsync(0, 0, "x", 3.5)).Ok);
+
+            Assert.Equal(2, audit.ReadAll().Count(x => x.Entry.Kind == "run-rejected"));
+            Assert.DoesNotContain(audit.ReadAll(), x => x.Entry.Kind == "tx-start");
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(dxf);
+            if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task NormalDrawing_PassesAdmissionGate_NoRunRejected()
+    {
+        using var f = new Fixture();
+        EditViewModel vm = f.MakeVm();
+        EditResult r = await vm.DrawLineAsync(0, 0, 1, 1);
+        Assert.True(r.Ok, r.Error);
+        Assert.DoesNotContain(f.Audit.ReadAll(), x => x.Entry.Kind == "run-rejected");
+        Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "tx-commit");
     }
 }

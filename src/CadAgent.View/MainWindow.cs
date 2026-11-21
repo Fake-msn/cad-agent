@@ -53,6 +53,10 @@ namespace CadAgent.View;
 /// 改层一律忽略，不依赖调度时序）；--skill 经 MainViewModel.SkillDirs 接线
 /// Issues/Adjudication/Semantic；状态栏补缩放倍率；工具栏全按钮 tooltip；
 /// 窗口标题 CadAgent — 图纸名；徽章深红/深灰 WCAG 修正（见 IssueEntry.ForceBrush）。
+/// 最终审查修复波：①编辑边界 Red 准入闸（EditViewModel 镜像 CLI RunPlan）；
+/// ②驳回签认→快照回滚（RollbackTx→EditViewModel.UndoAsync，仅已提交 tx 可签认）；
+/// ③状态文件损坏优雅降级（audit.db/roles.yaml/signoffs.json → ErrorMessage/
+/// StateNote 提示，窗口照常打开、图纸照常渲染）；SetActiveTool 补 _editBusy 硬闸。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -186,11 +190,27 @@ public sealed class MainWindow : Window
         issuesPanel.Children.Add(issueList); // LastChildFill
 
         // T6：底部审计时间线（只读回放）。audit.db 不存在 → 空存储占位，不创建库文件。
+        // 最终审查修复③：损坏 audit.db → 降级空时间线 + 提示（窗口仍打开，图纸仍渲染）。
         string agentDir = Path.Combine(vm.ProjectDir, ".cadagent");
         string auditDbPath = Path.Combine(agentDir, "audit.db");
-        IAuditStore auditStore = File.Exists(auditDbPath)
-            ? new SqliteAuditStore(auditDbPath)
-            : new EmptyAuditStore();
+        var stateNotes = new List<string>();
+        IAuditStore auditStore;
+        if (!File.Exists(auditDbPath))
+        {
+            auditStore = new EmptyAuditStore();
+        }
+        else
+        {
+            try
+            {
+                auditStore = new SqliteAuditStore(auditDbPath);
+            }
+            catch (Exception ex)
+            {
+                auditStore = new EmptyAuditStore();
+                stateNotes.Add($"审计库损坏，时间线不可用（{ex.Message}）");
+            }
+        }
         var audit = new AuditViewModel(auditStore,
             new SnapshotStore(Path.Combine(agentDir, "snapshots")), vm.Session, Canvas, sessionGate);
         Audit = audit;
@@ -243,10 +263,39 @@ public sealed class MainWindow : Window
 
         // T7：审查签认面板（审计面板上方）。身份默认 Windows 账号 + roles.yaml；
         // 测试可注入 FixedIdentity。Draw 角色 → 按钮禁用；自审 → 行内拒绝信息。
-        IIdentityProvider signoffIdentity = identity
-            ?? new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml")));
-        var signoff = new SignoffViewModel(auditStore,
-            new ReviewSignoffStore(Path.Combine(agentDir, "signoffs.json")),
+        // 最终审查修复③：roles.yaml 损坏 → 默认 Draw 角色 + 提示；signoffs.json 损坏 →
+        // 空签认存储 + 提示（后续 Save 原子写覆盖修复）。窗口构造绝不因状态文件损坏崩溃。
+        IIdentityProvider signoffIdentity;
+        if (identity is not null)
+        {
+            signoffIdentity = identity;
+        }
+        else
+        {
+            RoleConfig roleConfig;
+            try
+            {
+                roleConfig = RoleConfig.Load(Path.Combine(agentDir, "roles.yaml"));
+            }
+            catch (Exception ex)
+            {
+                roleConfig = RoleConfig.Parse("roles: {}"); // 全员默认 Draw
+                stateNotes.Add($"roles.yaml 损坏，已降级为默认 Draw 角色（{ex.Message}）");
+            }
+            signoffIdentity = new WindowsIdentityProvider(roleConfig);
+        }
+        string signoffPath = Path.Combine(agentDir, "signoffs.json");
+        ReviewSignoffStore signoffStore;
+        try
+        {
+            signoffStore = new ReviewSignoffStore(signoffPath);
+        }
+        catch (Exception ex)
+        {
+            signoffStore = new ReviewSignoffStore(signoffPath, loadOnConstruct: false);
+            stateNotes.Add($"signoffs.json 损坏，签认历史不可用（{ex.Message}）");
+        }
+        var signoff = new SignoffViewModel(auditStore, signoffStore,
             signoffIdentity, new RoleChecker(), audit.Transactions);
         Signoff = signoff;
         signoff.SignoffsChanged += UpdateSignoffStatus;
@@ -320,6 +369,16 @@ public sealed class MainWindow : Window
             signoffIdentity, new RoleChecker(), vm.ProjectDir, sessionGate: sessionGate);
         Edit = edit;
         edit.EditCompleted += () => RefreshAfterEdit(vm);
+        // 最终审查修复②：驳回签认 → 快照回滚（spec §4.1⑥/§5.4）。回调走
+        // EditViewModel.UndoAsync（StepEngine.Rollback，无旁路）；UndoAsync 自身
+        // 不抛出（失败落 ErrorMessage），这里转成异常供签认 VM 记 ErrorMessage
+        // （签认记录已先行落盘，不回撤）。回滚完成触发 EditCompleted → 视图重建。
+        signoff.RollbackTx = async txId =>
+        {
+            await edit.UndoAsync(txId);
+            if (edit.ErrorMessage is not null)
+                throw new InvalidOperationException(edit.ErrorMessage);
+        };
 
         var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(4, 2) };
         EditToolbar = toolbar;
@@ -547,7 +606,32 @@ public sealed class MainWindow : Window
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
         if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
+
+        // 最终审查修复③：状态文件损坏降级提示汇总（窗口已正常构造，图纸已渲染）。
+        if (stateNotes.Count > 0)
+        {
+            ErrorMessage = string.Join("；", stateNotes);
+            var note = new TextBlock
+            {
+                Margin = new Thickness(8, 2),
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.IndianRed,
+                Text = ErrorMessage
+            };
+            StateNote = note;
+            DockPanel.SetDock(note, Dock.Bottom);
+            dock.Children.Add(note);
+        }
     }
+
+    /// <summary>
+    /// 状态文件损坏降级提示（最终审查修复③；audit.db/roles.yaml/signoffs.json）。
+    /// null=全部状态健康。图纸加载失败走 MainViewModel.ErrorMessage（先行短路）。
+    /// </summary>
+    public string? ErrorMessage { get; private set; }
+
+    /// <summary>降级提示文本块（有降级时可见，位于底部面板区上方）。</summary>
+    public TextBlock? StateNote { get; private set; }
 
     /// <summary>画布视图模型（加载成功时非 null）——图层面板/选择联动入口。</summary>
     public CanvasViewModel? Canvas { get; }
@@ -971,6 +1055,8 @@ public sealed class MainWindow : Window
         {
             await Signoff.SignAsync(group.TxId, approved, SignoffComment?.Text ?? "");
             UpdateSignoffStatus();
+            // 驳回回滚失败（签认记录已落盘）→ 行内提示，不掩盖签认结果。
+            SetSignoffError(Signoff.ErrorMessage);
         }
         catch (Exception ex)
         {
@@ -1119,10 +1205,12 @@ public sealed class MainWindow : Window
         AdjudicationError.IsVisible = message is not null;
     }
 
-    /// <summary>T9：激活工具（清预览锚点/Move 基准/旧错误）。Select 恢复默认选择路径。</summary>
+    /// <summary>T9：激活工具（清预览锚点/Move 基准/旧错误）。Select 恢复默认选择路径。
+    /// 最终审查打包小项：_editBusy 硬闸——在途编辑期间工具切换一律忽略
+    /// （RaiseEvent 可绕过工具栏 IsEnabled=false，标志位才是结构性保证）。</summary>
     private void SetActiveTool(EditTool tool)
     {
-        if (Edit is null || Canvas is null) return;
+        if (Edit is null || Canvas is null || _editBusy) return;
         Edit.ActiveTool = tool;
         Canvas.SetPendingPoint(null);
         _moveBase = null;

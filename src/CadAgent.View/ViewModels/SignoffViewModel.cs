@@ -12,8 +12,13 @@ namespace CadAgent.View.ViewModels;
 /// 成功路径：先审计 review-signed（Source="review"，paramsJson={txId,approved,
 /// comment}，operator/role 盖章，Target=txId，PlanRef="" 不并入事务分组）再
 /// Upsert+Save 签认——审计留痕先于签认落盘，审计失败绝不产生无痕迹的签认。
-/// 签认 IO 体量极小（单 json + 单条审计），同步完成返回 Task.CompletedTask，
-/// 保证 UI 点击后状态即时一致（headless 可确定性断言）。
+/// 签认门禁加性收紧（最终审查修复②）：仅已提交事务可签认（TxGroup.HasCommit，
+/// failed/open → 拒绝"只能签认已提交事务"，零副作用）。
+/// 驳回回滚（spec §4.1⑥/§5.4：驳回走快照回滚，回滚也留痕）：approved=false 且
+/// tx-start 携带非空 SnapshotRef 时，签认落盘后 await 可选 RollbackTx 回调
+/// （MainWindow 接 EditViewModel.UndoAsync → StepEngine.Rollback，无旁路）；
+/// 回调失败 → ErrorMessage 提示，但签认记录与审计已先行落盘、不回撤（审计先行）。
+/// 签认 IO 体量极小（单 json + 单条审计），同步完成；驳回回滚为异步等待。
 /// </summary>
 public sealed class SignoffViewModel
 {
@@ -39,6 +44,15 @@ public sealed class SignoffViewModel
         _sessionId = sessionId ?? Guid.NewGuid().ToString("N");
     }
 
+    /// <summary>
+    /// 驳回回滚回调（可选；MainWindow 装配 → EditViewModel.UndoAsync）。
+    /// 仅 approved=false 且事务有快照时在签认落盘后调用；null=驳回仅记录。
+    /// </summary>
+    public Func<string, Task>? RollbackTx { get; set; }
+
+    /// <summary>最近一次驳回回滚失败原因；null=无失败（签认记录不受影响）。</summary>
+    public string? ErrorMessage { get; private set; }
+
     /// <summary>当前身份是否可签认（Review 及以上）。</summary>
     public bool CanSign => _identity.Current.Role >= Role.Review;
 
@@ -63,15 +77,20 @@ public sealed class SignoffViewModel
     public event Action? SignoffsChanged;
 
     /// <summary>
-    /// 签认（通过/驳回 + 意见）。角色不足 / 自审 / 未知事务 → 抛出（UI 捕获展示），
-    /// 不留签认、不留审计。成功 → 审计 review-signed + 持久化 + SignoffsChanged。
+    /// 签认（通过/驳回 + 意见）。角色不足 / 未知事务 / 非已提交事务 / 自审 → 抛出
+    /// （UI 捕获展示），不留签认、不留审计。成功 → 审计 review-signed + 持久化 +
+    /// SignoffsChanged；驳回且有快照且装配了 RollbackTx → 随后 await 回滚
+    /// （失败仅记 ErrorMessage，签认记录不回撤——审计先行）。
     /// </summary>
-    public Task SignAsync(string txId, bool approved, string comment)
+    public async Task SignAsync(string txId, bool approved, string comment)
     {
         OperatorIdentity op = _identity.Current;
         _roles.Ensure(op, Role.Review);
         TxGroup group = _txGroups.FirstOrDefault(g => g.TxId == txId)
             ?? throw new InvalidOperationException($"未知事务: {txId}");
+        // 仅已提交事务可签认（最终审查修复②）：failed/open 事务无完整执行留痕，拒绝。
+        if (!group.HasCommit)
+            throw new InvalidOperationException("只能签认已提交事务");
         if (string.Equals(group.Operator, op.Account, StringComparison.OrdinalIgnoreCase))
             throw new RoleViolationException("绘制者不能自审");
 
@@ -84,6 +103,24 @@ public sealed class SignoffViewModel
         _store.Upsert(signoff);
         _store.Save();
         SignoffsChanged?.Invoke();
-        return Task.CompletedTask;
+
+        // 驳回 → 快照回滚（spec §4.1⑥/§5.4）。前提：tx-start 有快照 + 回调已装配。
+        // 回滚失败不影响已落盘的签认与审计（审计先行），仅以 ErrorMessage 提示。
+        if (!approved && group.HasSnapshot && RollbackTx is Func<string, Task> rollback)
+        {
+            try
+            {
+                await rollback(txId);
+                ErrorMessage = null;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"驳回已记录，但快照回滚失败: {ex.Message}";
+            }
+        }
+        else
+        {
+            ErrorMessage = null;
+        }
     }
 }

@@ -170,21 +170,43 @@ public class SignoffPanelHeadlessTests
     }
 
     [AvaloniaFact]
-    public void ReviewRole_RejectClick_ShowsRejectedStatus()
+    public async Task ReviewRole_RejectClick_ShowsRejectedStatus_RollsBackSnapshot()
     {
+        // Final review fix 2: reject triggers snapshot rollback (spec §4.1⑥/§5.4) —
+        // MainWindow wires Signoff.RollbackTx -> EditViewModel.UndoAsync (StepEngine,
+        // no bypass). Await EditCompleted so the rollback is deterministic.
         (MainWindow window, Fixture f) = ShowWindow(new FixedIdentity(new OperatorIdentity("reviewer", Role.Review)));
         try
         {
+            Assert.Equal(3, window.Canvas!.Items.Count); // line + tx1 line + tx2 text
             window.SignoffTxSelector!.SelectedIndex = 1;
             Dispatcher.UIThread.RunJobs();
             window.SignoffComment!.Text = "wrong layer";
-            Click(window, window.RejectButton!);
+
+            var tcs = new TaskCompletionSource();
+            void Handler() => tcs.TrySetResult();
+            window.Edit!.EditCompleted += Handler;
+            try
+            {
+                Click(window, window.RejectButton!);
+                await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally { window.Edit.EditCompleted -= Handler; }
 
             Assert.False(window.SignoffError!.IsVisible);
             ReviewSignoff s = Assert.Single(window.Signoff!.Signoffs);
             Assert.Equal(f.Tx2Id, s.TxId);
             Assert.False(s.Approved);
             Assert.Contains("rejected ✗", window.SignoffStatus!.Text);
+            // Rollback happened via the engine: tx2's text removed, rollback audit present.
+            Assert.Equal(2, window.Canvas.Items.Count);
+            Assert.Null(window.Edit.ErrorMessage);
+            AuditRecord rollback = Assert.Single(f.Audit.ReadAll(), r => r.Entry.Kind == "rollback");
+            Assert.Equal(f.Tx2Id, rollback.Entry.ParamsJson);
+            AuditRecord signed = Assert.Single(f.Audit.ReadAll(), r => r.Entry.Kind == "review-signed");
+            Assert.True(signed.Seq < rollback.Seq); // audit-first
+            Assert.True(f.Audit.VerifyChain(out string error), error);
         }
         finally { Cleanup(window, f); }
     }

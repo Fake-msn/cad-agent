@@ -20,7 +20,7 @@
 
 共 8 render items。图层：0 / AXIS / W-墙体 / WALL。
 
-再生成（临时 scratch 工程，引用 ACadSharp 3.8.35；生成器源码见本报告附录 A 的等价描述：
+再生成（临时 scratch 工程，引用 ACadSharp 3.8.35；生成器等价描述：
 `new CadDocument()` + 上表实体 + `DxfWriter.Write(fs, doc)`；块经 `new BlockRecord("MARK")` + `doc.BlockRecords.Add` + `new Insert(mark)`）。
 
 启动（验证项目目录 `%TEMP%\cadagent-plan4-verify`，`.cadagent/roles.yaml` 将本机 Windows 账号映射为 Review）：

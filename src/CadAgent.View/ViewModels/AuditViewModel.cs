@@ -21,6 +21,7 @@ public sealed class AuditEntryVm
         Kind = record.Entry.Kind;
         Target = record.Entry.Target;
         PlanRef = record.Entry.PlanRef;
+        SnapshotRef = record.Entry.SnapshotRef;
     }
 
     public long Seq { get; }
@@ -30,6 +31,9 @@ public sealed class AuditEntryVm
     public string Kind { get; }
     public string Target { get; }
     public string PlanRef { get; }
+
+    /// <summary>快照引用（tx-start 为快照文件路径；其余记录按引擎约定）。</summary>
+    public string SnapshotRef { get; }
 }
 
 /// <summary>
@@ -53,6 +57,7 @@ public sealed class TxGroup
         PlanRef = start.PlanRef;
         StartTs = start.Ts;
         Operator = start.Operator;
+        SnapshotRef = start.SnapshotRef;
         _entries = new List<AuditEntryVm> { start };
     }
 
@@ -60,6 +65,12 @@ public sealed class TxGroup
     public string PlanRef { get; }
     public DateTimeOffset StartTs { get; }
     public string Operator { get; }
+
+    /// <summary>tx-start 的快照引用（空=该事务无快照记录，驳回不可走快照回滚）。</summary>
+    public string SnapshotRef { get; }
+
+    /// <summary>tx-start 携带非空快照引用（签认驳回回滚的前提）。</summary>
+    public bool HasSnapshot => SnapshotRef.Length > 0;
 
     /// <summary>成功步骤（Kind == "step"），Target 为图元句柄。</summary>
     public IReadOnlyList<AuditEntryVm> Steps => _entries.Where(e => e.Kind == "step").ToList();

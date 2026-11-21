@@ -372,6 +372,14 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **计划3（side chat）承接状态注记**：LLM provider profile 模型+无密钥配置存储（3a-T1，CadAgent.Llm 脚手架）已在并行 side 会话交付（分支 feat/cad-agent-llm-config，commit b5f822b），**本分支不含**；计划3 其余（LLM caller/推断 Upsert 守卫、中望 COM 适配器、保真导出+审计包哈希链外部锚、厂商支持矩阵、步级 undo 扩展）仍开放，视图侧接口（IIdentityProvider/会话闸/审计存储）已为其预留注入点。
 - **T9 承接遗留（仍开放）**：审计时间线编辑后不 live-rebuild（构造期快照，重开可见新 tx——真机协议第 6 项即按重开验证）；Text 字高 UI 输入未暴露（固定 3.5，VM wrapper 已支持 height）；Move 仅 Line/Text（处理器契约，圆等移动诚实 step-failed）；InsertBlock scale/rotation UI 未暴露（VM 已支持）；Delete 两段式工具栏确认（无模态对话框基础设施）。
 
+**计划4最终审查修复波关闭（2026-11-22 记录；3 Important 全实现 + 打包小项，全套件 597 测试绿）**：
+
+- **①视图编辑边界准入闸（§4.2 硬要求兑现）**：EditViewModel.ApplyCore 在 StepEngine.Run 前镜像 CLI RunPlan——GateDetector.Inspect(session.Summarize(), EmptySupportMatrix)，Red→run-rejected 审计（Source="view"，params{level,unsupportedCount} 镜像 CLI 字段，前后哈希一致）+ T3 指引拒绝执行（无 tx）；每次 ApplyAsync 都检。Yellow 放行+结果警示分支与 CLI 逐字对齐（EmptySupportMatrix 下任何 unknown 均 unsupported，Yellow 当前不可达——支持矩阵点亮后生效）。Red 夹具经 ACadSharp ProxyEntity DxfWriter/DxfReader 往返实证可行。
+- **②驳回签认→快照回滚（§4.1⑥/§5.4 明文兑现）**：SignoffViewModel 增可选 RollbackTx 回调（MainWindow 接 EditViewModel.UndoAsync→StepEngine.Rollback，无旁路）；approved=false 且 tx-start SnapshotRef 非空→签认审计+落盘后 await 回滚（rollback 审计由引擎留痕）；回滚失败→ErrorMessage 提示但签认记录不回撤（审计先行）。加性门禁：仅已提交事务可签认（TxGroup.HasCommit；failed/open→"只能签认已提交事务"，零副作用）。TxGroup/AuditEntryVm 加性暴露 SnapshotRef/HasSnapshot。
+- **③损坏状态文件优雅降级（T10 承诺兑现，§9 不崩 UI）**：MainWindow 构造三处 try/catch——audit.db 损坏→空时间线+"审计库损坏，时间线不可用"；roles.yaml 损坏→默认 Draw 角色+提示；signoffs.json 损坏→空签认存储+提示（后续 Save 原子写覆盖修复）。提示汇总入 MainWindow.ErrorMessage + 可见 StateNote 文本块；窗口照常打开、图纸照常渲染。注：audit.db 损坏时写审计占位首次 Append 仍会失败（审计先行不变量——编辑被拒并报错，不静默绕过审计）。
+- **打包小项**：SetActiveTool 补 _editBusy 硬闸（在途编辑期间工具切换忽略，RaiseEvent 绕过 IsEnabled 亦被挡）；plan4-ui-protocol.md 悬空"附录 A"引用改为内联等价描述。
+- **仍延迟的 minors（记录在案，不阻塞）**：issues-refresh 审计 parity（视图 Refresh 不留 check 审计，CLI check 留痕）；view run-regression（视图编辑成功后不做内置规则回归警告，CLI run 有）；_diffBusy 结构性守卫（Diff 加载期间仅 IsEnabled 禁用，未加标志位硬闸）；Issues.RefreshAsync in-flight 并发守卫（按钮禁用为 UI 态）；空图层不显示于图层面板（LayersViewModel 以 renderItems 构造，无实体层不出现）；计划预览（④纠偏计划视图预览依赖计划3 LLM caller）。其余各 Task parked minors 见控制者 ledger。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm

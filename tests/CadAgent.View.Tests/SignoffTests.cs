@@ -455,4 +455,163 @@ public class SignoffTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    // ---- Final review fix 2: reject -> snapshot rollback (spec §4.1⑥/§5.4) ----
+
+    /// <summary>Seed a tx group directly in the audit store (controls SnapshotRef/termination).</summary>
+    private static void SeedTx(Fixture f, string planId, string snapshotRef, params string[] kinds)
+    {
+        var ts = DateTimeOffset.UtcNow;
+        f.Audit.Append(new AuditEntry(ts, "tester", "Draw", "s1", "plan", "tx-start",
+            f.Session.SourcePath, planId, "", "", snapshotRef, planId));
+        foreach (string kind in kinds)
+            f.Audit.Append(new AuditEntry(ts, "tester", "Draw", "s1", "plan", kind,
+                f.Session.SourcePath, planId, "", "", snapshotRef, planId));
+    }
+
+    [Fact]
+    public async Task Reject_WithSnapshot_InvokesRollbackCallback_RecordStands()
+    {
+        using var f = new Fixture();
+        SignoffViewModel vm = f.MakeVm();
+        var called = new List<string>();
+        vm.RollbackTx = txId => { called.Add(txId); return Task.CompletedTask; };
+
+        await vm.SignAsync(f.Tx1Id, approved: false, comment: "wrong layer");
+
+        Assert.Equal(new[] { f.Tx1Id }, called);
+        ReviewSignoff s = Assert.Single(vm.Signoffs);
+        Assert.False(s.Approved);
+        AuditRecord signed = Assert.Single(f.Audit.ReadAll(), r => r.Entry.Kind == "review-signed");
+        using JsonDocument p = JsonDocument.Parse(signed.Entry.ParamsJson);
+        Assert.False(p.RootElement.GetProperty("approved").GetBoolean());
+        Assert.Null(vm.ErrorMessage);
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task Reject_WiredRealEditViewModel_RollsBackDrawing_AuditBeforeRollback()
+    {
+        using var f = new Fixture();
+        // Real wiring: MainWindow sets RollbackTx -> EditViewModel.UndoAsync (StepEngine.Rollback, no bypass).
+        var edit = new EditViewModel(f.Session, f.Audit, f.Snapshots,
+            new FixedIdentity(new OperatorIdentity("reviewer", Role.Review)),
+            new RoleChecker(), f.Dir);
+        SignoffViewModel vm = f.MakeVm();
+        vm.RollbackTx = edit.UndoAsync;
+
+        await vm.SignAsync(f.Tx1Id, approved: false, comment: "reject");
+
+        Assert.Null(edit.ErrorMessage);
+        Assert.Null(vm.ErrorMessage);
+        // tx1 snapshot = pre-tx1 state (single fixture line); rollback restores it on disk + in session.
+        Assert.Equal(1, f.Session.Doc.Entities.Count);
+        Assert.Equal(1, DrawingSession.Load(f.DxfPath).Doc.Entities.Count);
+        List<AuditRecord> records = f.Audit.ReadAll().ToList();
+        AuditRecord signed = Assert.Single(records, r => r.Entry.Kind == "review-signed");
+        AuditRecord rollback = Assert.Single(records, r => r.Entry.Kind == "rollback");
+        Assert.True(signed.Seq < rollback.Seq); // audit-first: signoff trail precedes rollback
+        Assert.Equal(f.Tx1Id, rollback.Entry.ParamsJson);
+        Assert.Single(vm.Signoffs); // signoff record stands
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task Reject_NoSnapshot_NoCallback_RecordStands()
+    {
+        using var f = new Fixture();
+        SeedTx(f, "p-nosnap", snapshotRef: "", "tx-commit"); // TxId falls back to PlanRef
+        SignoffViewModel vm = f.MakeVm();
+        var called = new List<string>();
+        vm.RollbackTx = txId => { called.Add(txId); return Task.CompletedTask; };
+
+        await vm.SignAsync("p-nosnap", approved: false, comment: "r");
+
+        Assert.Empty(called);
+        ReviewSignoff s = Assert.Single(vm.Signoffs);
+        Assert.False(s.Approved);
+        Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "rollback");
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task Approve_WithCallback_NotInvoked()
+    {
+        using var f = new Fixture();
+        SignoffViewModel vm = f.MakeVm();
+        var called = new List<string>();
+        vm.RollbackTx = txId => { called.Add(txId); return Task.CompletedTask; };
+
+        await vm.SignAsync(f.Tx1Id, approved: true, comment: "ok");
+
+        Assert.Empty(called);
+        Assert.True(Assert.Single(vm.Signoffs).Approved);
+    }
+
+    [Fact]
+    public async Task Reject_CallbackFailure_ErrorMessage_RecordStands()
+    {
+        using var f = new Fixture();
+        SignoffViewModel vm = f.MakeVm();
+        vm.RollbackTx = _ => throw new InvalidOperationException("rollback boom");
+
+        await vm.SignAsync(f.Tx1Id, approved: false, comment: "r"); // must not throw
+
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.Contains("rollback boom", vm.ErrorMessage);
+        ReviewSignoff s = Assert.Single(vm.Signoffs); // audit-first: record stands despite rollback failure
+        Assert.False(s.Approved);
+        Assert.Single(f.Audit.ReadAll(), r => r.Entry.Kind == "review-signed");
+        Assert.True(File.Exists(f.SignoffPath));
+
+        // A later successful sign clears the error note.
+        vm.RollbackTx = _ => Task.CompletedTask;
+        await vm.SignAsync(f.Tx2Id, approved: true, comment: "ok");
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    // ---- Final review fix 2 guard: only committed tx signable ----
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FailedTx_Refused_NoSideEffects(bool approved)
+    {
+        using var f = new Fixture();
+        SeedTx(f, "p-failed", snapshotRef: "snap/p-failed/x.dxf", "tx-failed");
+        SignoffViewModel vm = f.MakeVm();
+        var called = new List<string>();
+        vm.RollbackTx = txId => { called.Add(txId); return Task.CompletedTask; };
+        int auditCount = f.Audit.ReadAll().Count;
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => vm.SignAsync("p-failed", approved, "x"));
+        Assert.Contains("只能签认已提交事务", ex.Message);
+
+        Assert.Empty(vm.Signoffs);
+        Assert.Empty(called);
+        Assert.Equal(auditCount, f.Audit.ReadAll().Count);
+        Assert.False(File.Exists(f.SignoffPath));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OpenTx_Refused_NoSideEffects(bool approved)
+    {
+        using var f = new Fixture();
+        SeedTx(f, "p-open", snapshotRef: "snap/p-open/x.dxf"); // tx-start only, no termination
+        SignoffViewModel vm = f.MakeVm();
+        var called = new List<string>();
+        vm.RollbackTx = txId => { called.Add(txId); return Task.CompletedTask; };
+        int auditCount = f.Audit.ReadAll().Count;
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => vm.SignAsync("p-open", approved, "x"));
+        Assert.Contains("只能签认已提交事务", ex.Message);
+
+        Assert.Empty(vm.Signoffs);
+        Assert.Empty(called);
+        Assert.Equal(auditCount, f.Audit.ReadAll().Count);
+    }
 }
