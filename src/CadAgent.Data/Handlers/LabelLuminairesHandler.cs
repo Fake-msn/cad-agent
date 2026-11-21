@@ -48,35 +48,21 @@ public sealed class LabelLuminairesHandler : IStepHandler, ISemanticAware
                 ? HandlerHelpers.ResolveLayer(s, layerName)
                 : insert.Layer ?? s.Doc.Layers.First(l => l.Name == "0");
             double cx = insert.InsertPoint.X + size, cy = insert.InsertPoint.Y + size;
-            double r = size / 2;
-            var vertices = new XYZ[6];
-            for (int k = 0; k < 6; k++)
-            {
-                double a = k * System.Math.PI / 3;
-                vertices[k] = new XYZ(cx + r * System.Math.Cos(a), cy + r * System.Math.Sin(a), 0);
-            }
-            for (int k = 0; k < 6; k++)
+            foreach (var (x1, y1, x2, y2) in GeometryKit.HexagonLines(cx, cy, size))
                 s.Doc.Entities.Add(new Line
                 {
-                    StartPoint = vertices[k],
-                    EndPoint = vertices[(k + 1) % 6],
+                    StartPoint = new XYZ(x1, y1, 0),
+                    EndPoint = new XYZ(x2, y2, 0),
                     Layer = layer,
                     LineWeight = LineWeightType.W25
                 });
-            // 水平内径线：0° 与 180° 顶点连线（长轴水平）
-            s.Doc.Entities.Add(new Line
-            {
-                StartPoint = vertices[3],
-                EndPoint = vertices[0],
-                Layer = layer,
-                LineWeight = LineWeightType.W25
-            });
             string label = $"{prefix}{n}";
+            var (tx, ty, th) = GeometryKit.LabelPlacement(cx, cy, size, label);
             var text = new TextEntity
             {
                 Value = label,
-                Height = height,
-                InsertPoint = new XYZ(cx - label.Length * height * 0.35, cy - height / 2, 0),
+                Height = th,
+                InsertPoint = new XYZ(tx, ty, 0),
                 Layer = layer
             };
             s.Doc.Entities.Add(text);
