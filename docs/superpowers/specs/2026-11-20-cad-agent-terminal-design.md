@@ -388,6 +388,14 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **3b 全部完成→3c 就绪**：中望 COM 适配器（ICadRuntime）+保真导出+审计包（含哈希链外部锚）+厂商支持矩阵；3d 布灯基准。
 - 诚实边界：步级 undo 会话内（跨会话事务快照兜底既有）；REPL 视觉反馈留计划4；IdentityOverride 仅测试注入。
 
+**计划3c 完成（COM 适配+保真导出+审计包+厂商矩阵，2026-11-21 记录；全套件 475 测试含 3 真机）**：
+- ICadRuntime 厂商无关契约（Core）；ZwcadRuntime 独立适配器项目：dynamic COM（ProgID ZWCAD.Application，不编译期引用 interop DLL）+ 专用 STA 线程任务队列串行化 + CadRuntimeException + Restart 崩溃重启。
+- 保真导出 ExportService：厂商 Open→SaveAs DWG→ACadSharp 读回计数闸口（不过闸拒绝+审计）；COM 崩溃 Restart 一次重试；无厂商→DXF 降级交付+显式风险审计（不假装等价）；CLI export + RuntimeFactory 注入。
+- 审计外部锚 AnchorService：HMACSHA256 + DPAPI CurrentUser 密钥；每次 Append 更新 anchor.json；验锚检测尾截断（DB head seq < anchor seq）与伪造（HMAC 不符）；CLI audit verify --anchor + audit package（manifest+内容，**不含 llm 配置/密钥/锚密钥**）。
+- 厂商支持矩阵 vendor-support.json：ZWCAD 2025 **Verified（2026-11-21 真机证据：GetInfo/Open/SaveAs/Close + DXF→DWG 读回往返 + 保真 E2E）**；AutoCAD CompatibleUnverified（适配器未实现）；TArch Unsupported（预留）；vendor list + export gating 警示+审计（不阻止，决策权归人）。
+- **3d 布灯基准就绪**；计划4 Avalonia 视图待写。
+- 诚实边界：锚密钥本机 DPAPI（跨机验锚需密钥分发留后续）；往返校验第一 slice 实体计数+文本抽样（几何逐点留后续）；SaveAs 默认格式（版本参数留后续）；AutoCAD 适配器未实现。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
