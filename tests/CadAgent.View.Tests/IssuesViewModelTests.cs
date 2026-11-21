@@ -174,8 +174,8 @@ public class IssuesViewModelTests
         f.SaveAdjudication(new Adjudication("R-50001-13.0.1", "tester", DateTimeOffset.UtcNow,
             "测试降级", ForceOverride: RuleForce.Informational));
         await vm.RefreshAsync();
-        Assert.Equal("#E53935", vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2").ForceBrush);
-        Assert.Equal("#9E9E9E", vm.Issues.Single(i => i.RuleId == "R-50001-13.0.1").ForceBrush);
+        Assert.Equal("#B71C1C", vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2").ForceBrush);
+        Assert.Equal("#616161", vm.Issues.Single(i => i.RuleId == "R-50001-13.0.1").ForceBrush);
         Assert.Equal(1, vm.MandatoryCount); // informational downgrade does not count
     }
 

@@ -12,11 +12,13 @@ public sealed class App : Application
 {
     private readonly string _drawingPath;
     private readonly string _projectDir;
+    private readonly IReadOnlyList<string> _skillDirs;
 
-    public App(string drawingPath, string projectDir)
+    public App(string drawingPath, string projectDir, IReadOnlyList<string>? skillDirs = null)
     {
         _drawingPath = drawingPath;
         _projectDir = projectDir;
+        _skillDirs = skillDirs ?? Array.Empty<string>();
     }
 
     public override void Initialize() => Styles.Add(new FluentTheme());
@@ -24,7 +26,7 @@ public sealed class App : Application
     public override void OnFrameworkInitializationCompleted()
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-            desktop.MainWindow = new MainWindow(new MainViewModel(_drawingPath, _projectDir));
+            desktop.MainWindow = new MainWindow(new MainViewModel(_drawingPath, _projectDir, _skillDirs));
         base.OnFrameworkInitializationCompleted();
     }
 }

@@ -10,10 +10,11 @@ public sealed class MainViewModel
 {
     private readonly DrawingSession? _session;
 
-    public MainViewModel(string drawingPath, string projectDir)
+    public MainViewModel(string drawingPath, string projectDir, IReadOnlyList<string>? skillDirs = null)
     {
         Title = Path.GetFileName(drawingPath);
         ProjectDir = projectDir;
+        SkillDirs = skillDirs ?? Array.Empty<string>();
         try
         {
             _session = DrawingSession.Load(drawingPath);
@@ -26,6 +27,9 @@ public sealed class MainViewModel
 
     /// <summary>窗口标题：图纸文件名。</summary>
     public string Title { get; }
+
+    /// <summary>--skill 目录（可重复，出现序；T10）——Issues/Adjudication/Semantic 接线用。</summary>
+    public IReadOnlyList<string> SkillDirs { get; }
 
     /// <summary>加载失败原因；null=加载成功。</summary>
     public string? ErrorMessage { get; }

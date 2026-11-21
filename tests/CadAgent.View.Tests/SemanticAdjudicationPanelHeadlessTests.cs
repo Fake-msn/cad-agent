@@ -277,7 +277,7 @@ public class SemanticAdjudicationPanelHeadlessTests
             // Issues auto-refreshed via AdjudicationsChanged linkage — no manual Refresh.
             Assert.Equal(1, window.Issues!.MandatoryCount);
             Assert.Contains("1 mandatory", window.IssuesHeader!.Text);
-            Assert.Single(Badges(window, "#E53935"));
+            Assert.Single(Badges(window, "#B71C1C"));
             Assert.Equal(2, Badges(window, "#F9A825").Count); // 13.0.1 + 13.0.2 stay Recommended
 
             Assert.True(File.Exists(f.AdjudicationsPath));

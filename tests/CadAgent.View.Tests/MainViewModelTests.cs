@@ -22,4 +22,20 @@ public class MainViewModelTests : IDisposable
         var vm = new ViewModels.MainViewModel("no-such.dxf", Path.GetTempPath());
         Assert.NotNull(vm.ErrorMessage);
     }
+
+    // ---- T10：--skill 目录承载（Program 解析 → MainViewModel → MainWindow 接线） ----
+
+    [Fact]
+    public void SkillDirs_DefaultEmpty()
+    {
+        var vm = new ViewModels.MainViewModel(_path, Path.GetTempPath());
+        Assert.Empty(vm.SkillDirs);
+    }
+
+    [Fact]
+    public void SkillDirs_CarriedInOrder()
+    {
+        var vm = new ViewModels.MainViewModel(_path, Path.GetTempPath(), new[] { "s1", "s2" });
+        Assert.Equal(new[] { "s1", "s2" }, vm.SkillDirs);
+    }
 }

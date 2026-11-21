@@ -123,6 +123,28 @@ public class MainWindowHeadlessTests
     }
 
     [AvaloniaFact]
+    public void LayerPanel_DoubleClickOnName_Isolates()
+    {
+        // T10 真机验证发现：双击图层名（旧结构在 CheckBox 内容区）被 Toggle 消费
+        // （两次翻转抵消）且 DoubleTapped 不冒泡 → 隔离失效。名字区双击必须隔离。
+        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        try
+        {
+            var row = (Control)window.LayerList!.ContainerFromIndex(1)!;
+            Point p = row.TranslatePoint(new Point(60, row.Bounds.Height / 2), window)!.Value;
+            window.MouseDown(p, MouseButton.Left);
+            window.MouseUp(p, MouseButton.Left);
+            window.MouseDown(p, MouseButton.Left);
+            window.MouseUp(p, MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+            Assert.False(window.Layers!.Layers[0].IsVisible); // ALPHA hidden
+            Assert.True(window.Layers.Layers[1].IsVisible);
+            Assert.All(window.Canvas!.VisibleItems, i => Assert.Equal("BETA", i.Layer));
+        }
+        finally { Cleanup(window, path); }
+    }
+
+    [AvaloniaFact]
     public void LayerPanel_ShowAllButton_RestoresAllLayers()
     {
         (MainWindow window, MainViewModel vm, string path) = ShowWindow();

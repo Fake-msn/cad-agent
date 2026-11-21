@@ -49,6 +49,10 @@ namespace CadAgent.View;
 /// Canvas.Refresh + Layers.Refresh（T4 承接）+ 状态栏计数。会话闸
 /// （SemaphoreSlim）共享给编辑与后台 session 读（diff/check/scan）；
 /// UI 层编辑期间禁用 Diff 切换、diff 加载期间禁用工具栏（互斥）。
+/// T10：编辑重入硬闸（_editBusy 标志——在途编辑期间画布点击/删除确认/撤销/
+/// 改层一律忽略，不依赖调度时序）；--skill 经 MainViewModel.SkillDirs 接线
+/// Issues/Adjudication/Semantic；状态栏补缩放倍率；工具栏全按钮 tooltip；
+/// 窗口标题 CadAgent — 图纸名；徽章深红/深灰 WCAG 修正（见 IssueEntry.ForceBrush）。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -66,13 +70,24 @@ public sealed class MainWindow : Window
     private string _diffSummary = "";
     private TextBlock? _semanticHeader;
 
+    /// <summary>T10：--skill 目录（MainViewModel 承载）——Issues/Adjudication/Semantic 共用。</summary>
+    private readonly IReadOnlyList<string> _skillDirs;
+
+    /// <summary>
+    /// T10 编辑重入闸（结构性保证，不依赖调度时序）：RunEditAsync 置位、完成复位；
+    /// 画布工具点击/删除确认/撤销/改层在位期间一律忽略——工具栏 IsEnabled 只是
+    /// 视觉提示，RaiseEvent/画布点击可绕过禁用态，标志位才是硬闸。
+    /// </summary>
+    private bool _editBusy;
+
     /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
     private (double X, double Y)? _moveBase;
 
-    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null)
+    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null)
     {
         DataContext = vm;
-        Title = vm.Title;
+        _skillDirs = vm.SkillDirs;
+        Title = $"CadAgent — {vm.Title}"; // T10：窗口标题含应用名 + 图纸名
         Width = 1200;
         Height = 800;
 
@@ -94,10 +109,11 @@ public sealed class MainWindow : Window
 
         // T9 会话闸：编辑/撤销（EditViewModel）与后台 session 读（diff/check/scan）
         // 共享同一互斥闸——off-thread 读绝不看到被编辑撕扯的 Doc（T6 承接）。
-        var sessionGate = new SemaphoreSlim(1, 1);
+        // T10：可注入（headless 测试持闸制造确定性 in-flight 编辑）。
+        sessionGate ??= new SemaphoreSlim(1, 1);
 
         _baseStatus = $"{vm.Title} — {items.Count} render items";
-        var status = new TextBlock { Margin = new Thickness(8, 4), Text = _baseStatus };
+        var status = new TextBlock { Margin = new Thickness(8, 4), Text = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x" };
         Status = status;
 
         var showAll = new Button { Content = "Show all", Margin = new Thickness(4, 2) };
@@ -125,8 +141,8 @@ public sealed class MainWindow : Window
         panel.Children.Add(showAll);
         panel.Children.Add(layerList); // LastChildFill：列表占满面板其余区域
 
-        // T5：右栏问题清单（in-process check；skill 目录接线留 T8/T10，当前 builtin-only）。
-        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, Array.Empty<string>(), Canvas, sessionGate);
+        // T5：右栏问题清单（in-process check；T10：--skill 目录经 MainViewModel 接线）。
+        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, _skillDirs, Canvas, sessionGate);
         Issues = issues;
         issues.IssuesChanged += UpdateIssuesPanel;
 
@@ -307,17 +323,17 @@ public sealed class MainWindow : Window
 
         var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(4, 2) };
         EditToolbar = toolbar;
-        Button Tool(string label, EditTool tool)
+        Button Tool(string label, EditTool tool, string tip)
         {
-            var b = new Button { Content = label, Margin = new Thickness(2, 0) };
+            var b = new Button { Content = label, Margin = new Thickness(2, 0), [ToolTip.TipProperty] = tip };
             b.Click += (_, _) => SetActiveTool(tool);
             toolbar.Children.Add(b);
             return b;
         }
-        Tool("Select", EditTool.Select);
-        Tool("Line", EditTool.Line);
-        Tool("Text", EditTool.Text);
-        Tool("Move", EditTool.Move);
+        Tool("Select", EditTool.Select, "选择：点击选中实体（默认工具）");
+        Tool("Line", EditTool.Line, "画线：第一击设起点，第二击提交（经审计管线）");
+        Tool("Text", EditTool.Text, "文字：先在工具栏输入内容，再点击放置（字高 3.5）");
+        Tool("Move", EditTool.Move, "移动：点击实体选中，再点击目标点（相对首点位移）");
         // Delete 两段式：首按激活工具 → 画布点击选中 → 再按本按钮确认删除。
         var delete = new Button
         {
@@ -327,9 +343,15 @@ public sealed class MainWindow : Window
         };
         delete.Click += OnDeleteClick;
         toolbar.Children.Add(delete);
-        Tool("ChangeLayer", EditTool.ChangeLayer);
-        Tool("InsertBlock", EditTool.InsertBlock);
-        var undo = new Button { Content = "Undo", Margin = new Thickness(2, 0), IsEnabled = false };
+        Tool("ChangeLayer", EditTool.ChangeLayer, "改层：点击实体选中，再从层下拉选择目标层");
+        Tool("InsertBlock", EditTool.InsertBlock, "插块：先在工具栏输入块名，再点击放置");
+        var undo = new Button
+        {
+            Content = "Undo",
+            Margin = new Thickness(2, 0),
+            IsEnabled = false,
+            [ToolTip.TipProperty] = "撤销最近一次编辑事务（StepEngine.Rollback，审计留痕）"
+        };
         undo.Click += OnUndoClick;
         toolbar.Children.Add(undo);
         UndoButton = undo;
@@ -363,7 +385,7 @@ public sealed class MainWindow : Window
         Canvas.ToolClickHandler = OnCanvasToolClick;
 
         // T8 纠偏 tab：Scan → 不明确图层列表（证据 + 类下拉 + Map + Isolate）。
-        // skill 目录接线留 T10（当前 builtin-only，与 T5 问题清单同口径）。
+        // T10：--skill 别名经 ScanAsync(_skillDirs) 接线（别名命中层不再不明确）。
         var semantic = new SemanticViewModel(vm.Session, vm.ProjectDir, Canvas, writeAudit, signoffIdentity,
             sessionGate: sessionGate);
         Semantic = semantic;
@@ -408,7 +430,7 @@ public sealed class MainWindow : Window
 
         // T8 裁定 tab：规则列表 + 强制力覆盖/豁免 + 理由/解读 + Apply；
         // 裁定成功 → 问题清单自动刷新（事件联动，无需手动 Refresh）。
-        var adjudication = new AdjudicationViewModel(vm.ProjectDir, Array.Empty<string>(), writeAudit, signoffIdentity);
+        var adjudication = new AdjudicationViewModel(vm.ProjectDir, _skillDirs, writeAudit, signoffIdentity);
         Adjudication = adjudication;
         adjudication.AdjudicationsChanged += () =>
         {
@@ -650,10 +672,24 @@ public sealed class MainWindow : Window
     /// <summary>编辑错误/引导文本（T9，可见时非空）。</summary>
     public TextBlock? EditError { get; }
 
-    /// <summary>行模板：复选框（可见性）+ 色样 + 名称（计数）。Click → Toggle。</summary>
-    private static CheckBox BuildLayerRow(LayerEntry entry, LayersViewModel layers)
+    /// <summary>
+    /// 行模板：复选框（仅勾选框本体，可见性）+ 色样 + 名称（计数）。Click → Toggle。
+    /// T10（真机验证发现）：色样/名称置于 CheckBox 之外——旧结构整行是 CheckBox
+    /// 内容，双击名字被 Toggle 消费（两次翻转抵消）且 DoubleTapped 不冒泡，
+    /// 隔离失效；现在名字/色样/空白区的指针事件不被处理，双击冒泡到 ListBox 隔离。
+    /// 行根 DataContext=entry：CheckBox 经继承 DataContext 供状态栏同步循环识别。
+    /// </summary>
+    private static StackPanel BuildLayerRow(LayerEntry entry, LayersViewModel layers)
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, DataContext = entry };
+        var check = new CheckBox
+        {
+            IsChecked = entry.IsVisible,
+            Margin = new Thickness(4, 2),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        check.Click += (_, _) => layers.Toggle(entry.Name);
+        row.Children.Add(check);
         row.Children.Add(new Border
         {
             Width = 12,
@@ -666,14 +702,7 @@ public sealed class MainWindow : Window
             Text = $"{entry.Name} ({entry.EntityCount})",
             VerticalAlignment = VerticalAlignment.Center
         });
-        var check = new CheckBox
-        {
-            Content = row,
-            IsChecked = entry.IsVisible,
-            Margin = new Thickness(4, 2)
-        };
-        check.Click += (_, _) => layers.Toggle(entry.Name);
-        return check;
+        return row;
     }
 
     /// <summary>双击行 → 隔离该图层（ListBox 先选中行，DoubleTapped 取 SelectedItem）。</summary>
@@ -700,7 +729,7 @@ public sealed class MainWindow : Window
             {
                 Text = entry.Force.ToString(),
                 FontSize = 11,
-                // 黄底黑字保证对比度；红/灰底白字。
+                // 黄底黑字保证对比度；深红/深灰底白字（T10 WCAG AA ≥4.5:1）。
                 Foreground = entry.Force == RuleForce.Recommended ? Brushes.Black : Brushes.White
             }
         };
@@ -802,9 +831,10 @@ public sealed class MainWindow : Window
         if (Status is not null)
         {
             RenderItem? selected = Canvas!.SelectedItem;
-            string status = selected is null
-                ? _baseStatus
-                : $"{_baseStatus} | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
+            // T10 状态栏收尾：图纸名/实体计数（_baseStatus）+ 缩放 + 选择 + 审计摘要。
+            string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x";
+            if (selected is not null)
+                status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
             if (_diffSummary.Length > 0) status += $" | {_diffSummary}";
             Status.Text = status;
@@ -1008,7 +1038,7 @@ public sealed class MainWindow : Window
     {
         if (Semantic is null || SemanticScanButton is null) return;
         SemanticScanButton.IsEnabled = false;
-        try { await Semantic.ScanAsync(Array.Empty<string>()); }
+        try { await Semantic.ScanAsync(_skillDirs); }
         finally { SemanticScanButton.IsEnabled = true; }
     }
 
@@ -1102,7 +1132,7 @@ public sealed class MainWindow : Window
     /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。</summary>
     private void OnDeleteClick(object? sender, RoutedEventArgs e)
     {
-        if (Edit is null || Canvas is null) return;
+        if (Edit is null || Canvas is null || _editBusy) return;
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
             _ = RunEditAsync(() => Edit.DeleteAsync(handle));
         else
@@ -1112,7 +1142,7 @@ public sealed class MainWindow : Window
     /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。</summary>
     private void OnUndoClick(object? sender, RoutedEventArgs e)
     {
-        if (Edit is null || Edit.RecentTxIds.Count == 0) return;
+        if (Edit is null || _editBusy || Edit.RecentTxIds.Count == 0) return;
         string txId = Edit.RecentTxIds[^1];
         _ = RunEditAsync(() => Edit.UndoAsync(txId));
     }
@@ -1120,7 +1150,7 @@ public sealed class MainWindow : Window
     /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。</summary>
     private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
     {
-        if (Edit is null || Canvas is null) return;
+        if (Edit is null || Canvas is null || _editBusy) return;
         if (Edit.ActiveTool == EditTool.ChangeLayer
             && Canvas.SelectedHandle is string handle
             && EditLayerSelector?.SelectedItem is string layer)
@@ -1136,6 +1166,8 @@ public sealed class MainWindow : Window
     private bool OnCanvasToolClick(double wx, double wy)
     {
         if (Edit is null || Canvas is null) return false;
+        // T10 重入闸：编辑在途时忽略画布点击（消费事件，不落预览锚点/不改选择）。
+        if (_editBusy) return true;
         switch (Edit.ActiveTool)
         {
             case EditTool.Line:
@@ -1206,6 +1238,7 @@ public sealed class MainWindow : Window
 
     private void SetEditBusy(bool busy)
     {
+        _editBusy = busy; // T10：结构性硬闸（画布点击/工具栏事件均检查）
         if (EditToolbar is not null) EditToolbar.IsEnabled = !busy;
         if (DiffToggle is not null) DiffToggle.IsEnabled = !busy;
     }

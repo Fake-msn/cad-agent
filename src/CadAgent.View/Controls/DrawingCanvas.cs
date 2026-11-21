@@ -49,6 +49,9 @@ public sealed class DrawingCanvas : Control
         ViewModel = viewModel;
         SizeChanged += OnSizeChanged;
         Focusable = true;
+        // T10（真机验证发现）：缩放/平移后图元可超出控件边界——裁剪到自身布局槽，
+        // 否则内容溢出绘制到图层/签认等相邻面板之上。
+        ClipToBounds = true;
     }
 
     /// <summary>画布视图模型（纯 C#，可单测）。</summary>

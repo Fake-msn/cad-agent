@@ -363,6 +363,15 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **最终审查修复波关闭（2026-11-21）**：cable-format 候选收紧 `^[A-Z]{2,4}(?=[-\d])` + DetectionBasis 误旗边界披露（WDZ-YJY 多段前缀/MR100×50 尺寸形仍可能误旗，recommended 级 disclosed）；slot-code 3 段纯字母尾码按白名单成员资格定槽（∈methods∉positions→方式槽；双属/双不属→不判，宁漏勿滥）——原"裸字母方式码误槽"遗留关闭；RuleLoader.LoadDirectory 内层异常保留；CA1416 经 Directory.Build.props 统一程序集属性全仓清零（Core/AssemblyInfo.cs 移除避免重复）。全套件 342 测试。
 - **2b-ii 全部完成→计划3就绪**：skill 机制（2b-ii-a）+电气/模型规则数据、步骤模板与符号元数据（2b-ii-b）齐备；计划3 承接 LLM 配置与鉴权（§8）、中望 COM 适配器、保真导出+审计包（含哈希链外部锚）、厂商支持矩阵（§11）、步级 undo，及上列已知遗留与 2a/2b-i 开放项。
 
+**计划4完成（Avalonia 视图，2026-11-22 记录；T1-T10 全交付，全套件 579 测试绿；真机验证 22 截图存证 docs/verification/）**：
+
+- 已交付：CLI `view` 进程拉起（Cli 不 using Avalonia，项目引用仅复制输出；T10 增 `--skill` 可重复直通，包校验先于拉起）；渲染第一 slice（Line/Circle/Arc/LwPolyline/Polyline2D/Text/MText/Insert 块展开含变换，图层色/真彩解析）；画布 pan/zoom/fit（滚轮锚点缩放/中键平移/视口重适配，T10 补 ClipToBounds 裁剪）；图层面板（可见性/色样/计数/双击隔离/Show all，T10 行重构修复名字区双击隔离）；问题清单（in-process check 镜像 CLI、效力徽章 T10 WCAG 修正深红/深灰、条款引用/摘录/建议/检测依据/跳过原因 tooltip、点击定位高亮居中）；审计时间线（只读回放、tx 分组 commit/failed、选择高亮、Diff 前后快照叠加 added/removed/changed、无 audit.db 不建库）；审查签认（Role>=Review 闸、自审禁止、signoffs.json + review-signed 审计、时间最新签认生效）；纠偏面板（Scan 证据清单/人工 Map HumanConfirmed 1.0/Isolate，overlay RMW 串行化）；裁定面板（镜像 CLI 校验序、孤儿拒绝、裁定成功→issues 自动联动）；手动编辑（Select/Line/Text/Move/Delete/ChangeLayer/InsertBlock/Undo **全经 EditViewModel→StepEngine，无直接 Doc 修改、无审计旁路**：view-edit 请求审计先于 tx，语义闸口镜像 CLI，失败 Reload 无部分保存；共享会话闸编辑与后台读互斥；T10 补 _editBusy 结构性重入闸——在途编辑期间画布点击/工具栏事件一律忽略）；布局收尾（状态栏图纸名/计数/缩放/选择/审计摘要、工具栏全按钮 tooltip、窗口标题 CadAgent—图纸名）。
+- **渲染 deferred（不假装已渲染）**：尺寸标注实体（Dimension）、填充（Hatch）、线型虚实（dash 图案）、OCS 镜像/挤出变换、颜色精确表（ACI 全表映射当前简化）——RenderModelBuilder 跳过并计数，后续 slice 承接。
+- **headless 覆盖范围**：View 232 测试（VM 纯逻辑单测 + Avalonia.Headless.XUnit 真实 Skia 帧控件测试）：渲染/画布/图层/问题/审计+diff/签认/纠偏+裁定/编辑全面板；T10 增重入闸（注入会话闸持闸制造确定性 in-flight）、--skill 三 VM 接线、WCAG 对比度计算、ClipToBounds、名字区双击隔离。真机视觉不依赖 headless 断言的部分走 §12 真机协议。
+- **真机验证结果（docs/verification/plan4-ui-protocol.md + 22 PNG）**：启动渲染/缩放/fit/图层隔离/问题引用/手动画线+撤销/时间线高亮+Diff/签认 Review 成功（异操作者 tx）+自审拒绝+Draw 禁用/纠偏 Scan+Map/裁定升级联动/CLI --skill 直通 均**已验证**；真机发现并 TDD 修复两缺陷（画布未裁剪溢出相邻面板、图层名双击被 Toggle 消费不隔离）。**手动验证待执行**（诚实标注）：中键拖拽平移真机手感（computer-use middle-drag 注入限制，headless 已覆盖逻辑）、Text/Move/Delete/ChangeLayer/InsertBlock 真机手感（headless 全覆盖）、高 DPI/多显示器、大图性能。两验证项目审计链 CLI verify 绿（9/7 条）。
+- **计划3（side chat）承接状态注记**：LLM provider profile 模型+无密钥配置存储（3a-T1，CadAgent.Llm 脚手架）已在并行 side 会话交付（分支 feat/cad-agent-llm-config，commit b5f822b），**本分支不含**；计划3 其余（LLM caller/推断 Upsert 守卫、中望 COM 适配器、保真导出+审计包哈希链外部锚、厂商支持矩阵、步级 undo 扩展）仍开放，视图侧接口（IIdentityProvider/会话闸/审计存储）已为其预留注入点。
+- **T9 承接遗留（仍开放）**：审计时间线编辑后不 live-rebuild（构造期快照，重开可见新 tx——真机协议第 6 项即按重开验证）；Text 字高 UI 输入未暴露（固定 3.5，VM wrapper 已支持 height）；Move 仅 Line/Text（处理器契约，圆等移动诚实 step-failed）；InsertBlock scale/rotation UI 未暴露（VM 已支持）；Delete 两段式工具栏确认（无模态对话框基础设施）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm

@@ -337,6 +337,8 @@ public static partial class CommandRouter
     /// view（计划4 T1）：进程拉起 Avalonia 视图——dotnet CadAgent.View.dll（同目录，
     /// Cli 对 View 的项目引用仅复制输出；Cli 代码不 using Avalonia）。
     /// 图纸缺失/View 程序集缺失→stderr + exit 1；启动成功即 exit 0（不等待 UI 进程）。
+    /// T10：--skill 可重复直通 View 进程（BuildViewArgs 装配）；包校验先于进程拉起
+    /// （check --skill 先例：用法错误先于任何副作用，LoadRuleSet 异常由 Run 兜底）。
     /// </summary>
     private static int ViewLaunch(string[] args, string project, TextWriter stderr)
     {
@@ -346,14 +348,28 @@ public static partial class CommandRouter
             stderr.WriteLine($"图纸文件不存在: {drawing}");
             return 1;
         }
+        var skillDirs = GetOptionValues(args, "--skill");
+        LoadRuleSet(args, stderr); // 包非法/Id 冲突→抛异常（Run 兜底 stderr + exit 1，不拉起进程）
         string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
         if (!File.Exists(viewDll))
         {
             stderr.WriteLine($"未找到视图程序集: {viewDll}");
             return 1;
         }
-        Process.Start("dotnet", $"\"{viewDll}\" --drawing \"{drawing}\" --project \"{project}\"");
+        Process.Start("dotnet", BuildViewArgs(viewDll, drawing, project, skillDirs));
         return 0;
+    }
+
+    /// <summary>
+    /// T10：View 进程参数装配（arg-builder 单测覆盖）——--skill 可重复、按出现序
+    /// 追加；不带 --skill 时与 T1 字符串逐字一致。
+    /// </summary>
+    internal static string BuildViewArgs(string viewDll, string drawing, string project,
+        IReadOnlyList<string> skillDirs)
+    {
+        var sb = new System.Text.StringBuilder($"\"{viewDll}\" --drawing \"{drawing}\" --project \"{project}\"");
+        foreach (string dir in skillDirs) sb.Append($" --skill \"{dir}\"");
+        return sb.ToString();
     }
 
     private static string SemanticOverlayPath(string agentDir) =>

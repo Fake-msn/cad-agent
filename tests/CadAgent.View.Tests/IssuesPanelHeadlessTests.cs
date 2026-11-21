@@ -109,7 +109,7 @@ public class IssuesPanelHeadlessTests
             Assert.Contains("3 skipped", window.IssuesHeader.Text);
             // Both builtin issues are Recommended -> yellow badges, no red.
             Assert.Equal(2, Badges(window, "#F9A825").Count);
-            Assert.Empty(Badges(window, "#E53935"));
+            Assert.Empty(Badges(window, "#B71C1C"));
             // Clause citation visible in the row text.
             List<TextBlock> texts = window.GetVisualDescendants().OfType<TextBlock>().ToList();
             Assert.Contains(texts, t => t.Text?.Contains("R-50001-5.0.2") == true && t.Text.Contains("5.0.2"));
@@ -168,7 +168,7 @@ public class IssuesPanelHeadlessTests
 
             Assert.Equal(1, window.Issues!.MandatoryCount);
             Assert.Contains("1 mandatory", window.IssuesHeader!.Text);
-            Assert.Single(Badges(window, "#E53935")); // Mandatory red
+            Assert.Single(Badges(window, "#B71C1C")); // Mandatory red
             Assert.Single(Badges(window, "#F9A825")); // remaining Recommended yellow
         }
         finally { Cleanup(window, f); }

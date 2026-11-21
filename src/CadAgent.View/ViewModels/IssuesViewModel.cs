@@ -45,12 +45,15 @@ public sealed class IssueEntry
     public string Suggestion { get; }
     public string DetectionBasis { get; }
 
-    /// <summary>效力徽章色：Mandatory 红 #E53935 / Recommended 黄 #F9A825 / Informational 灰 #9E9E9E。</summary>
+    /// <summary>
+    /// 效力徽章色（T10 WCAG 修正）：Mandatory 深红 #B71C1C / Recommended 黄 #F9A825 /
+    /// Informational 深灰 #616161——深红/深灰底白字、黄底黑字对比度均 ≥ 4.5:1（AA）。
+    /// </summary>
     public string ForceBrush => Force switch
     {
-        RuleForce.Mandatory => "#E53935",
+        RuleForce.Mandatory => "#B71C1C",
         RuleForce.Recommended => "#F9A825",
-        _ => "#9E9E9E",
+        _ => "#616161",
     };
 }
 
