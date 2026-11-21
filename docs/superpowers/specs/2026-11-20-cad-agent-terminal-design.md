@@ -506,3 +506,4 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 天正实体扩展 PR #1337（推进中，含版本风险记录）：https://github.com/DomCR/ACadSharp/pull/1337
 - 开源 DWG/DXF 库对比：https://m.blog.csdn.net/ultramand/article/details/161655656 、https://www.cnblogs.com/znlgis/p/19466681
 - 本机证据：ZWCAD 2025 COM 真机探针（2026-11-20）；安装目录 .NET 互操作程序集；试用授权文件
+- **ZWCAD CUIX 竞态事故与修复（2026-11-22）**：真机测试4类xUnit默认并行→多ZWCAD实例共享单用户profile→CUIX加载/保存竞态损坏→启动弹模态修复框（挂起无人值守自动化）。历史根因(a)带开文档Quit已由side chat修（Close→Quit）；根因(b)并发竞态本次修：真机测试串行化（xunit.runner.json parallelizeTestCollections=false + [Collection("ZwcadLive")]）+ ZwcadRuntime.EnsureNoForeignInstance 启动守卫（已有实例等待10s退出否则拒绝，ProcessNames seam可测）。**约束：真机测试期间不得并行其他ZWCAD自动化/人工会话**。证据：outputs/cuix-evidence-20261122/（备份+哈希清单；局限注记：保留字节为竞态后clean write，损坏中间态已被覆盖，根因链=截图+时间戳+并行配置+ZCR残留）。

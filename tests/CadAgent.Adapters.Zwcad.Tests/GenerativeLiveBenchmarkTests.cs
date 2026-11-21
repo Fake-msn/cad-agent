@@ -16,6 +16,7 @@ namespace CadAgent.Adapters.Zwcad.Tests;
 /// 兑现"agent 操作 CAD 绘制"本义 + 生成式能力验证。
 /// </summary>
 [Trait("Category", "RequiresZwcad")]
+[Collection("ZwcadLive")]
 public class GenerativeLiveBenchmarkTests : IDisposable
 {
     private readonly string _project = Path.Combine(Path.GetTempPath(), $"genlive-{Guid.NewGuid():N}");

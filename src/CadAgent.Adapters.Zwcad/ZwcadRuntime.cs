@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using CadAgent.Core.Cad;
 
 namespace CadAgent.Adapters.Zwcad;
@@ -48,6 +49,7 @@ public sealed class ZwcadRuntime : ICadRuntime
     {
         if (_app == null)
         {
+            EnsureNoForeignInstance();
             var type = Type.GetTypeFromProgID(ProgId)
                 ?? throw new CadRuntimeException($"ZWCAD COM 未注册: {ProgId}");
             _app = Activator.CreateInstance(type)
@@ -55,6 +57,26 @@ public sealed class ZwcadRuntime : ICadRuntime
             _app.Visible = false;
         }
         return _app;
+    }
+
+    // 2026-11-22 CUIX 损坏事故根因(b)：并发 ZWCAD 实例共享同一用户 profile，
+    // CUIX 加载/保存竞态→损坏→下次启动弹模态修复框（挂起无人值守自动化）。
+    // 启动前守卫：已有实例则等待其退出（真机测试串行衔接的残留窗口），超时拒绝。
+    internal static Func<string[]> ProcessNames =
+        () => Process.GetProcesses().Select(p => p.ProcessName).ToArray();
+    internal static TimeSpan GuardWait = TimeSpan.FromSeconds(10);
+
+    internal static void EnsureNoForeignInstance()
+    {
+        var deadline = DateTime.UtcNow + GuardWait;
+        while (ProcessNames().Any(n => n.Equals("ZWCAD", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (DateTime.UtcNow >= deadline)
+                throw new CadRuntimeException(
+                    "检测到已有 ZWCAD 进程：并发实例共享用户配置会竞态损坏 ZWCAD.CUIX。" +
+                    "请关闭已有 ZWCAD（含人工会话）后重试；真机测试须串行运行。");
+            Thread.Sleep(250);
+        }
     }
 
     public RuntimeInfo GetInfo() => Run(() =>

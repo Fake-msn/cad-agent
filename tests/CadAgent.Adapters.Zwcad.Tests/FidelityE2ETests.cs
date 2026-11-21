@@ -14,6 +14,7 @@ namespace CadAgent.Adapters.Zwcad.Tests;
 /// ACadSharp 读回实体数/文本内容比对→审计 export-committed→审计包→验锚 Ok。
 /// </summary>
 [Trait("Category", "RequiresZwcad")]
+[Collection("ZwcadLive")]
 public class FidelityE2ETests : IDisposable
 {
     private readonly string _project = Path.Combine(Path.GetTempPath(), $"fidelity-{Guid.NewGuid():N}");

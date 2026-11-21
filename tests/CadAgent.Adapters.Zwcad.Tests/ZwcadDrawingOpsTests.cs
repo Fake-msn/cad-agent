@@ -12,6 +12,7 @@ namespace CadAgent.Adapters.Zwcad.Tests;
 /// EntityCount → SaveAs DWG → ACadSharp 读回断言（几何真正落在厂商会话）。
 /// </summary>
 [Trait("Category", "RequiresZwcad")]
+[Collection("ZwcadLive")]
 public class ZwcadDrawingOpsTests : IDisposable
 {
     private readonly string _project = Path.Combine(Path.GetTempPath(), $"zwops-{Guid.NewGuid():N}");
