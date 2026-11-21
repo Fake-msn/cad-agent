@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using CadAgent.Core;
 using CadAgent.Data;
+using CadAgent.Data.Handlers;
 using CadAgent.Data.Rules;
 using CadAgent.Data.Semantic;
 using YamlDotNet.Serialization;
@@ -135,7 +136,7 @@ public static partial class CommandRouter
             if (overlay is null) return 1;
             semanticGate = new SemanticGate(overlay);
         }
-        var result = Engine(agentDir, audit, semanticGate, null, SymbolImportHandler(args)).Run(plan, drawing, session);
+        var result = Engine(agentDir, audit, semanticGate, null, SkillRunImportHandler(skillDir, args)).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
@@ -319,6 +320,19 @@ public static partial class CommandRouter
     /// 尾随无值选项（2b-ii-b Task 2）：stderr 非 null 时警告"忽略无值选项 {name}"
     /// 并宽容继续（不 exit 1）；stderr 为 null（默认）保持旧静默行为。
     /// </summary>
+    /// <summary>
+    /// 3h：skill run 的符号导入处理器——包目录为位置参数（非 --skill），故以 skillDir 为主
+    /// 合并 --skill 附加包（去重）；模板 insert-symbol 步骤自此可解析本包符号。
+    /// </summary>
+    private static IStepHandler SkillRunImportHandler(string skillDir, string[] args)
+    {
+        var dirs = new List<string> { skillDir };
+        dirs.AddRange(GetOptionValues(args, "--skill"));
+        var packages = dirs.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(SkillLoader.LoadDirectory).ToList();
+        return new ImportSymbolHandler(packages);
+    }
+
     private static List<string> GetOptionValues(string[] args, string name, TextWriter? stderr = null)
     {
         var values = new List<string>();

@@ -1,0 +1,13 @@
+# 灯具符号落图模板（3h）：跨文档导入 interior-244 符号库灯具并插入指定点位。
+# symbol 取 symbols.yaml 名称（如 筒灯/吸顶灯/艺术吊灯）；执行经 insert-symbol 处理器
+# （建块/复用块+Insert，审计/快照管线）。语义确认仍走 scan/map（导入为几何级）。
+templates:
+  - name: place-luminaire
+    description: 导入 skill 符号库灯具并插入点位（跨文档符号导入，JGJ/T 244-2011 表4.0.9 符号）
+    params: [symbol, x, y]
+    sequence:
+      - kind: insert-symbol
+        params:
+          symbol: "{{symbol}}"
+          x: "{{x}}"
+          y: "{{y}}"
