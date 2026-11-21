@@ -1,0 +1,12 @@
+<Project>
+
+  <!-- 产品 Windows 目标（spec）：程序集级平台标注统一施加于全部项目（含测试程序集），
+       消除跨程序集调用 Windows-only API 的 CA1416 警告（终审修复波裁定 4）。
+       原 src/CadAgent.Core/AssemblyInfo.cs 的手写属性移除，避免与此处生成属性重复。 -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.Versioning.SupportedOSPlatformAttribute">
+      <_Parameter1>windows</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

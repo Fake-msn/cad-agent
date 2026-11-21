@@ -1,0 +1,13 @@
+# 示例步骤模板（入库示例，非真实院标）——演示 skill run 模板实例化（2b-ii-b Task 8）。
+# 占位符 "{{name}}" 整串精确替换为 --args 对应值（数值保持数值）；缺参拒绝。
+templates:
+  - name: lay-line
+    description: 按起止坐标敷设一条直线（示例模板，仅用于演示 skill run 机制）
+    params: [x1, y1, x2, y2]
+    sequence:
+      - kind: add-line
+        params:
+          x1: "{{x1}}"
+          y1: "{{y1}}"
+          x2: "{{x2}}"
+          y2: "{{y2}}"

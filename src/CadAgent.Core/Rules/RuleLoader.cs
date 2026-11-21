@@ -27,7 +27,7 @@ public static class RuleLoader
         }
         catch (YamlException ex)
         {
-            throw new InvalidRuleException($"invalid rule YAML: {ex.Message}");
+            throw new InvalidRuleException($"invalid rule YAML: {ex.Message}", ex);
         }
 
         if (dto is null)
@@ -46,7 +46,7 @@ public static class RuleLoader
             }
             catch (InvalidRuleException ex)
             {
-                throw new InvalidRuleException($"{Path.GetFileName(path)}: {ex.Message}");
+                throw new InvalidRuleException($"{Path.GetFileName(path)}: {ex.Message}", ex);
             }
         }
         return rules;

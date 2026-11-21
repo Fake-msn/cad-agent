@@ -1,0 +1,21 @@
+# R-50786-3.4.3.yaml —— excerpt 逐字自 extraction-electrical.md D8（3.4.3，JSON页10）。
+# 三白名单 params 逐字自 D9（4.2.1 表4.2.1-1/-2/-3，14+11+11 项，顺序原样）。
+# 情态冲突在案（§7-N2）：3.4.3"应" vs 4.2.1"宜"，两条均逐字在案，按较严的 3.4.3"应"执行；
+# force recommended 由规则数据承载（第一 slice 不升 mandatory，裁定升级走 rule adjudicate）。
+id: R-50786-3.4.3
+source:
+  standard: "GB/T 50786-2012"
+  clause: "3.4.3"
+  excerpt: "照明灯具安装方式、线缆敷设方式及敷设部位，应按本标准表 4.2.1-1～表 4.2.1-3 的文字符号标注"
+  verification: source-text
+modal: "应（3.4.3）／宜（4.2.1）——情态冲突在案，按较严应执行"
+force: recommended
+severity: high
+scope: { discipline: electrical, drawingType: any }
+check:
+  type: slot-code-whitelist
+  params:
+    layingMethods: [SC, MT, CP, PC, FPC, KPC, CT, CL, MR, PR, M, DB, TC, CE]
+    layingPositions: [AB, AC, CE, SCE, WS, RS, CC, BC, CLC, WC, FC]
+    luminaireMounts: [SW, CS, DS, W, C, R, CR, WR, S, CL, HM]
+suggestion: "敷设方式/敷设部位/灯具安装方式代码按表4.2.1-1～表4.2.1-3 白名单标注（D9 逐字）；CE/CL 一码多义按槽位消歧；情态冲突在案，按较严 3.4.3 应执行"

@@ -1,0 +1,17 @@
+# R-448-5.4.3.yaml —— excerpt 逐字自 extraction-model.md R1（5.4.3 主干，JSON p22–p23；
+# 简报范围至"隔开"止，款内列举 deferred；下划线字符源 span 确为 "_"，已复核，无 F2 旗标）。
+# 专业代码白名单在 GB/T 51301（本标准未给出，阻塞项 B3）→ 结构校验 only（deferred 注记）。
+id: R-448-5.4.3
+source:
+  standard: "JGJ/T 448-2018"
+  clause: "5.4.3"
+  excerpt: "工程图纸命名宜由专业代码、图纸编号、图纸名称、描述等字段依次组成，以下划线\"_\"隔开，字段内部的词组以连字符\"-\"隔开"
+  verification: source-text
+modal: "宜"
+force: recommended
+severity: medium
+scope: { discipline: any, drawingType: any }
+check:
+  type: file-naming
+  params: {}
+suggestion: "图纸文件名按 专业代码_图纸编号_图纸名称[_描述] 命名，字段内词组以'-'隔开（如 A_001_平面图）；专业代码白名单（GB/T 51301）未提供 deferred——结构校验 only；款3'简要表达特征'不可机检，留人工审查"

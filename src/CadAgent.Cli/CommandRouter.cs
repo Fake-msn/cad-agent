@@ -1,18 +1,15 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 using CadAgent.Core;
 using CadAgent.Data;
 using CadAgent.Data.Checks;
 using CadAgent.Data.Handlers;
 using CadAgent.Data.Rules;
 using CadAgent.Data.Semantic;
-using YamlDotNet.Serialization;
-using YamlDotNet.Serialization.NamingConventions;
 
 namespace CadAgent.Cli;
 
-public static class CommandRouter
+public static partial class CommandRouter
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
@@ -43,14 +40,14 @@ public static class CommandRouter
             switch (positional[0])
             {
                 case "intake": return Intake(positional[1], agentDir, session, stdout, stderr);
-                case "run": return RunPlan(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
+                case "run": return RunPlan(args, positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rollback": return Rollback(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "audit": return AuditVerify(agentDir, stdout, stderr);
                 case "roles": return RolesShow(agentDir, stdout);
                 case "semantic": return Semantic(args, positional, agentDir, session, stdout, stderr);
                 case "check": return Check(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
-                case "skill": return Skill(positional, agentDir, stdout, stderr);
+                case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
                 default: return Usage(stderr);
             }
         }
@@ -83,28 +80,6 @@ public static class CommandRouter
     {
         int i = Array.IndexOf(args, name);
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
-    }
-
-    /// <summary>可重复选项的全部值（按出现序）——--skill 可重复（2b-ii-a T6）。</summary>
-    private static List<string> GetOptionValues(string[] args, string name)
-    {
-        var values = new List<string>();
-        for (int i = 0; i + 1 < args.Length; i++)
-            if (args[i] == name) values.Add(args[i + 1]);
-        return values;
-    }
-
-    /// <summary>
-    /// 规则集装配（2b-ii-a T6）：builtin + --skill 包（可重复，显式目录路径，按出现序）
-    /// →SkillSet.Compose。adjudicate 孤儿校验消费 ContainsRule；T7 check/scan --skill
-    /// 接线复用同一加载路径（check 消费 AllRules/RulePackVersion，scan 消费 MergedAliases）。
-    /// skill 目录非法/规则 Id 冲突→异常由 Run 兜底 stderr + exit 1
-    /// （用法错误不审计——与 adjudicate 互斥校验先例一致，校验先于任何副作用）。
-    /// </summary>
-    private static SkillSet LoadRuleSet(string[] args)
-    {
-        var packages = GetOptionValues(args, "--skill").Select(SkillLoader.LoadDirectory).ToList();
-        return SkillSet.Compose(BuiltinRules.Load(), packages);
     }
 
     private static string RequireOption(string[] args, string name) =>
@@ -156,9 +131,22 @@ public static class CommandRouter
         new(audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
             Identity(agentDir), new RoleChecker(), HandlerRegistry.All(), semanticGate);
 
-    private static int RunPlan(string planPath, string drawingPath, string agentDir,
+    /// <summary>
+    /// run --skill 接线（2b-ii-b T8，加性）：入口先经 LoadRuleSet 校验包加载
+    /// （builtin + --skill 包，Id 冲突/包非法→InvalidSkillException→Run 兜底
+    /// stderr + exit 1，用法错误先于 OpenAudit/Load——check --skill 冲突先例）。
+    /// 第一 slice 仅校验包加载 + tx 审计留痕：闸口 overlay 逻辑不变（别名影响 scan
+    /// 不影响 run 闸口存在性检查）；步骤模板执行走 skill run，run 不做模板实例化。
+    /// 带 --skill 时 tx-start/tx-commit 审计 paramsJson 由裸 planId 升级为
+    /// {planId, rulePackVersion}（RulePackAuditDecorator，SkillSet.RulePackVersion
+    /// 复现证据，与 check/scan 同口径）；不带 --skill 行为逐字不变。
+    /// 回归检查仍 builtin-only（第一 slice 裁定：run --skill 不评估包规则）。
+    /// </summary>
+    private static int RunPlan(string[] args, string planPath, string drawingPath, string agentDir,
         string session, TextWriter stdout, TextWriter stderr)
     {
+        var ruleSet = LoadRuleSet(args, stderr);
+        bool skillLoaded = GetOptionValues(args, "--skill").Count > 0;
         var plan = StepPlanParser.Parse(File.ReadAllText(planPath));
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
@@ -206,7 +194,12 @@ public static class CommandRouter
             if (overlay is null) return 1;
             semanticGate = new SemanticGate(overlay);
         }
-        var result = Engine(agentDir, audit, semanticGate).Run(plan, drawing, session);
+        // 带 --skill：tx 审计 paramsJson 加性携带 rulePackVersion（装饰器只改写
+        // tx-start/tx-commit，其余记录原样透传）；不带 --skill：直传，行为不变。
+        IAuditStore engineAudit = skillLoaded
+            ? new RulePackAuditDecorator(audit, ruleSet.RulePackVersion)
+            : audit;
+        var result = Engine(agentDir, engineAudit, semanticGate).Run(plan, drawing, session);
         if (!result.Ok) drawing.Reload();
         else RunRegressionCheck(drawing, overlay, agentDir, session, audit, op, stderr);
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -405,7 +398,7 @@ public static class CommandRouter
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
-        var ruleSet = LoadRuleSet(args);
+        var ruleSet = LoadRuleSet(args, stderr);
         string overlayPath = SemanticOverlayPath(agentDir);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
@@ -519,134 +512,23 @@ public static class CommandRouter
         return 0;
     }
 
-    /// <summary>
-    /// semantic promote（2b-ii-a T7）：项目人工确认映射提升为 skill 包别名。
-    /// 项目 overlay.Mappings 须含该层（OrdinalIgnoreCase，与 ConfirmMapping 同口径），
-    /// 无映射→stderr + exit 1（用法错误不审计——map"未找到叠加层"先例）；
-    /// overlay 损坏→LoadOrReject 审计拒绝；skill 目录非法→LoadOrReject 审计拒绝。
-    /// 校验先于任何写入（validation-before-side-effects）：先读 manifest 文本、匹配
-    /// 列 0 version 行并计算 newVersion；无 version 行（如 flow-style manifest，loader
-    /// 可加载）→InvalidSkillException→Run 兜底 stderr + exit 1，零变更（aliases/manifest
-    /// 不动、不审计）。随后写入顺序（brief）：aliases.yaml upsert（YamlDotNet 序列化，
-    /// 保持 {aliases:[{layerName,class}]} 结构；同层名替换 class，否则追加）→
-    /// manifest version patch+1（正则仅命中列 0 version 行末位数字组，保留引号）→
-    /// 审计 semantic-promoted（Source="semantic"，paramsJson={layer,class,skill,newVersion}；
-    /// promote 不改图纸，哈希不可得→空串，adjudicate 先例）→exit 0。
-    /// 两阶段提交（最终审查裁定）：先完整暂存 aliases.yaml.tmp + skill.yaml.tmp，两者都
-    /// 成功后才顺序 Move——任何 Move 之前的序列化/写入失败→零变更；中途 Move 失败→
-    /// semantic-promote-failed 审计（paramsJson={layer,skill,error,movedFiles}，嵌套守卫
-    /// 尽力留痕）+ stderr + exit 1。成功路径写入后审计，SemanticMap 先例。
-    /// </summary>
-    private static int SemanticPromote(string[] args, string agentDir, string session,
-        TextWriter stdout, TextWriter stderr)
-    {
-        string layer = RequireOption(args, "--layer");
-        string skillDir = RequireOption(args, "--skill");
-        string overlayPath = SemanticOverlayPath(agentDir);
-        using var audit = OpenAudit(agentDir);
-        var op = Identity(agentDir).Current;
-        var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
-        if (overlay is null) return 1;
-        var mapping = overlay.Mappings.FirstOrDefault(m =>
-            string.Equals(m.LayerName, layer, StringComparison.OrdinalIgnoreCase));
-        if (mapping is null)
-        {
-            stderr.WriteLine($"图层 {layer} 无项目人工确认映射（overlay.Mappings），请先 semantic scan/map");
-            return 1;
-        }
-        var package = LoadOrReject(() => SkillLoader.LoadDirectory(skillDir), skillDir, session, audit, op, stderr);
-        if (package is null) return 1;
-
-        // 校验先于任何暂存/Move：先读 manifest、匹配列 0 version 行、算出
-        // newVersion/bumped 文本。flow-style 等无 version 行的 manifest（loader 可加载）
-        // 在此抛 InvalidSkillException→stderr + exit 1，aliases/manifest/审计零变更。
-        string manifestPath = Path.Combine(skillDir, "skill.yaml");
-        string manifestText = File.ReadAllText(manifestPath);
-        var match = ManifestVersionLine.Match(manifestText);
-        if (!match.Success)
-            throw new InvalidSkillException("skill.yaml: version line not found, cannot patch bump");
-        string newVersion = string.Create(System.Globalization.CultureInfo.InvariantCulture,
-            $"{match.Groups["major"].Value}.{match.Groups["minor"].Value}.{int.Parse(match.Groups["patch"].Value, System.Globalization.CultureInfo.InvariantCulture) + 1}");
-        // 正则仅替换列 0 version 行末位数字组（MatchEvaluator 避免替换串 $ 歧义），
-        // 其余字节原样保留；loader 已校验 digits.digits.digits。
-        string bumped = ManifestVersionLine.Replace(manifestText,
-            m => $"{m.Groups["prefix"].Value}{newVersion}{m.Groups["suffix"].Value}", 1);
-
-        // aliases upsert：同层名（OrdinalIgnoreCase）替换 class，否则追加（保持原有序）。
-        // 注意：upsert 经 YamlDotNet 重新序列化整个文件——原文件的注释与额外未知键会被
-        // 丢弃（计划规定的 YamlDotNet 行为，非增量文本编辑）。
-        var aliases = package.Aliases.ToList();
-        int i = aliases.FindIndex(a => string.Equals(a.LayerName, layer, StringComparison.OrdinalIgnoreCase));
-        var upserted = new SkillAlias(layer, mapping.Class);
-        if (i >= 0) aliases[i] = upserted; else aliases.Add(upserted);
-        string aliasesYaml = YamlSerializer.Serialize(new
-        {
-            aliases = aliases.Select(a => new { layerName = a.LayerName, @class = a.Class.ToString() }).ToList()
-        });
-
-        // 两阶段提交（最终审查裁定 Important #1）：先把两个 .tmp 完整暂存（序列化/写入
-        // 错误发生在任何 Move 之前→零变更），全部成功后再顺序 Move。中途 Move 失败
-        // （Windows 文件锁/磁盘满等）→尽力追加 semantic-promote-failed 审计
-        // （movedFiles 如实记录已 Move 的文件——已变更未升版的状态可追溯）+ stderr + exit 1。
-        string aliasesPath = Path.Combine(skillDir, "aliases.yaml");
-        var movedFiles = new List<string>();
-        try
-        {
-            // 阶段 1：完整暂存两个 .tmp（保证末尾换行），此阶段失败不得有任何 Move。
-            File.WriteAllText(aliasesPath + ".tmp", EnsureTrailingNewline(aliasesYaml));
-            File.WriteAllText(manifestPath + ".tmp", EnsureTrailingNewline(bumped));
-            // 阶段 2：顺序 Move（tmp+Move 覆盖，SemanticOverlay.Save 先例）。
-            File.Move(aliasesPath + ".tmp", aliasesPath, overwrite: true);
-            movedFiles.Add("aliases.yaml");
-            File.Move(manifestPath + ".tmp", manifestPath, overwrite: true);
-            movedFiles.Add("skill.yaml");
-        }
-        catch (Exception ex)
-        {
-            // 嵌套守卫（run-regression 先例）：失败审计写入自身再抛异常时降级为仅 stderr
-            // 留痕，绝不重抛——promote 失败路径必须以 stderr + exit 1 收场。
-            try
-            {
-                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-                    session, "semantic", "semantic-promote-failed", layer,
-                    JsonSerializer.Serialize(new { layer, skill = skillDir, error = ex.Message, movedFiles }),
-                    "", "", "", ""));
-            }
-            catch (Exception auditEx)
-            {
-                stderr.WriteLine($"promote 失败审计写入失败: {auditEx.Message}");
-            }
-            stderr.WriteLine(ex.Message);
-            return 1;
-        }
-
-        audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-            session, "semantic", "semantic-promoted", layer,
-            JsonSerializer.Serialize(new { layer, @class = mapping.Class.ToString(), skill = skillDir, newVersion }),
-            "", "", "", ""));
-        stdout.WriteLine(JsonSerializer.Serialize(new
-        {
-            layer,
-            @class = mapping.Class.ToString(),
-            skill = skillDir,
-            newVersion
-        }, SemanticJsonOpts));
-        return 0;
-    }
-
     private static string AdjudicationsPath(string agentDir) =>
         Path.Combine(agentDir, "adjudications.json");
 
     /// <summary>
     /// 规范引擎装配（T3 评审裁定带入 T7 的装配守卫）：重复 CheckType 注册直接抛异常，
     /// 防止 RuleEngine 字典 last-wins 静默丢失检查器。异常由 Run 兜底→stderr + exit 1。
+    /// 2b-ii-b T6：注册电气/模型 5 新检查器（T3-T5 交付）——builtin 仅 50001 类型，
+    /// builtin-only 行为不变；--skill 电气/模型包规则自此可评估（此前 NoChecker 跳过）。
     /// </summary>
     private static RuleEngine StandardsEngine()
     {
         IRuleChecker[] checkers =
         {
             new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
-            new ElevationChecker(), new LayerNameChecker()
+            new ElevationChecker(), new LayerNameChecker(),
+            new TextHeightMinChecker(), new CableFormatChecker(), new SlotCodeChecker(),
+            new LuminaireFormatChecker(), new FileNamingChecker()
         };
         var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
             .FirstOrDefault(g => g.Count() > 1);
@@ -654,26 +536,6 @@ public static class CommandRouter
             throw new InvalidOperationException($"重复注册检查器 CheckType: {duplicate.Key}");
         return new RuleEngine(checkers);
     }
-
-    /// <summary>
-    /// 结构化跳过 stderr 通道（2b-ii-a T5，check/run-regression 共用）：
-    /// "跳过: [{Category}] {RuleId}: {Message}"——保留旧 "跳过: " 前缀与规则 Id
-    /// （既有测试子串兼容）；Message 保留旧 reason 文案子串。
-    /// </summary>
-    private static void WriteStructuredSkips(CheckSummary summary, TextWriter stderr)
-    {
-        foreach (var skip in summary.StructuredSkips ?? Array.Empty<SkipReason>())
-            stderr.WriteLine($"跳过: [{skip.Category}] {skip.RuleId}: {skip.Message}");
-    }
-
-    /// <summary>
-    /// 审计 paramsJson skippedReasons 结构化数组（2b-ii-a T5）：[{category, ruleId, message}]
-    /// （camelCase 匿名投影，与 paramsJson 其余字段命名一致；stdout 契约不变）。
-    /// </summary>
-    private static object StructuredSkipAuditArray(CheckSummary summary) =>
-        (summary.StructuredSkips ?? Array.Empty<SkipReason>())
-            .Select(s => new { category = s.Category, ruleId = s.RuleId, message = s.Message })
-            .ToList();
 
     /// <summary>
     /// check：LoadOrReject 图纸→overlay 存在则 Load（损坏→audited refusal）→裁定
@@ -699,7 +561,7 @@ public static class CommandRouter
     private static int Check(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
-        var ruleSet = LoadRuleSet(args);
+        var ruleSet = LoadRuleSet(args, stderr);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
         var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
@@ -824,7 +686,7 @@ public static class CommandRouter
         // 孤儿裁定校验（2b-ii-a T6）：ruleId 必须在加载集（builtin + --skill 包）。
         // 校验顺序契约：互斥→force/exempt 必填→reason 必填→force 合法性→孤儿——
         // 先于 OpenAudit/Load/Upsert/Append/Save，未知 Id 不留审计、不落盘。
-        var ruleSet = LoadRuleSet(args);
+        var ruleSet = LoadRuleSet(args, stderr);
         if (!ruleSet.ContainsRule(ruleId))
         {
             stderr.WriteLine($"未知规则 Id: {ruleId}（不在 builtin+skill 规则集中，拒绝孤儿裁定）");
@@ -877,104 +739,43 @@ public static class CommandRouter
         return 0;
     }
 
-    /// <summary>
-    /// skill 命令族分发（2b-ii-a T7）。子命令校验沿用 semantic/rule 族模式：
-    /// 缺失/未知子命令一律 stderr + exit 1，不落入 Usage 歧义。
-    /// </summary>
-    private static int Skill(string[] positional, string agentDir, TextWriter stdout, TextWriter stderr)
-    {
-        if (positional.Length < 2)
-        {
-            stderr.WriteLine("skill 需要子命令: list|validate");
-            return 1;
-        }
-        return positional[1] switch
-        {
-            "list" => SkillList(agentDir, stdout, stderr),
-            "validate" => SkillValidate(positional, stdout),
-            _ => UnknownSkillSubcommand(positional[1], stderr)
-        };
-    }
-
-    private static int UnknownSkillSubcommand(string sub, TextWriter stderr)
-    {
-        stderr.WriteLine($"未知 skill 子命令: {sub}（可用: list|validate）");
-        return 1;
-    }
-
-    /// <summary>
-    /// skill list（2b-ii-a T7）：扫描 project/.cadagent/skills/*/（每子目录一个包，
-    /// Ordinal 序）→JSON [{name, version, ruleCount, aliasCount}]→exit 0。
-    /// 目录缺失→空列表 exit 0；非法包→跳过 + stderr 警告（裁定：list 属信息性命令，
-    /// 不因个别坏包崩溃整体列表）。只读不入审计（roles show / semantic show 先例）。
-    /// </summary>
-    private static int SkillList(string agentDir, TextWriter stdout, TextWriter stderr)
-    {
-        string skillsRoot = Path.Combine(agentDir, "skills");
-        var entries = new List<object>();
-        if (Directory.Exists(skillsRoot))
-        {
-            foreach (string dir in Directory.EnumerateDirectories(skillsRoot).OrderBy(d => d, StringComparer.Ordinal))
-            {
-                try
-                {
-                    var pkg = SkillLoader.LoadDirectory(dir);
-                    entries.Add(new
-                    {
-                        name = pkg.Manifest.Name,
-                        version = pkg.Manifest.Version,
-                        ruleCount = pkg.Rules.Count,
-                        aliasCount = pkg.Aliases.Count
-                    });
-                }
-                catch (InvalidSkillException ex)
-                {
-                    stderr.WriteLine($"警告: 跳过非法 skill 包 '{Path.GetFileName(dir)}': {ex.Message}");
-                }
-            }
-        }
-        stdout.WriteLine(JsonSerializer.Serialize(entries, SemanticJsonOpts));
-        return 0;
-    }
-
-    /// <summary>
-    /// skill validate（2b-ii-a T7）：SkillLoader.LoadDirectory→stdout 摘要
-    /// {name, version, ruleCount, aliasCount}→exit 0；InvalidSkillException/缺目录参数
-    /// →异常由 Run 兜底 stderr + exit 1。只读不入审计。
-    /// </summary>
-    private static int SkillValidate(string[] positional, TextWriter stdout)
-    {
-        if (positional.Length < 3)
-            throw new ArgumentException("skill validate 需要目录参数: skill validate <dir>");
-        var pkg = SkillLoader.LoadDirectory(positional[2]);
-        stdout.WriteLine(JsonSerializer.Serialize(new
-        {
-            name = pkg.Manifest.Name,
-            version = pkg.Manifest.Version,
-            ruleCount = pkg.Rules.Count,
-            aliasCount = pkg.Aliases.Count
-        }, SemanticJsonOpts));
-        return 0;
-    }
-
-    /// <summary>promote aliases.yaml 序列化（camelCase 属性名，保持 {aliases:[{layerName,class}]} 结构）。</summary>
-    private static readonly ISerializer YamlSerializer = new SerializerBuilder()
-        .WithNamingConvention(CamelCaseNamingConvention.Instance)
-        .Build();
-
-    /// <summary>promote manifest patch bump：仅命中列 0 顶层 version 行（块式 YAML，引号可选；
-    /// 锚定列 0 使缩进的嵌套 version 文本——如块标量内容——不被误命中），末位数字组即 patch。</summary>
-    private static readonly Regex ManifestVersionLine = new(
-        @"(?m)^(?<prefix>version:[ \t]*[""']?)(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?<suffix>[""']?)",
-        RegexOptions.Compiled);
-
-    /// <summary>保证末尾换行（promote 暂存写入约定，原 AtomicWriteAllText 的换行语义）。</summary>
-    private static string EnsureTrailingNewline(string content) =>
-        content.EndsWith('\n') ? content : content + "\n";
-
     private static int Usage(TextWriter stderr)
     {
-        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate> [参数] [--project <dir>]");
+        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run> [参数] [--project <dir>]");
         return 1;
+    }
+
+    /// <summary>
+    /// run --skill tx 审计装饰器（2b-ii-b T8）：仅把 Source="plan" 的 tx-start/tx-commit
+    /// 记录 paramsJson 由裸 planId 改写为 {planId, rulePackVersion}（planId 原值保留，
+    /// 规则包版本复现证据——与 check/scan 的 rulePackVersion 同口径）。其余记录原样
+    /// 透传；ReadAll/VerifyChain 直通内层存储。只在带 --skill 时装配（加性，无 --skill
+    /// 的 run 审计逐字不变）。装饰发生在 Append 入链之前——哈希链对改写后的内容计算，
+    /// 链完整性不受影响。
+    /// </summary>
+    private sealed class RulePackAuditDecorator : IAuditStore
+    {
+        private readonly IAuditStore _inner;
+        private readonly string _rulePackVersion;
+
+        public RulePackAuditDecorator(IAuditStore inner, string rulePackVersion)
+        {
+            _inner = inner;
+            _rulePackVersion = rulePackVersion;
+        }
+
+        public AuditRecord Append(AuditEntry e)
+        {
+            if (e.Source == "plan" && e.Kind is "tx-start" or "tx-commit")
+                e = e with
+                {
+                    ParamsJson = JsonSerializer.Serialize(new { planId = e.ParamsJson, rulePackVersion = _rulePackVersion })
+                };
+            return _inner.Append(e);
+        }
+
+        public IReadOnlyList<AuditRecord> ReadAll() => _inner.ReadAll();
+
+        public bool VerifyChain(out string error) => _inner.VerifyChain(out error);
     }
 }

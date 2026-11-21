@@ -63,6 +63,7 @@ public static class HandlerRegistry
     public static IReadOnlyList<IStepHandler> All() => new IStepHandler[]
     {
         new AddLineHandler(), new AddTextHandler(),
-        new DeleteEntityHandler(), new MoveEntityHandler(), new ChangeLayerHandler()
+        new DeleteEntityHandler(), new MoveEntityHandler(), new ChangeLayerHandler(),
+        new InsertBlockHandler()
     };
 }
