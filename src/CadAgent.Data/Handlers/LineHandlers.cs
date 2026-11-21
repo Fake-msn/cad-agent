@@ -29,7 +29,23 @@ internal static class HandlerHelpers
 
     public static Entity? Find(DrawingSession s, JsonElement p)
     {
-        ulong handle = p.GetProperty("handle").GetUInt64();
+        // handle 契约（计划 3a）：JSON 数字或十进制字符串皆可（Summarize 暴露字符串，
+        // LLM 计划编写层可直接回灌）；非法形态→null→"句柄不存在"优雅失败。
+        var hEl = p.GetProperty("handle");
+        ulong handle;
+        switch (hEl.ValueKind)
+        {
+            case JsonValueKind.Number:
+                handle = hEl.GetUInt64();
+                break;
+            case JsonValueKind.String:
+                if (!ulong.TryParse(hEl.GetString(), System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out handle))
+                    return null;
+                break;
+            default:
+                return null;
+        }
         return s.Doc.Entities.FirstOrDefault(e => e.Handle == handle);
     }
 }

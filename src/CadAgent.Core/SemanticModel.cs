@@ -1,6 +1,6 @@
 namespace CadAgent.Core;
 
-public enum SemanticClass { Unknown, Wall, Door, Window, Column, Axis, Annotation, Room, Auxiliary }
+public enum SemanticClass { Unknown, Wall, Door, Window, Column, Axis, Annotation, Room, Auxiliary, Lighting }
 
 public enum Provenance { NativeObject, LayerInference, GeometryInference, LlmInference, HumanConfirmed }
 

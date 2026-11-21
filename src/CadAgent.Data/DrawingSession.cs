@@ -107,6 +107,10 @@ public sealed class DrawingSession : IDrawingSession
                 case ProxyEntity proxy:
                     sb.Append(FormattableString.Invariant($"|{proxy.ObjectName}|{proxy.DxfClass?.CppClassName}"));
                     break;
+                case Insert insert:
+                    sb.Append(FormattableString.Invariant(
+                        $"|I|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.InsertPoint.Z:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));
+                    break;
                 // Other entity types: base fields only (documented limitation; extend as handlers grow).
             }
             sb.Append('\n');
