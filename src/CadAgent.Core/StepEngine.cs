@@ -104,13 +104,32 @@ public sealed class StepEngine
             // 拒绝→留痕后立即终止，不执行该步、不 SaveWorking。
             if (_semanticGate != null && handler is ISemanticAware aware && aware.RequiredSemantics.Count > 0)
             {
-                GateDecision decision = _semanticGate.Check(aware.RequiredSemantics);
+                string? targetHandle = null;
+                GateDecision decision;
+                if (_semanticGate is ISemanticContextGate contextGate)
+                {
+                    if (step.Params.TryGetProperty("handle", out var hEl))
+                    {
+                        targetHandle = hEl.ValueKind switch
+                        {
+                            JsonValueKind.Number => hEl.GetUInt64().ToString(),
+                            JsonValueKind.String => hEl.GetString(),
+                            _ => null
+                        };
+                    }
+                    decision = contextGate.CheckContext(aware.RequiredSemantics, targetHandle);
+                }
+                else
+                {
+                    decision = _semanticGate.Check(aware.RequiredSemantics);
+                }
                 if (!decision.Allowed)
                 {
                     Append(op, sessionId, "semantic-gate-refused", step.Kind,
                         JsonSerializer.Serialize(new
                         {
                             required = aware.RequiredSemantics.Select(c => c.ToString()).ToArray(),
+                            handle = targetHandle,
                             reason = decision.Reason
                         }),
                         beforeHash, beforeHash, snapshot, plan.PlanId);

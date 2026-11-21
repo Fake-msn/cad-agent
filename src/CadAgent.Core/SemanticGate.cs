@@ -19,3 +19,13 @@ public interface ISemanticGate
 {
     GateDecision Check(IReadOnlyList<SemanticClass> required);
 }
+
+/// <summary>
+/// 上下文闸口（计划 3a 加性）：实体级语义检查——步骤目标句柄须携带所需类标注。
+/// targetHandle null → 退化为操作级 Check 语义。闸口自持叠加层（引擎不持有）。
+/// 实现 ISemanticContextGate 的闸口被引擎优先以 CheckContext 调用。
+/// </summary>
+public interface ISemanticContextGate : ISemanticGate
+{
+    GateDecision CheckContext(IReadOnlyList<SemanticClass> required, string? targetHandle);
+}
