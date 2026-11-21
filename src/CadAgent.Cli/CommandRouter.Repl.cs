@@ -112,12 +112,14 @@ public static partial class CommandRouter
             var orch = new AgentOrchestrator(client, meter, egress, engine, audit,
                 IdentityOverride ?? Identity(agentDir), profile.Model, profile);
             var result = orch.RunAsync(line, summary, drawing, session, allowedKinds, KindDocs,
-                confirmPlan, confirmEgress).GetAwaiter().GetResult();
+                confirmPlan, confirmEgress,
+                postSummaryProvider: () => DrawingSummarizer.Summarize(drawing, overlay)).GetAwaiter().GetResult();
             stdout.WriteLine(JsonSerializer.Serialize(new
             {
                 status = result.Status.ToString(),
                 txId = result.TxId,
-                error = result.Error
+                error = result.Error,
+                verificationRounds = result.VerificationRounds
             }, SemanticJsonOpts));
         }
 

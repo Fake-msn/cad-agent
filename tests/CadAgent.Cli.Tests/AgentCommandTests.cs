@@ -54,10 +54,13 @@ public class AgentCommandTests : IDisposable
         var (code, stdout, _) = Run("agent", "--drawing", _drawing, "--intent", "画一条线", "--yes");
         Assert.Equal(0, code);
         Assert.Contains("Executed", stdout);
+        // 3i：读回验证环经 CLI 摘要 seam 闭合（verdict ok 一轮）
+        Assert.Contains("\"verificationRounds\": 1", stdout);
         var session = CadAgent.Data.DrawingSession.Load(_drawing);
         Assert.Equal(2, session.Summarize().Entities.Count);
         using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "llm-call");
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "agent-verify" && r.Entry.ParamsJson.Contains("\"ok\""));
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "tx-commit");
         Assert.True(audit.VerifyChain(out _));
         Assert.All(audit.ReadAll(), r => Assert.DoesNotContain("sk-agentkey12345678", r.Entry.ParamsJson));

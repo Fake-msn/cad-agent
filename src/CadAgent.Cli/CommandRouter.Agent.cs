@@ -81,12 +81,14 @@ public static partial class CommandRouter
         };
 
         var result = orch.RunAsync(intent, summary, drawing, session, allowedKinds, KindDocs,
-            confirmPlan, confirmEgress).GetAwaiter().GetResult();
+            confirmPlan, confirmEgress,
+            postSummaryProvider: () => DrawingSummarizer.Summarize(drawing, overlay)).GetAwaiter().GetResult();
         stdout.WriteLine(JsonSerializer.Serialize(new
         {
             status = result.Status.ToString(),
             txId = result.TxId,
             error = result.Error,
+            verificationRounds = result.VerificationRounds,
             usage = result.TotalUsage == null ? null : new { result.TotalUsage.PromptTokens, result.TotalUsage.CompletionTokens }
         }, SemanticJsonOpts));
         return result.Status == OrchestrationStatus.Executed ? 0 : 1;
