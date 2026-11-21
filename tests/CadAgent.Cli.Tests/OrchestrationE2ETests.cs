@@ -59,8 +59,8 @@ public class OrchestrationE2ETests : IDisposable
         CommandRouter.LlmClientFactory = (p, k) => client;
 
         // 首次 agent：--yes 自动确认出境+计划
-        var (code1, out1, _) = Run("agent", "--drawing", _drawing, "--intent", "画线并标注", "--yes");
-        Assert.Equal(0, code1);
+        var (code1, out1, err1) = Run("agent", "--drawing", _drawing, "--intent", "画线并标注", "--yes");
+        Assert.True(code1 == 0, $"code={code1} out={out1} err={err1}");
         Assert.Contains("Executed", out1);
         Assert.Equal(1, client.Calls);
 

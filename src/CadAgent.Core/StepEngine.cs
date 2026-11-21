@@ -8,6 +8,10 @@ public interface IDrawingSession
     string ComputeHash();
     void SaveWorking();
     void Reload();
+    /// <summary>步级 undo（3b-ii 加性）：捕获当前模型状态（内存序列化，不触磁盘）。</summary>
+    byte[] CaptureState();
+    /// <summary>恢复捕获的模型状态。</summary>
+    void RestoreState(byte[] state);
 }
 
 public sealed record StepSpec(string Kind, JsonElement Params);

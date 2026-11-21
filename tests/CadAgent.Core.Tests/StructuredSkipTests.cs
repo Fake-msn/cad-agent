@@ -15,6 +15,8 @@ public class StructuredSkipTests
         public string ComputeHash() => "h";
         public void SaveWorking() { }
         public void Reload() { }
+        public byte[] CaptureState() => System.Array.Empty<byte>();
+        public void RestoreState(byte[] state) { }
     }
     private sealed class OverlayChecker : IRuleChecker, IOverlayDependent
     {

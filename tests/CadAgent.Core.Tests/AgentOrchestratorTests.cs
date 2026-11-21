@@ -38,6 +38,8 @@ public class AgentOrchestratorTests : IDisposable
         public string ComputeHash() => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(SourcePath)));
         public void SaveWorking() => File.WriteAllText(SourcePath, "v1");
         public void Reload() { }
+        public byte[] CaptureState() => System.Array.Empty<byte>();
+        public void RestoreState(byte[] state) { }
     }
     private sealed class FixedIdentity : IIdentityProvider
     {
