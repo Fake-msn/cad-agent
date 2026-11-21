@@ -7,6 +7,8 @@ namespace CadAgent.Data.Checks;
 /// 序列为 List&lt;object&gt;；统一以 InvariantCulture 转换。键为 camelCase（hanVector/other/groups）。
 /// 系列归属容差 0.01mm（字高/线宽共用），比较含 1e-9 epsilon 吸收浮点边界（T4 硬化）；
 /// 序列 null 元素跳过，不产生幻影 0 值（T4 硬化）；缺键按空系列处理（并集语义）。
+/// 2b-ii-b T3 增补：Scalar 标量参数缺键/null 回退默认值；AtLeast 最小值比较仅用
+/// 1e-9 epsilon（最小字高类阈值语义，非系列 0.01mm 容差）。
 /// </summary>
 internal static class CheckParams
 {
@@ -21,6 +23,11 @@ internal static class CheckParams
 
     public static double[] Series(Dictionary<string, object> parameters, string key) =>
         parameters.TryGetValue(key, out var raw) ? ToDoubleList(raw) : Array.Empty<double>();
+
+    public static double Scalar(Dictionary<string, object> parameters, string key, double fallback) =>
+        parameters.TryGetValue(key, out var raw) && raw is not null ? ToDouble(raw) : fallback;
+
+    public static bool AtLeast(double value, double min) => value >= min - Epsilon;
 
     public static bool InSeries(double value, double[] series) =>
         series.Any(s => Math.Abs(value - s) <= ToleranceMm + Epsilon);
