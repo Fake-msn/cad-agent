@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CadAgent.Core;
@@ -48,6 +49,7 @@ public static partial class CommandRouter
                 case "check": return Check(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
                 case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
+                case "view": return ViewLaunch(args, project, stderr);
                 default: return Usage(stderr);
             }
         }
@@ -328,6 +330,29 @@ public static partial class CommandRouter
     {
         var op = Identity(agentDir).Current;
         stdout.WriteLine($"{op.Account}\t{op.Role}");
+        return 0;
+    }
+
+    /// <summary>
+    /// view（计划4 T1）：进程拉起 Avalonia 视图——dotnet CadAgent.View.dll（同目录，
+    /// Cli 对 View 的项目引用仅复制输出；Cli 代码不 using Avalonia）。
+    /// 图纸缺失/View 程序集缺失→stderr + exit 1；启动成功即 exit 0（不等待 UI 进程）。
+    /// </summary>
+    private static int ViewLaunch(string[] args, string project, TextWriter stderr)
+    {
+        string drawing = RequireOption(args, "--drawing");
+        if (!File.Exists(drawing))
+        {
+            stderr.WriteLine($"图纸文件不存在: {drawing}");
+            return 1;
+        }
+        string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
+        if (!File.Exists(viewDll))
+        {
+            stderr.WriteLine($"未找到视图程序集: {viewDll}");
+            return 1;
+        }
+        Process.Start("dotnet", $"\"{viewDll}\" --drawing \"{drawing}\" --project \"{project}\"");
         return 0;
     }
 
@@ -741,7 +766,7 @@ public static partial class CommandRouter
 
     private static int Usage(TextWriter stderr)
     {
-        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run> [参数] [--project <dir>]");
+        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run|view> [参数] [--project <dir>]");
         return 1;
     }
 

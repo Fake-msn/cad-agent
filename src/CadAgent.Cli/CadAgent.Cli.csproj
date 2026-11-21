@@ -3,6 +3,9 @@
   <ItemGroup>
     <ProjectReference Include="..\CadAgent.Core\CadAgent.Core.csproj" />
     <ProjectReference Include="..\CadAgent.Data\CadAgent.Data.csproj" />
+    <!-- View 仅输出复制（计划4 T1 裁定）：view 命令经 dotnet CadAgent.View.dll 进程拉起，
+         Cli 代码不 using Avalonia——此引用只为把 View 及其依赖复制到 Cli 输出目录。 -->
+    <ProjectReference Include="..\CadAgent.View\CadAgent.View.csproj" />
   </ItemGroup>
 
   <ItemGroup>
