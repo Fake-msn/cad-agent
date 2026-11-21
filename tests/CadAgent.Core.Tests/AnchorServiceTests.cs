@@ -9,7 +9,11 @@ public class AnchorServiceTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), $"anchor-{Guid.NewGuid():N}");
     public AnchorServiceTests() => Directory.CreateDirectory(_dir);
-    public void Dispose() => Directory.Delete(_dir, true);
+    public void Dispose()
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        Directory.Delete(_dir, true);
+    }
 
     [Fact]
     public void UpdateVerify_Ok()
