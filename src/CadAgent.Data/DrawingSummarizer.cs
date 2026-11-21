@@ -65,7 +65,7 @@ public static class DrawingSummarizer
                 sb.Append("人工图层映射: ");
                 sb.Append(string.Join(", ", overlay.Mappings
                     .OrderBy(m => m.LayerName, StringComparer.Ordinal)
-                    .Select(m => $"{m.LayerName}→{m.Class}")));
+                    .Select(m => $"{m.LayerName}→{m.Class}(HumanConfirmed)")));
                 sb.Append('\n');
             }
         }
