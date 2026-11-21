@@ -34,7 +34,7 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
         var body = JsonSerializer.Serialize(new
         {
             model = _profile.Model,
-            messages = request.Messages.Select(m => new { role = m.Role, content = m.Content }).ToArray(),
+            messages = request.Messages.Select(m => BuildMessage(m, request.ImageUrl)).ToArray(),
             max_tokens = request.MaxTokens,
             temperature = request.Temperature
         });
@@ -56,6 +56,22 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
             : new TokenUsage(0, 0);
         string model = root.TryGetProperty("model", out var mEl) ? mEl.GetString() ?? _profile.Model : _profile.Model;
         return new ChatResponse(content, usage, model);
+    }
+
+    /// <summary>视觉请求（ImageUrl 非空）：最后一条消息 content 为 OpenAI vision 数组格式。</summary>
+    private static object BuildMessage(ChatMessage m, string? imageUrl)
+    {
+        if (imageUrl == null)
+            return new { role = m.Role, content = m.Content };
+        return new
+        {
+            role = m.Role,
+            content = new object[]
+            {
+                new { type = "text", text = m.Content },
+                new { type = "image_url", image_url = new { url = imageUrl } }
+            }
+        };
     }
 
     public async Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default)

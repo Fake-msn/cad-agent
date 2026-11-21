@@ -3,8 +3,8 @@ namespace CadAgent.Core;
 /// <summary>LLM 聊天消息（role: system/user/assistant）。</summary>
 public sealed record ChatMessage(string Role, string Content);
 
-/// <summary>聊天请求：消息列表 + max_tokens + temperature。</summary>
-public sealed record ChatRequest(IReadOnlyList<ChatMessage> Messages, int MaxTokens, double Temperature = 0.2);
+/// <summary>聊天请求：消息列表 + max_tokens + temperature；ImageUrl 加性（视觉探针/读图，默认 null 不破坏既有）。</summary>
+public sealed record ChatRequest(IReadOnlyList<ChatMessage> Messages, int MaxTokens, double Temperature = 0.2, string? ImageUrl = null);
 
 /// <summary>token 用量（API 响应 usage 解析）。</summary>
 public sealed record TokenUsage(int PromptTokens, int CompletionTokens);
