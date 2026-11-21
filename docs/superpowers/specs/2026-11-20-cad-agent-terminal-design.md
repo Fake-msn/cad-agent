@@ -457,6 +457,15 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **契约变更 sanctioned**：Executed 含验证调用——旧一次性执行测试的 usage/Calls 断言同步更新；fake 客户端按 system prompt"验证智能体"识别验证请求回 verdict ok。
 - 缺口 B（活 CAD 执行）/C（生成式验证，并入 B 基准）→**计划 3j 待写**（用户裁定 A→B，C 并入 B）。
 
+**计划3j 完成（补核心 B+C：COM 绘制执行+生成式真机基准，2026-11-21 记录；全套件 559 测试含 5 真机）**：
+- **ICadRuntime 绘制操作**：AddLine/AddText/AddCircle/AddInsert/EnsureBlock/EntityCount；ZwcadRuntime dynamic COM 真机核定签名：**Blocks.Add(origin, Name)**（与 AutoCAD 文档序相反）、**ModelSpace.InsertBlock**（非 AddInsert）、**赋不存在层须先 Layers.Add**（0x80200014 根因）。
+- **ComReplayService 计划级 COM 重放**（第二执行通道）：kind→COM 映射（生成类 add-line/add-text/add-circle/insert-block/layout-lighting/label-luminaires/insert-symbol）；几何与 handler 同源 GeometryKit（网格/六边形/文本放置共享，防双写漂移）；编辑类 kind 响亮不支持（第一 slice）。
+- **--live 接线**（run/agent/repl/skill run）：tx 提交后从**事务前快照**开活会话→重放→逐 step com-replay 审计→**读回计数闸口**（vendor vs 影子，分歧=com-replay-divergence 响亮失败）→SaveAs <drawing>.live.dwg→com-replay-committed；无厂商/重放失败/异常→审计+stderr+exit 1。影子副本仍为审计事实源（双通道均经审计管线）。
+- **add-circle 第十处理器**（生成式绘制补全；注册表 9 静态+insert-symbol 动态）。
+- **C 生成式真机基准**：LLM 读摘要产轴线/房间名/柱圆**生成式几何计划**（非符号导入）→agent --live→活 ZWCAD 落图→live.dwg ACadSharp 读回断言（AXIS 层线/客厅文字/r250 圆/7 实体）→com-replay×3+committed+agent-verify+验链+密钥不入审计。
+- 诚实边界：重放第一 slice 仅生成类（编辑类 delete/move/change-layer 不支持响亮失败）；读回闸口为计数级（几何逐点比对仍 deferred）；--live 交付为 .live.dwg 旁路文件（不覆盖源/工作副本）。
+- **用户核心质疑三缺口全部闭合**：读回环(3i)/活 CAD 执行(3j)/生成式验证(3j 基准)。计划 4 视图就绪。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
