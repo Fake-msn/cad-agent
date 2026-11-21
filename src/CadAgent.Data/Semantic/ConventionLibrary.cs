@@ -73,12 +73,17 @@ public static class ConventionLibrary
 /// <summary>
 /// First deterministic "reading" signal: annotate entities from their layer.
 /// Precedence: existing HumanConfirmed annotation (skip) > human layer mapping
-/// (HumanConfirmed 1.0) > convention library hit (LayerInference 0.8).
+/// (HumanConfirmed 1.0) > skill alias hit (LayerInference 0.8) > convention
+/// library hit (LayerInference 0.8).
 /// Unknown layers get no annotation; the Scanner owns the ambiguous-layer list.
 /// </summary>
 public static class LayerInference
 {
-    public static void Annotate(DrawingSession session, SemanticOverlay overlay)
+    public static void Annotate(DrawingSession session, SemanticOverlay overlay) =>
+        Annotate(session, overlay, skillAliases: null);
+
+    public static void Annotate(DrawingSession session, SemanticOverlay overlay,
+        IReadOnlyDictionary<string, SemanticClass>? skillAliases = null)
     {
         var humanConfirmedHandles = overlay.Annotations
             .Where(a => a.Provenance == Provenance.HumanConfirmed)
@@ -103,10 +108,45 @@ public static class LayerInference
                 continue;
             }
 
+            if (TryGetSkillClass(skillAliases, layer, out var skillCls))
+            {
+                overlay.UpsertAnnotation(new SemanticAnnotation(
+                    handle, skillCls, Provenance.LayerInference, 0.8, $"skill别名: {layer}"));
+                continue;
+            }
+
             var cls = ConventionLibrary.ClassForLayer(layer);
             if (cls == SemanticClass.Unknown) continue;
             overlay.UpsertAnnotation(new SemanticAnnotation(
                 handle, cls, Provenance.LayerInference, 0.8, $"图层约定: {layer}"));
         }
+    }
+
+    /// <summary>
+    /// Shared skill-alias lookup for Annotate and the Scanner's ambiguous list,
+    /// so both stay exact inverses. Honors the dictionary's own comparer first
+    /// (SkillSet.MergedAliases is OrdinalIgnoreCase), then falls back to a
+    /// case-insensitive scan for caller-built ordinal dictionaries — matching
+    /// the case-insensitive convention of mappings and the convention library.
+    /// An alias mapped to Unknown is not a hit (no annotation, stays ambiguous).
+    /// </summary>
+    internal static bool TryGetSkillClass(
+        IReadOnlyDictionary<string, SemanticClass>? skillAliases, string layer, out SemanticClass cls)
+    {
+        cls = SemanticClass.Unknown;
+        if (skillAliases is null) return false;
+        if (!skillAliases.TryGetValue(layer, out var found))
+        {
+            found = SemanticClass.Unknown;
+            foreach (var kv in skillAliases)
+                if (string.Equals(kv.Key, layer, StringComparison.OrdinalIgnoreCase))
+                {
+                    found = kv.Value;
+                    break;
+                }
+        }
+        if (found == SemanticClass.Unknown) return false;
+        cls = found;
+        return true;
     }
 }

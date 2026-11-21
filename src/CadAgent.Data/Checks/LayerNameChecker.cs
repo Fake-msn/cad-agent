@@ -9,7 +9,8 @@ namespace CadAgent.Data.Checks;
 /// structure（13.0.2）：按 "-" 分段，段数∈[2,5]，每段非空且字符集∈[汉字A-Za-z0-9]
 /// （汉字层与英文层同一字符集校验；专业代码白名单/附录B推荐名 deferred——视觉依赖表，消息注明）。
 /// 图层 "0"（默认层）、"Defpoints"（大小写不敏感，AutoCAD 非打印定义点系统层）与含 '|' 的
-/// xref 依赖层（XREF|LAYER，命名随宿主图纸）两模式均跳过；未知 mode → 空列表（检查器隔离，不抛异常）。
+/// xref 依赖层（XREF|LAYER，命名随宿主图纸）两模式均跳过；空 mode → 空列表（行为不变）；
+/// 非空未知 mode → ArgumentException（T4 硬化：引擎隔离记账，不再静默空列表）。
 /// </summary>
 public sealed class LayerNameChecker : IRuleChecker
 {
@@ -24,7 +25,9 @@ public sealed class LayerNameChecker : IRuleChecker
         string mode = rule.Check.Params.TryGetValue("mode", out var raw)
             ? Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? ""
             : "";
-        if (mode is not ("charset" or "structure")) return Array.Empty<Issue>();
+        if (mode == "") return Array.Empty<Issue>(); // 空 mode 行为不变：不检查
+        if (mode is not ("charset" or "structure"))
+            throw new ArgumentException($"未知 mode: {mode}");
 
         var doc = ((DrawingSession)session).Doc;
         var issues = new List<Issue>();

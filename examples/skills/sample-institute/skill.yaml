@@ -1,0 +1,7 @@
+# 示例 skill 包（入库示例，非真实院标）——仅用于演示 skill 机制与端到端测试。
+# 真实院标文档/图层规范待用户提供后编码替换（spec §12 开放项）。
+name: 示例院标
+version: "1.0.0"
+discipline: architecture
+drawingType: any
+description: 示例 skill（非真实院标）：演示包结构/加载校验/别名/mandatory 规则与 promote 升版；条文为虚构示例，不得用于真实审图。

@@ -12,8 +12,9 @@ namespace CadAgent.Data.Checks;
 /// 作用域（最终审查裁定）：8.0.4 摘录限定"英文字母作为轴线号时"——仅查含拉丁字母的字母轴线号值；
 /// 纯数字（8.0.3 阿拉伯数字）、附加轴分数（8.0.6：1/A、分母 0A）、分区编号（8.0.5：1-A、A-1）
 /// 不是字母轴线号→跳过，不算 8.0.4 违规。
+/// IOverlayDependent（2b-ii-a T5）：overlay 空时引擎记 NotEvaluable 跳过，不跑空。
 /// </summary>
-public sealed class AxisLetterChecker : IRuleChecker
+public sealed class AxisLetterChecker : IRuleChecker, IOverlayDependent
 {
     public string CheckType => "axis-letter";
 

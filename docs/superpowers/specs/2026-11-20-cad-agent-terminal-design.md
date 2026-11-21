@@ -346,6 +346,14 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **电气/模型规则包+skill 机制=2b-ii**：本批仅建筑制图通则 7 条；电气/给排水/暖通等专业规则包与院标 skill 包机制（§6.3/§6.4）在 2b-ii 交付。
 - **MinerU API 录入=后续能力**：规范 PDF→结构化条文的 MinerU API 自动录入属后续能力；当前条文经人工摘录+控制者核对入库。
 
+**计划2b-ii-a完成（skill 机制，2026-11-21 记录；端到端闭环测试 示例 skill 副本→skill validate→scan --skill 别名命中→check --skill exit 2→豁免裁定→check exit 0→人工 map→promote 升版→audit verify（semantic-promoted）→同裁定集重跑 check 指纹一致 全绿，全套件 240 测试）**：
+
+- 已交付：skill 包结构（skill.yaml 清单+rules/*.yaml+aliases.yaml）与严格加载校验（未知键拒绝、version digits.digits.digits、包内规则 Id 重复拒绝、异常带文件名+内层异常）；SkillSet 合并与全局规则 Id 守卫（builtin×skill/skill×skill 冲突→用法错误 stderr+exit 1，校验先于任何副作用、不审计）；别名接入语义扫描（优先级 人工确认>skill 别名>天正约定库，别名命中层不再不明确，扫描与不明确清单判定精确互逆）；检查器硬化（未知 mode→ArgumentException 引擎隔离记账、标高候选窗扩展覆盖 0/4+ 位小数、参数 null 守卫+容差 epsilon）；结构化跳过报告（Exempt/PendingOriginal/NoChecker/CheckerError/NotEvaluable 五类；overlay 依赖检查器无语义标注时记 NotEvaluable，不得与"已查且干净"不可区分；stderr"跳过: [类别] 规则Id: 消息"通道+审计 skippedReasons 结构化数组，stdout 契约不变、旧文案子串兼容）；裁定指纹（规范化 JSON SHA256，与存储顺序无关、对任一字段敏感）+规则包版本（内置常量|name@version 按包序）入 check/run-regression 审计 paramsJson（复现证据）；孤儿裁定拒绝（ruleId 须在 builtin+skill 加载集）；裁定 Load 去重（同 RuleId latest-wins）；CLI skill list/validate、check --skill、scan --skill（--skill 可重复、出现序）、semantic promote（项目人工确认映射→skill 别名 upsert+manifest patch 升版+semantic-promoted 审计；校验先于任何写入、version 行锚定列 0，flow-style 等无 version 行→exit 1 零变更）。
+- **示例 skill 非真实院标**：examples/skills/sample-institute（示例院标 1.0.0，1 条 mandatory 图层字符集规则 SK-SAMPLE-001+别名 W-示例墙→Wall）为入库示例，条文系虚构演示，仅用于机制演示与端到端测试，不得用于真实审图；真实院标文档/图层规范待用户提供后编码替换（开放项不变）。E2E 将示例复制到临时项目操作，promote 只改副本、仓库示例零污染（测试断言）。
+- **steps/symbols/skill run+电气模型规则数据=2b-ii-b**：steps/symbols 子目录当前容忍不解析；run 回归仍 builtin-only（run 不带 --skill）；电气/给排水/暖通等专业规则包与模型规则数据在 2b-ii-b 交付。
+- **LLM 起草 skill=计划3**：当前 skill 包均为人工编写/CLI promote 沉淀；LLM 起草院标 skill（含 Upsert 守卫调用侧强制、幻影映射拒绝）属计划3。
+- **2b-i 遗留状态（本计划承接后仍开放）**：全角＋标高候选窗缺口（候选正则仅 ASCII [+-]，全角符号不进入检查，扩字符类待裁定）；1 位小数标高报 High 已追认（与 11.8.4"注写到小数点后第三位"意图一致），补测试留后续；CommandRouter 已增至 942 行，skill 族提取独立文件留后续；promote aliases upsert 经 YamlDotNet 整体重序列化（原注释与额外未知键丢弃，计划规定行为，代码已注）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
