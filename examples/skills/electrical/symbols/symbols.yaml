@@ -29,3 +29,25 @@ symbols:
   - { name: "星形—三角形连接的三相变压器", file: elec-025.dxf, class: Auxiliary, description: "Three-phase transformer, connection star-delta；上圆Y下圆三角" }
   - { name: "具有4个抽头的星形—星形连接的三相变压器", file: elec-026.dxf, class: Auxiliary, description: "Three-phase transformer with four taps, connection star-star；双圆各Y+抽头数4注记+实心点" }
   - { name: "单相变压器组成的三相变压器", file: elec-027.dxf, class: Auxiliary, description: "Three-phase bank of single-phase transformers, connection star-delta；星形—三角形连接；右侧Y/3/三角注记列" }
+  - { name: "具有分接开关的三相变压器", file: elec-028.dxf, class: Auxiliary, description: "Three-phase transformer with tap changer；星形—三角形；斜箭头+端部折步示分接开关" }
+  - { name: "三相变压器星形—星形—三角形连接", file: elec-029.dxf, class: Auxiliary, description: "Three-phase transformer, connection star-star-delta；三圆：上Y左下Y右下三角" }
+  - { name: "自耦变压器", file: elec-030.dxf, class: Auxiliary, description: "Auto-transformer, general symbol；单圆+绕组尾弧+上下引线；尾弧近似" }
+  - { name: "单相自耦变压器", file: elec-031.dxf, class: Auxiliary, description: "Auto-transformer, single-phase；单圆+尾弧+带tick引线" }
+  - { name: "三相自耦变压器星形连接", file: elec-032.dxf, class: Auxiliary, description: "Auto-transformer, three-phase, connection star；单圆+Y+尾弧+带tick引线" }
+  - { name: "可调压的单相自耦变压器", file: elec-033.dxf, class: Auxiliary, description: "Auto-transformer, single-phase with voltage regulation；31+斜箭头" }
+  - { name: "三相感应调压器", file: elec-034.dxf, class: Auxiliary, description: "Three-phase induction regulator；双圆相交+斜箭头+带tick引线" }
+  - { name: "电抗器", file: elec-035.dxf, class: Auxiliary, description: "Reactor, general symbol；形式1=上下半圆反 bulge+竖引线；形式2=四scallop" }
+  - { name: "电压互感器", file: elec-036.dxf, class: Auxiliary, description: "Voltage transformer；双圆相交+上下 plain 引线" }
+  - { name: "电流互感器", file: elec-037.dxf, class: Auxiliary, description: "Current transformer, general symbol；圆穿竖一次线+右二次双引线带tick" }
+  - { name: "具有两个铁心每个铁心一个次级绕组的电流互感器", file: elec-038.dxf, class: Auxiliary, description: "Current transformer with two cores with one secondary winding on each core；竖线+双圆+端端子小圆+各右引线带tick（见注3）" }
+  - { name: "在一个铁心上具有两个次级绕组的电流互感器", file: elec-039.dxf, class: Auxiliary, description: "Current transformer with two secondary windings on one core；双圆相交穿竖线+双右引线带tick；形式2铁心符号必须画出" }
+  - { name: "具有三条穿线一次导体的脉冲变压器或电流互感器", file: elec-040.dxf, class: Auxiliary, description: "Pulse or current transformer with three threaded primary conductors；圆+竖线+内3注记+右引线带tick" }
+  - { name: "三个电流互感器(四个次级引线引出)", file: elec-041.dxf, class: Auxiliary, description: "Three current transformers；斜一次线3注记+圆+右引线4注记" }
+  - { name: "具有两个铁心每个铁心一个次级绕组的三个电流互感器", file: elec-042.dxf, class: Auxiliary, description: "Three current transformers with two cores with one secondary winding on each core；竖链双圆+端端子+3/4注记（见注3）；简化主要素" }
+  - { name: "两个电流互感器导线L1和L3三个次级引线引出", file: elec-043.dxf, class: Auxiliary, description: "Two current transformers on L1 and L3, three secondary lines；圆+竖线+斜线2/3注记+右引线3+L1、L3注记" }
+  - { name: "具有两个铁心每个铁心一个次级绕组的两个电流互感器", file: elec-044.dxf, class: Auxiliary, description: "Two current transformers with two cores with one secondary winding on each core；竖链双圆+端端子+2/3注记+右引线3（见注3）" }
+  - { name: "物件(圆形)", file: elec-045.dxf, class: Auxiliary, description: "Object, general symbol (circle)；说明列与46/47共用：物件一般符号" }
+  - { name: "物件(方形)", file: elec-046.dxf, class: Auxiliary, description: "Object, general symbol (square)；说明列与45/47共用" }
+  - { name: "物件(矩形)", file: elec-047.dxf, class: Auxiliary, description: "Object, general symbol (rectangle)；注4；说明列与45/46共用" }
+  - { name: "有稳定输出电压的变换器", file: elec-048.dxf, class: Auxiliary, description: "Converter with stabilized output voltage；方框+对角线+左上正弦+右下u underline" }
+  - { name: "频率由f1变到f2的变频器", file: elec-049.dxf, class: Auxiliary, description: "Frequency converter, changing from f1 to f2；方框+对角线+f1/f2（可用具体数值代替）" }
