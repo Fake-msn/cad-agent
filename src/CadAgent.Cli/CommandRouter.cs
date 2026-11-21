@@ -49,6 +49,7 @@ public static partial class CommandRouter
                 case "rule": return Rule(args, positional, agentDir, session, stdout, stderr);
                 case "skill": return Skill(args, positional, agentDir, session, stdout, stderr);
                 case "llm": return Llm(args, positional, agentDir, session, stdout, stderr);
+                case "agent": return Agent(args, agentDir, session, stdout, stderr);
                 default: return Usage(stderr);
             }
         }
