@@ -67,13 +67,14 @@ public class MainWindowHeadlessTests
         {
             Assert.NotNull(window.Layers);
             Assert.NotNull(window.LayerList);
-            Assert.Equal(new[] { "ALPHA", "BETA" }, window.Layers!.Layers.Select(l => l.Name).ToArray());
-            Assert.Equal(new[] { 2, 1 }, window.Layers.Layers.Select(l => l.EntityCount).ToArray());
-            Assert.Equal("#FF0000", window.Layers.Layers[0].ColorBrush);
-            Assert.Equal("#00FF00", window.Layers.Layers[1].ColorBrush);
-            Assert.Equal(2, window.LayerList!.ItemCount);
+            // T8 图层表并集：默认空层 "0" 也出现（计数 0，表色样白）。
+            Assert.Equal(new[] { "0", "ALPHA", "BETA" }, window.Layers!.Layers.Select(l => l.Name).ToArray());
+            Assert.Equal(new[] { 0, 2, 1 }, window.Layers.Layers.Select(l => l.EntityCount).ToArray());
+            Assert.Equal("#FF0000", window.Layers.Layers[1].ColorBrush);
+            Assert.Equal("#00FF00", window.Layers.Layers[2].ColorBrush);
+            Assert.Equal(3, window.LayerList!.ItemCount);
             List<CheckBox> checks = window.GetVisualDescendants().OfType<CheckBox>().ToList();
-            Assert.Equal(2, checks.Count);
+            Assert.Equal(3, checks.Count);
             Assert.All(checks, c => Assert.True(c.IsChecked));
             Assert.Contains("render items", window.Status!.Text);
         }
@@ -86,11 +87,11 @@ public class MainWindowHeadlessTests
         (MainWindow window, MainViewModel vm, string path) = ShowWindow();
         try
         {
-            CheckBox first = window.GetVisualDescendants().OfType<CheckBox>().First(); // ALPHA
+            CheckBox first = window.GetVisualDescendants().OfType<CheckBox>().ElementAt(1); // ALPHA（T8：索引 0 为空层 "0"）
             first.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
             Assert.Contains("ALPHA", window.Canvas!.HiddenLayers);
-            Assert.False(window.Layers!.Layers[0].IsVisible);
+            Assert.False(window.Layers!.Layers.Single(l => l.Name == "ALPHA").IsVisible);
             Assert.False(first.IsChecked); // refreshed from entry state
             Assert.All(window.Canvas.VisibleItems, i => Assert.Equal("BETA", i.Layer));
             Assert.Single(window.Canvas.VisibleItems);
@@ -113,15 +114,16 @@ public class MainWindowHeadlessTests
             // Real double-click on the BETA row (right side, away from the checkbox):
             // two rapid click pairs at the same point -> MouseDevice click count 2
             // -> DoubleTapped bubbles from ListBoxItem to the ListBox.
-            var row = (Control)window.LayerList!.ContainerFromIndex(1)!;
+            // T8：索引 0 为空层 "0"，BETA 行索引 2。
+            var row = (Control)window.LayerList!.ContainerFromIndex(2)!;
             Point p = row.TranslatePoint(new Point(row.Bounds.Width - 20, row.Bounds.Height / 2), window)!.Value;
             window.MouseDown(p, MouseButton.Left);
             window.MouseUp(p, MouseButton.Left);
             window.MouseDown(p, MouseButton.Left);
             window.MouseUp(p, MouseButton.Left);
             Dispatcher.UIThread.RunJobs();
-            Assert.False(window.Layers!.Layers[0].IsVisible); // ALPHA hidden
-            Assert.True(window.Layers.Layers[1].IsVisible);
+            Assert.False(window.Layers!.Layers.Single(l => l.Name == "ALPHA").IsVisible); // ALPHA hidden
+            Assert.True(window.Layers.Layers.Single(l => l.Name == "BETA").IsVisible);
             Assert.All(window.Canvas!.VisibleItems, i => Assert.Equal("BETA", i.Layer));
         }
         finally { Cleanup(window, path); }
@@ -135,15 +137,15 @@ public class MainWindowHeadlessTests
         (MainWindow window, MainViewModel vm, string path) = ShowWindow();
         try
         {
-            var row = (Control)window.LayerList!.ContainerFromIndex(1)!;
+            var row = (Control)window.LayerList!.ContainerFromIndex(2)!; // T8：BETA 行索引 2（0 为空层 "0"）
             Point p = row.TranslatePoint(new Point(60, row.Bounds.Height / 2), window)!.Value;
             window.MouseDown(p, MouseButton.Left);
             window.MouseUp(p, MouseButton.Left);
             window.MouseDown(p, MouseButton.Left);
             window.MouseUp(p, MouseButton.Left);
             Dispatcher.UIThread.RunJobs();
-            Assert.False(window.Layers!.Layers[0].IsVisible); // ALPHA hidden
-            Assert.True(window.Layers.Layers[1].IsVisible);
+            Assert.False(window.Layers!.Layers.Single(l => l.Name == "ALPHA").IsVisible); // ALPHA hidden
+            Assert.True(window.Layers.Layers.Single(l => l.Name == "BETA").IsVisible);
             Assert.All(window.Canvas!.VisibleItems, i => Assert.Equal("BETA", i.Layer));
         }
         finally { Cleanup(window, path); }

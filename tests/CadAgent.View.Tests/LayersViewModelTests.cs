@@ -1,5 +1,14 @@
+using System.Text.Json;
+using ACadSharp;
+using ACadSharp.Entities;
+using ACadSharp.Tables;
+using CadAgent.Core;
+using CadAgent.Data;
+using CadAgent.Data.Handlers;
+using CadAgent.Data.Tests;
 using CadAgent.View.Rendering;
 using CadAgent.View.ViewModels;
+using CSMath;
 
 namespace CadAgent.View.Tests;
 
@@ -192,5 +201,94 @@ public class LayersViewModelTests
         layers.Isolate("TEXT"); // no longer a known layer -> no-op (hidden set unchanged)
         Assert.Equal(2, canvas.HiddenLayers.Count);
         Assert.Contains("WALL", canvas.HiddenLayers);
+    }
+
+    // ---- 视图闭环 T8：空图层显示（图层表并集）----
+    // 夹具沿用 RenderModelTests 的 WithSession/DxfFixture 模式：经真实 DXF 写/读往返，
+    // 空图层（图层表有记录、无实体）必须在往返后仍存在于 doc.Layers。
+
+    private static void WithSession(Action<CadDocument> populate, Action<DrawingSession> test)
+    {
+        string path = DxfFixture.CreateTempDxf(populate);
+        try { test(DrawingSession.Load(path)); }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>EMPTY（无实体，ACI 3 绿）+ USED（1 线，ACI 1 红）。</summary>
+    private static void EmptyAndUsed(CadDocument doc)
+    {
+        doc.Layers.Add(new Layer("EMPTY") { Color = new Color(3) });
+        var used = new Layer("USED") { Color = new Color(1) };
+        doc.Layers.Add(used);
+        doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 1, 0), Layer = used });
+    }
+
+    [Fact]
+    public void Layers_EmptyLayerInDoc_ShownWithZeroCount()
+    {
+        WithSession(EmptyAndUsed, s =>
+        {
+            IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(s);
+            var canvas = new CanvasViewModel(items);
+            var layers = new LayersViewModel(items, canvas, s);
+
+            // 空图层 EMPTY 出现（计数 0），USED 计数 1。
+            LayerEntry empty = layers.Layers.Single(l => l.Name == "EMPTY");
+            LayerEntry used = layers.Layers.Single(l => l.Name == "USED");
+            Assert.Equal(0, empty.EntityCount);
+            Assert.Equal(1, used.EntityCount);
+            // 空层色样 = 图层表颜色（LayerColorRgb，ACI 3 绿），非白 fallback。
+            Layer emptyTable = s.Doc.Layers.First(l => l.Name == "EMPTY");
+            Assert.Equal("#" + RenderModelBuilder.LayerColorRgb(emptyTable).ToString("X6"), empty.ColorBrush);
+            Assert.NotEqual("#FFFFFF", empty.ColorBrush);
+            // 并集不破坏名序（含默认层 "0"，同为空层计数 0）。
+            Assert.Equal(
+                s.Doc.Layers.Select(l => l.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToArray(),
+                layers.Layers.Select(l => l.Name).ToArray());
+            Assert.Equal(0, layers.Layers.Single(l => l.Name == "0").EntityCount);
+        });
+    }
+
+    [Fact]
+    public void Layers_NoSession_LegacyBehaviorUnchanged()
+    {
+        WithSession(EmptyAndUsed, s =>
+        {
+            IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(s);
+            var canvas = new CanvasViewModel(items);
+            var layers = new LayersViewModel(items, canvas); // 不传 session：既有口径
+            // 仅 renderItems 图层出现；空图层（EMPTY/0）不进面板（legacy 行为保持）。
+            Assert.Equal(new[] { "USED" }, layers.Layers.Select(l => l.Name).ToArray());
+            Assert.Equal(1, layers.Layers[0].EntityCount);
+        });
+    }
+
+    [Fact]
+    public void Refresh_WithSession_NewEmptyLayerAppears()
+    {
+        WithSession(EmptyAndUsed, s =>
+        {
+            IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(s);
+            var canvas = new CanvasViewModel(items);
+            var layers = new LayersViewModel(items, canvas, s);
+            layers.Toggle("USED"); // 编辑前隐藏 USED
+
+            // 真实编辑路径：ChangeLayer 把唯一一线移到新层 E-NEW（handler 建图层表记录）。
+            string handle = s.Doc.Entities.OfType<Line>().First().Handle.ToString();
+            StepResult r = new ChangeLayerHandler().Apply(s,
+                JsonDocument.Parse($"{{\"handle\":{handle},\"layer\":\"E-NEW\"}}").RootElement);
+            Assert.True(r.Ok, r.Error);
+
+            layers.Refresh(RenderModelBuilder.Build(s), s);
+
+            // 新层出现（计数 1）；USED 变空层仍留在面板（计数 0），隐藏状态原样保留。
+            Assert.Equal(1, layers.Layers.Single(l => l.Name == "E-NEW").EntityCount);
+            LayerEntry used = layers.Layers.Single(l => l.Name == "USED");
+            Assert.Equal(0, used.EntityCount);
+            Assert.False(used.IsVisible);
+            Assert.Contains("USED", canvas.HiddenLayers);
+            // EMPTY 仍显示（Refresh 不丢空层）。
+            Assert.Equal(0, layers.Layers.Single(l => l.Name == "EMPTY").EntityCount);
+        });
     }
 }

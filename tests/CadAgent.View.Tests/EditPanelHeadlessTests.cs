@@ -200,8 +200,10 @@ public class EditPanelHeadlessTests
 
             Assert.Null(window.Edit.ErrorMessage);
             Assert.Single(window.Canvas.Items); // restored render
-            Assert.Single(window.Layers!.Layers); // layer "0" gone again
-            Assert.Equal("WALL", window.Layers.Layers[0].Name);
+            // T8 图层表并集：撤销后编辑用层 "0" 仍在面板（空层计数 0），WALL 计数恢复 1。
+            Assert.Equal(new[] { "0", "WALL" }, window.Layers!.Layers.Select(l => l.Name).ToArray());
+            Assert.Equal(0, window.Layers.Layers[0].EntityCount);
+            Assert.Equal(1, window.Layers.Layers.Single(l => l.Name == "WALL").EntityCount);
             Assert.Empty(window.Edit.RecentTxIds);
             Assert.False(window.UndoButton!.IsEnabled);
             Assert.Contains("1 render items", window.Status!.Text);
@@ -233,7 +235,9 @@ public class EditPanelHeadlessTests
 
             Assert.Null(window.Edit.ErrorMessage);
             Assert.Empty(window.Canvas.Items);
-            Assert.Empty(window.Layers!.Layers);
+            // T8 图层表并集：删空实体后图层仍显示为空层（计数 0），面板不再清空。
+            Assert.Equal(new[] { "0", "WALL" }, window.Layers!.Layers.Select(l => l.Name).ToArray());
+            Assert.All(window.Layers.Layers, l => Assert.Equal(0, l.EntityCount));
             using var audit = new SqliteAuditStore(f.AuditDbPath);
             AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
             Assert.Contains("delete-entity", step.Entry.ParamsJson);

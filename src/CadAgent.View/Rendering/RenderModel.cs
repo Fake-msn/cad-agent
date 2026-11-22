@@ -359,6 +359,9 @@ public static class RenderModelBuilder
         return ToRgb(c);
     }
 
+    /// <summary>图层表颜色→0xRRGGBB（空图层色样用；null→白 fallback）。</summary>
+    public static uint LayerColorRgb(ACadSharp.Tables.Layer? layer) => LayerColor(layer);
+
     private static uint LayerColor(ACadSharp.Tables.Layer? layer) => layer is null ? FallbackWhite : ToRgb(layer.Color);
 
     private static uint ToRgb(Color c)

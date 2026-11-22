@@ -163,7 +163,7 @@ public class SemanticAdjudicationPanelHeadlessTests
             Assert.Equal("裁定", ((TabItem)window.LeftTabs.Items[2]!).Header);
             Assert.Equal(0, window.LeftTabs.SelectedIndex);
             // Layers tab keeps T4 behavior; the other VMs are wired.
-            Assert.Equal(2, window.LayerList!.ItemCount);
+            Assert.Equal(3, window.LayerList!.ItemCount); // T8 图层表并集：含默认空层 "0"
             Assert.NotNull(window.Semantic);
             Assert.NotNull(window.Adjudication);
             Assert.Null(window.Adjudication!.ErrorMessage);

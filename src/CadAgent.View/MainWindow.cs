@@ -122,7 +122,8 @@ public sealed class MainWindow : Window
 
         IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
         Canvas = new CanvasViewModel(items);
-        var layers = new LayersViewModel(items, Canvas);
+        // T8：传 session → 图层面板 = renderItems ∪ 图层表（空图层计数 0+表色样）。
+        var layers = new LayersViewModel(items, Canvas, vm.Session);
         Layers = layers;
 
         // T9 会话闸：编辑/撤销（EditViewModel）与后台 session 读（diff/check/scan）
@@ -1410,7 +1411,7 @@ public sealed class MainWindow : Window
         if (Canvas is null || Layers is null || Edit is null) return;
         IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
         Canvas.Refresh(items);
-        Layers.Refresh(items);
+        Layers.Refresh(items, vm.Session); // T8：图层表并集（编辑清空某层后空层仍显示）
         if (LayerList is not null) LayerList.ItemsSource = Layers.Layers;
         if (EditLayerSelector is not null)
             EditLayerSelector.ItemsSource = Layers.Layers.Select(l => l.Name).ToList();
