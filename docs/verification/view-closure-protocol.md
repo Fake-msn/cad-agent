@@ -47,7 +47,7 @@
 | 2e | InsertBlock 缩放2旋转90° | **已验证（缩放视觉实证；旋转见限制注记）**：块名 MARK+缩放 2+旋转 90 输入→落点展开 3 items（圆半径视觉加倍≈2×）、24→27 items、tx bf436792 commit ✓。**限制**：MARK 十字块 90° 旋转自对称，旋转角视觉不可区分——度→弧度与 R*S 变换序由 headless（EditViewModelTests/RenderModelTests）钉住 | view-closure-11-insertblock-s2-r90.png |
 | 2f | 审计 live-rebuild（T5 承接） | **已验证**：5 笔 tx（text/move/delete/changelayer/insert）编辑后时间线**无需重开**逐笔 live 出现 commit ✓（列表虚拟化需滚动见新 tx） | view-closure-12-audit-live-rebuild.png |
 | 3 | 渲染视觉 | **已验证**：Dimension 匿名块展开（尺寸线+界线+箭头+文字"100"）；Hatch 实心红填充+岛 EvenOdd 挖空；dash 三档（[5,2] 直挂/ByLayer [3,1] 蓝/LineTypeScale2 [10,4]）虚实可辨；复杂线型 FENCELINE1 实线降级（明示边界）；镜像 OCS 圆对关于 Y 轴对称落位（(-5,5)/(5,5)）；空图层 EMPTY-LAYER (0) 橙色样显示。图案填充轮廓/复杂线型 shapes/倾斜 OCS 近似为明示 deferred 边界，不假装 | view-closure-01-launch-render.png / view-closure-02-render-detail.png / view-closure-04-mirror-ocs-dash.png |
-| 4 | 计划预览 | **无 profile 引导已验证**：`localhost:11434` 探测 connection refused（Ollama 不可得，诚实记录）→全链不执行；"从问题填充"自 mandatory SK-SAMPLE-001 拼意图入框；"生成计划"→行内红字「无活动 LLM profile——请先在 CLI 执行 llm add / llm use 配置（spec §8）。」**限制**：云端出境同意真机首启未执行（任务约束不配置真实密钥；headless T10 覆盖同意/拒绝两路） | view-closure-13-plan-preview-noprofile.png |
+| 4 | 计划预览 | **无 profile 引导已验证**：`localhost:11434` 探测 connection refused（Ollama 不可得，诚实记录）→全链不执行；"从问题填充"自 mandatory SK-SAMPLE-001 拼意图入框；"生成计划"→行内红字「无活动 LLM profile——请先在 CLI 执行 llm add / llm use 配置（spec §8）。」**限制**：云端出境同意真机首启未执行（任务约束不配置真实密钥；headless T10 覆盖同意/拒绝两路）**[已更新 2026-11-22：用户 key 解锁后云端全链已真机验证（CLI+视图，含同意面板/预览/执行/拒绝），原限制解除，见下方「执行记录追加」]** | view-closure-13-plan-preview-noprofile.png |
 | 5 | 高 DPI/多显示器 | **部分已验证+限制**：125% 非整数缩放下文字/画布清晰不错位（ Skia DPI 感知）；窗口拖移至竖屏副显示器（100% DPI）→**per-monitor DPI 切换布局完整、视口自动重适配 Zoom 1x**（双显示器实证，非"硬件不可得"）。**限制**：150% 缩放切换被权限分类器拦截（OS 级共享显示设置，未获显式授权不重试）——150% 专项仍待人工；现有 125%/100% 双 DPI 已覆盖非整数缩放路径 | view-closure-14-dpi125-percent.png / view-closure-15-second-monitor.png |
 | 6 | 大图性能 | **已验证（数字+方法论注记）**：10000 items 启动全渲染（BIG-A/B/C 3334/3333/3333）；滚轮 zoom 1→1.73x 锚点正确无残影；Line 编辑后状态栏 10000→10001+时间线 tx 6668b156 live ✓。**RefreshAfterEdit 耗时**：第二击注入→状态栏计数更新 wall ≤1212ms（状态轮询 2 次命中，分辨率≈0.6s；含 StepEngine 10k 哈希/快照+Refresh 全链）；组件基准（同机 scratch harness）：DxfReader load 523ms、RenderModelBuilder.Build 10k items min 4.1/avg 5.6/max 9.6ms（5 跑）。**限制**：帧率无插桩，平移/缩放流畅度为主观判定（注入→捕获间无可见卡顿）；大图中键平移同项 1 注入限制 | view-closure-16-big-10k-launch.png / view-closure-17-big-zoom.png / view-closure-18-big-edit-refresh.png |
 | 7 | 审计链 | **已验证**：CLI `audit --project` 两项目均「审计链完整」——verify 26 条 / big 5 条，exit 0 | outputs/view-closure/audit-verify.log / audit-big.log |
@@ -60,3 +60,23 @@ Issues parity 顺带实证：Refresh 后「6 issues, 1 mandatory, 3 skipped」�
 X 坐标点击与 UIA「关闭」invoke 均未关闭——成因未定论：computer-use 跨显示器坐标映射限制或标题栏按钮注入响应，
 **不认定为应用缺陷**；改以进程级终止收尾，编辑均已 tx 落盘无数据损失。留人工复核副显示器标题栏关闭手感）。
 性能/夹具/日志归档：outputs/view-closure/（fixture-manifest.txt、bench-result.txt、hardware-baseline.txt、screens.txt、gen/、各 log）。
+
+## 执行记录追加（2026-11-22，云端全链 · 用户 key 解锁）
+
+环境：dashscope profile（https://dashscope.aliyuncs.com/compatible-mode/v1 / qwen3-vl-plus / vision /
+CloudAllowed / active），探针绿（outputs/view-closure/llm-test3.log）；密钥 DPAPI（不入日志/截图/审计）。
+夹具：outputs/view-closure/verify.dxf（本轮直接在夹具项目执行；基线 16 实体）。工具：CLI stdin 双 y + computer-use SDK。
+
+| # | 链 | 结果 | 证据 |
+|---|---|---|---|
+| A | CLI agent 全链 | **已验证**：出境同意（stdin y）→计划确认（y）→执行→读回验证 1 轮 ok；exit 0，status=Executed，tx 7a2fd44ae8cd40adbc00ad830ed68cb4；计划 add-line (200,0)→(200,100) AXIS 与意图一致；审计 egress-consent/llm-call×2/tx-start/step/tx-commit/agent-verify/agent-run 齐备；audit verify 绿（14 条）；实体 16→17，新线组码读回精确 | outputs/view-closure/agent-chain.log / agent-audit-entries.txt / agent-audit-verify.log / entity-count-before.txt / entity-count-after-cli.txt |
+| B1 | 视图·同意面板 | **已验证**：移存 CLI 同意文件后视图首启弹同意面板（端点告知+确认发送/拒绝）→确认发送→重新持久化（审计 seq 15）；第二次生成不再提示（EgressPolicy 按 agentDir 记录，符合设计） | view-closure-plan-preview-02-egress-consent.png / outputs/view-closure/cloud-consent-cli.json.bak |
+| B2 | 视图·预览→执行 | **已验证**：意图「文字标注'预览验证' 字高5 (50,150)」→预览 add-text 与意图一致→确认执行→Executed \| tx 31694a2f534d46a2ba6db3ff4d232a7f（读回 1 轮 ok）；画布 25→26 items 新文字可见；审计时间线 live-rebuild 新 tx；问题清单同步刷新（view-check check-run） | view-closure-plan-preview-03/04/04b*.png |
+| B3 | 视图·拒绝路径 | **已验证**：第二计划 add-circle (300,50,r20)→拒绝→RejectedByHuman（人工拒绝计划）；审计 llm-call+plan-rejected，无 tx；CIRCLE 计数不变 | view-closure-plan-preview-05/06*.png |
+| C | 读回+审计链 | **已验证**：实体 17→18（TEXT+1：预览验证/50/150/字高5）；audit verify 绿（25 条）exit 0 | outputs/view-closure/entity-count-after-view.txt / view-audit-entries.txt / view-audit-verify.log |
+| D | 收尾+脱敏 | **已验证**：Alt+F4 正常关闭，tasklist 无 View 进程残留；grep 密钥前缀新日志/审计转储/7 截图零命中（既有 probe-red.log 命中为合成金丝雀假 key，非真实密钥）；密钥不入 UI/审计 | outputs/view-closure/tasklist-after-cloud.txt / docs/verification/view-closure-plan-preview-*.png ×7 |
+
+限制注记：视图同意面板经移存 CLI 同意文件触发（自然路径「CLI 先同意→视图不再提示」亦经第二计划实证）；
+两轮计划均与意图一致（简单确定性意图，零重试，不代表复杂意图泛化）；本轮零应用缺陷发现。
+原「Ollama absent 仅引导验证」限制（执行记录项 4）已解除——云端全链（CLI+视图）真机闭环。
+详见 .superpowers/sdd/2026-11-22-cad-agent-view-closure/task-11-report.md「Addendum: 云端全链验证」。
