@@ -74,7 +74,9 @@ public static class RenderModelBuilder
     /// Depth guard: a top-level Insert expands its block (depth 0 -> children at
     /// depth 1); an Insert inside that block expands ONE more level (depth 1 ->
     /// depth 2); any Insert at depth 2 is skipped and counted. Prevents stack
-    /// overflow on deeply nested / self-referential block chains.
+    /// overflow on deeply nested / self-referential block chains. Dimension
+    /// block expansion shares the same guard (a Dimension inside a block may
+    /// point back to an ancestor block — same overflow/exponential-DAG hazard).
     /// </summary>
     private const int MaxInsertDepth = 2;
 
@@ -84,8 +86,8 @@ public static class RenderModelBuilder
     /// <summary>
     /// Builds the flat render list. <paramref name="skippedCount"/> reports entities
     /// the builder does not support (unknown types, unsupported primitives, and
-    /// Inserts beyond the depth guard), plus honest skips: Dimensions without a
-    /// block (no generated geometry) and Hatches without boundary points.
+    /// Inserts/Dimensions beyond the depth guard), plus honest skips: Dimensions
+    /// without a block (no generated geometry) and Hatches without boundary points.
     /// </summary>
     public static IReadOnlyList<RenderItem> Build(DrawingSession session, out int skippedCount)
     {
@@ -286,7 +288,9 @@ public static class RenderModelBuilder
             {
                 // 尺寸标注经匿名块（*Dnn）展开——块内即厂商绘制的标注几何（延伸线/尺寸线/箭头/文本），
                 // 探针核定 DXF 往返保留。块缺失（未生成标注几何）→诚实 skip+计数。
-                if (dim.Block is null) { skipped++; break; }
+                // 深度守卫与 Insert 对齐：病态 DXF 中块内 Dimension 可回指祖先块（自指环）
+                // →无限递归 StackOverflow；共享块 Dimension DAG 可指数展开。顶层 depth=0 不受影响。
+                if (depth >= MaxInsertDepth || dim.Block is null) { skipped++; break; }
                 int childIndex = 0;
                 foreach (Entity child in dim.Block.Entities)
                     Append(child, items, ref skipped, t, rotationDeg, heightScale, byBlockColor, depth + 1,

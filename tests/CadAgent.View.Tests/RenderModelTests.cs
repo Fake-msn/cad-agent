@@ -826,6 +826,73 @@ public class RenderModelTests
     }
 
     [Fact]
+    public void Dimension_NestedChain_WithinLimit_Expands()
+    {
+        // 顶层 Dimension(depth 0) -> 块内 Dimension(depth 1) -> Line(depth 2)：
+        // 链深恰在 MaxInsertDepth=2 限内，全部展开（钉住守卫不过度拦截）。
+        WithSession(doc =>
+        {
+            var b2 = new BlockRecord("*D2");
+            b2.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            doc.BlockRecords.Add(b2);
+            var b1 = new BlockRecord("*D1");
+            b1.Entities.Add(new DimensionLinear { Block = b2 });
+            doc.BlockRecords.Add(b1);
+            doc.Entities.Add(new DimensionLinear { Block = b1 });
+        }, s =>
+        {
+            var line = Assert.Single(RenderModelBuilder.Build(s, out int skipped));
+            Assert.Equal(0, skipped);
+            Assert.Equal(RenderKind.Line, line.Kind);
+        });
+    }
+
+    [Fact]
+    public void Dimension_NestedChain_DepthGuardStopsBeyondLimit()
+    {
+        // 顶层 Dimension(depth 0) -> 块内 Dimension(depth 1) -> 块内 Dimension(depth 2)：
+        // 第三层 Dimension 与 Insert 深度守卫对齐——不展开、诚实 skip+计数，
+        // 最内层 Line 不可见（守卫缺失时会被展开，此断言 RED）。
+        WithSession(doc =>
+        {
+            var b3 = new BlockRecord("*D3");
+            b3.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(b3);
+            var b2 = new BlockRecord("*D2");
+            b2.Entities.Add(new DimensionLinear { Block = b3 });
+            doc.BlockRecords.Add(b2);
+            var b1 = new BlockRecord("*D1");
+            b1.Entities.Add(new DimensionLinear { Block = b2 });
+            doc.BlockRecords.Add(b1);
+            doc.Entities.Add(new DimensionLinear { Block = b1 });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s, out int skipped);
+            Assert.Empty(items);
+            Assert.Equal(1, skipped); // 超深 Dimension 诚实计数，不假装已渲染
+        });
+    }
+
+    [Fact]
+    public void Dimension_SelfReferentialBlock_DepthGuardPreventsInfiniteRecursion()
+    {
+        // 病态 DXF：块内 Dimension 回指自身所在块（自指环）。无守卫时无限递归
+        // → StackOverflow（进程崩溃不可捕获）；守卫在 depth 2 截断 → skip+计数。
+        WithSession(doc =>
+        {
+            var blk = new BlockRecord("*D1");
+            blk.Entities.Add(new DimensionLinear { Block = blk });
+            doc.BlockRecords.Add(blk);
+            doc.Entities.Add(new DimensionLinear { Block = blk });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s, out int skipped);
+            Assert.Empty(items);
+            Assert.Equal(1, skipped);
+        });
+    }
+
+    [Fact]
     public void Hatch_SolidSquare_ProducesFilledHatchItem()
     {
         WithSession(doc =>
