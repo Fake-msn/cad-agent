@@ -82,7 +82,8 @@ public static partial class CommandRouter
     internal static bool GateRefusesRun(GateReport report) => report.Level != GateLevel.Green;
 
     /// <summary>
-    /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent/repl/export 消费点共用。
+    /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent/repl/export
+    /// 修改消费点 + rollback/check/review 只读/撤回消费点共用（T5 顺手修②等价一致性）。
     /// persisted=Store.Load → DrawingSession.Load(path, persisted) → census 非空回写（原子写）。
     /// R9：persisted Empty/缺 + 源 .dwg 在 → Load 从源通知重建 census（此处回写 sidecar）；
     /// 源缺失 → Load 抛 InvalidOperationException（各消费点既有 catch/LoadOrReject 留痕拒绝）。
@@ -706,7 +707,10 @@ public static partial class CommandRouter
         var ruleSet = LoadRuleSet(args, stderr);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
+        // T5 顺手修②：裸 Load → LoadWithCensus——只读审查路径享受 persisted census
+        // 直载（sidecar 有效时不重读源，与 run/rollback 等价一致性）；check 只读不改图，
+        // Yellow 不拦只读审查（built-in 无 mandatory → exit 0 行为保持）。
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath,
             session, audit, op, stderr, source: "check");
         if (drawing is null) return 1;
         string overlayPath = SemanticOverlayPath(agentDir);

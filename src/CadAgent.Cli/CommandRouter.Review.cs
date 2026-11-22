@@ -62,7 +62,9 @@ public static partial class CommandRouter
         // 驳回：先留痕，再回滚（既有快照机制，rollback 自身亦留痕）
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(), session,
             "review", "review-rejected", txId, payload, "", "", "", ""));
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath, session, audit, op, stderr, source: "review");
+        // T5 顺手修②：裸 Load → LoadWithCensus——与 run/rollback 同一 persisted census
+        // 直载口径（sidecar 有效时不重读源）；Yellow 上驳回回滚保持 R7 撤回处置豁免。
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath, session, audit, op, stderr, source: "review");
         if (drawing == null) return 1;
         Engine(agentDir, audit).Rollback(txId, drawing, session);
         drawing.Reload();
