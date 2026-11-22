@@ -57,6 +57,10 @@ namespace CadAgent.View;
 /// ②驳回签认→快照回滚（RollbackTx→EditViewModel.UndoAsync，仅已提交 tx 可签认）；
 /// ③状态文件损坏优雅降级（audit.db/roles.yaml/signoffs.json → ErrorMessage/
 /// StateNote 提示，窗口照常打开、图纸照常渲染）；SetActiveTool 补 _editBusy 硬闸。
+/// 幅面感知 T5 修复波：①布局幅面只读硬闸（_layoutSheetActive 结构性标志——编辑
+/// 工具激活/画布点击/删除/撤销/改层一律拒绝，纸面坐标绝不进模型空间；状态栏只读
+/// 注记 + EditError 引导；不做纸→模型逆映射，deferred）；②OnSheetSelected 补
+/// _editBusy 硬闸（在途编辑期间幅面不切换，selector 索引恢复，防 torn read）。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -101,6 +105,15 @@ public sealed class MainWindow : Window
     private DrawingCanvas? _canvasControl;
     /// <summary>程序性刷新幅面下拉时抑制 SelectionChanged（避免编辑重建二次刷新/重 Fit）。</summary>
     private bool _suppressSheetSelection;
+    /// <summary>
+    /// 修复①：布局幅面只读标志（结构性硬闸，非仅 IsEnabled——RaiseEvent/画布点击
+    /// 可绕过禁用态）。布局幅面激活期间编辑工具一律硬禁：纸面坐标绝不提交进模型
+    /// 空间 Doc.Entities（静默损坏）；不做纸→模型逆映射（纸面编辑非本期语义，deferred）。
+    /// Select 只读选择路径不受影响。
+    /// </summary>
+    private bool _layoutSheetActive;
+    /// <summary>修复①：布局幅面只读引导文本（EditError 通道；状态栏另有只读注记）。</summary>
+    private const string LayoutReadOnlyMessage = "布局幅面为只读视图，编辑请切回模型幅面";
     /// <summary>窗口标题图纸名（状态栏 _baseStatus 重建用）。</summary>
     private string _title = "";
 
@@ -132,6 +145,7 @@ public sealed class MainWindow : Window
         SheetRecord firstSheet = _sheets[0];
         _currentSheetId = firstSheet.SheetId;
         _currentSheetName = firstSheet.Name;
+        _layoutSheetActive = firstSheet.LayoutName is not null; // 修复①：只读标志与幅面同步
         IReadOnlyList<RenderItem> items = ItemsForSheet(firstSheet);
         Canvas = new CanvasViewModel(items);
         var layers = new LayersViewModel(items, Canvas);
@@ -967,6 +981,8 @@ public sealed class MainWindow : Window
             // T10 状态栏收尾：图纸名/实体计数（_baseStatus）+ 缩放 + 选择 + 审计摘要。
             // T5：幅面名（当前选中幅面）。
             string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}";
+            // 修复①：布局幅面只读注记（UI 提示；编辑尝试另经 EditError 通道引导）。
+            if (_layoutSheetActive) status += "（只读）";
             if (selected is not null)
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
@@ -1261,6 +1277,12 @@ public sealed class MainWindow : Window
     private void SetActiveTool(EditTool tool)
     {
         if (Edit is null || Canvas is null || _editBusy) return;
+        // 修复①：布局幅面只读硬闸——编辑工具激活一律拒绝（Select 为只读选择路径，放行）。
+        if (_layoutSheetActive && tool != EditTool.Select)
+        {
+            SetEditError(LayoutReadOnlyMessage);
+            return;
+        }
         Edit.ActiveTool = tool;
         Canvas.SetPendingPoint(null);
         _moveBase = null;
@@ -1271,6 +1293,12 @@ public sealed class MainWindow : Window
     private void OnDeleteClick(object? sender, RoutedEventArgs e)
     {
         if (Edit is null || Canvas is null || _editBusy) return;
+        // 修复①：布局幅面只读硬闸（确认删除/激活 Delete 均拒绝）。
+        if (_layoutSheetActive)
+        {
+            SetEditError(LayoutReadOnlyMessage);
+            return;
+        }
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
             _ = RunEditAsync(() => Edit.DeleteAsync(handle));
         else
@@ -1281,6 +1309,12 @@ public sealed class MainWindow : Window
     private void OnUndoClick(object? sender, RoutedEventArgs e)
     {
         if (Edit is null || _editBusy || Edit.RecentTxIds.Count == 0) return;
+        // 修复①：布局幅面只读硬闸——撤销同样改模型空间，布局视图期间拒绝。
+        if (_layoutSheetActive)
+        {
+            SetEditError(LayoutReadOnlyMessage);
+            return;
+        }
         string txId = Edit.RecentTxIds[^1];
         _ = RunEditAsync(() => Edit.UndoAsync(txId));
     }
@@ -1289,6 +1323,12 @@ public sealed class MainWindow : Window
     private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
     {
         if (Edit is null || Canvas is null || _editBusy) return;
+        // 修复①：布局幅面只读硬闸——改层写模型空间，布局视图期间拒绝。
+        if (_layoutSheetActive)
+        {
+            SetEditError(LayoutReadOnlyMessage);
+            return;
+        }
         if (Edit.ActiveTool == EditTool.ChangeLayer
             && Canvas.SelectedHandle is string handle
             && EditLayerSelector?.SelectedItem is string layer)
@@ -1306,6 +1346,13 @@ public sealed class MainWindow : Window
         if (Edit is null || Canvas is null) return false;
         // T10 重入闸：编辑在途时忽略画布点击（消费事件，不落预览锚点/不改选择）。
         if (_editBusy) return true;
+        // 修复①：布局幅面只读硬闸——编辑工具点击消费但不提交（纸面坐标绝不进模型
+        // 空间；覆盖模型幅面激活工具后切布局的残留态）；Select 走默认只读选择路径。
+        if (_layoutSheetActive && Edit.ActiveTool != EditTool.Select)
+        {
+            SetEditError(LayoutReadOnlyMessage);
+            return true;
+        }
         switch (Edit.ActiveTool)
         {
             case EditTool.Line:
@@ -1381,11 +1428,31 @@ public sealed class MainWindow : Window
         if (DiffToggle is not null) DiffToggle.IsEnabled = !busy;
     }
 
-    /// <summary>T5：幅面下拉选择 → 刷新画布为该幅面图元（用户交互触发，重新 Fit 到新内容）。</summary>
+    /// <summary>T5：幅面下拉选择 → 刷新画布为该幅面图元（用户交互触发，重新 Fit 到新内容）。
+    /// 修复②：_editBusy 硬闸——在途编辑期间程序性 SelectionChanged 也不得切换幅面
+    /// （ApplySheet→BuildViewport 枚举 doc.Entities 无会话闸 = torn read，T6/T10 同款
+    /// 防护）；忽略并恢复 selector 索引到当前幅面。</summary>
     private void OnSheetSelected(object? sender, SelectionChangedEventArgs e)
     {
         if (_suppressSheetSelection) return;
+        if (_editBusy)
+        {
+            RestoreSheetSelectorIndex();
+            return;
+        }
         if (SheetSelector?.SelectedItem is SheetRecord sheet) ApplySheet(sheet, refit: true);
+    }
+
+    /// <summary>修复②：恢复幅面下拉索引到当前幅面（抑制程序性 SelectionChanged 递归）。</summary>
+    private void RestoreSheetSelectorIndex()
+    {
+        if (SheetSelector is null) return;
+        int index = 0;
+        for (int i = 0; i < _sheets.Count; i++)
+            if (_sheets[i].SheetId == _currentSheetId) { index = i; break; }
+        _suppressSheetSelection = true;
+        try { SheetSelector.SelectedIndex = index; }
+        finally { _suppressSheetSelection = false; }
     }
 
     /// <summary>
@@ -1404,6 +1471,11 @@ public sealed class MainWindow : Window
             EditLayerSelector.ItemsSource = Layers.Layers.Select(l => l.Name).ToList();
         _currentSheetId = sheet.SheetId;
         _currentSheetName = sheet.Name;
+        // 修复①：只读标志与幅面同步；切换幅面清除跨空间残留预览锚点/Move 基准
+        // （模型/纸面坐标不得混用——纸面编辑非本期语义，deferred）。
+        _layoutSheetActive = sheet.LayoutName is not null;
+        Canvas.SetPendingPoint(null);
+        _moveBase = null;
         _baseStatus = $"{_title} — {items.Count} render items";
         if (refit && _canvasControl is { Bounds.Width: > 0, Bounds.Height: > 0 })
             Canvas.Fit(RenderModelBuilder.Bounds(items), _canvasControl.Bounds.Width, _canvasControl.Bounds.Height);
