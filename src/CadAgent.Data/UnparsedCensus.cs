@@ -15,8 +15,14 @@ public sealed record UnparsedCensus(IReadOnlyList<UnparsedClassBrief> Classes)
     public static readonly UnparsedCensus Empty = new(Array.Empty<UnparsedClassBrief>());
     public int TotalCount => Classes.Sum(c => c.Count);
 
+    // 通知文本三变体（ACadSharp v3.8.35 源码 + 合成 DXF 实证核实）：
+    // DWG（DwgReader）："Unlisted object with DXF name {name} has been read as an UnknownEntity"；
+    // DXF 类表登记（DxfSectionReaderBase:260）："Entity not supported read as an UnknownEntity: {name}"；
+    // DXF 类表无登记（DxfSectionReaderBase:265）："Entity not supported: {name}"。
+    // DXF 两变体共用 "Entity not supported(?: read as an UnknownEntity)?: " 前缀（可选段区分）。
     private static readonly Regex UnknownEntityMsg =
-        new(@"Unlisted object with DXF name (\S+) has been read as an UnknownEntity", RegexOptions.Compiled);
+        new(@"Unlisted object with DXF name (\S+) has been read as an UnknownEntity|Entity not supported(?: read as an UnknownEntity)?: (\S+)",
+            RegexOptions.Compiled);
 
     public static UnparsedCensus FromNotifications(IEnumerable<string> messages)
     {
@@ -25,7 +31,8 @@ public sealed record UnparsedCensus(IReadOnlyList<UnparsedClassBrief> Classes)
         {
             var match = UnknownEntityMsg.Match(m);
             if (!match.Success) continue;
-            string name = match.Groups[1].Value;
+            // alternation 两分支各占一组：DWG→组1，DXF→组2（取成功者）
+            string name = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
             counts.TryGetValue(name, out int c);
             counts[name] = c + 1;
         }

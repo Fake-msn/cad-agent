@@ -125,11 +125,20 @@ public sealed class StepEngine
                             _ => null
                         };
                     }
-                    // T4：params 含 "sheetId"（string）→ 三参幅面作用域校验（防跨幅跑偏）；
-                    // 无 sheetId/非 string → 两参 legacy 路径（行为保持）
-                    if (step.Params.TryGetProperty("sheetId", out var sEl) && sEl.ValueKind == JsonValueKind.String)
+                    // T4：params 含 "sheetId" → 三参幅面作用域校验（防跨幅跑偏）；无 sheetId → 两参 legacy。
+                    // R12：number sheetId 镜像 handle 先例（:123）number→decimal string 强制转换 →
+                    // 作用域生效（不再 fail-open 静默走两参 legacy）；string/缺失/其余非法形态行为保持。
+                    if (step.Params.TryGetProperty("sheetId", out var sEl))
                     {
-                        sheetId = sEl.GetString();
+                        sheetId = sEl.ValueKind switch
+                        {
+                            JsonValueKind.Number => sEl.GetUInt64().ToString(),
+                            JsonValueKind.String => sEl.GetString(),
+                            _ => null
+                        };
+                    }
+                    if (sheetId != null)
+                    {
                         decision = contextGate.CheckContext(aware.RequiredSemantics, targetHandle, sheetId);
                     }
                     else

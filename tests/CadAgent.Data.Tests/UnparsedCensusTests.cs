@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using CadAgent.Core;
 using CadAgent.Data;
 using Xunit.Abstractions;
 
@@ -63,6 +64,84 @@ public class UnparsedCensusTests
         Assert.Empty(s.Unknowns);
         Assert.Equal(2, s.Unparsed!.Count);
         Assert.All(s.Unparsed!, u => Assert.Equal("", u.Handle));
+    }
+
+    // ---------- R11：用户 DXF 源 census 盲闭合（DXF 通知文本异于 DWG） ----------
+
+    [Fact]
+    public void FromNotifications_DxfVariants_ParsesPerClassCounts()
+    {
+        // DXF 读取器通知文本（v3.8.35 实证，异于 DWG "Unlisted object..."）：
+        // 类表登记 → "Entity not supported read as an UnknownEntity: {name}"；
+        // 类表无登记 → "Entity not supported: {name}"。两变体均须计入 census，DWG 变体仍兼容。
+        var msgs = new[]
+        {
+            "Entity not supported read as an UnknownEntity: TCH_WALL",
+            "Entity not supported read as an UnknownEntity: TCH_WALL",
+            "Entity not supported: TCH_OPENING",
+            "Unlisted object with DXF name TCH_PIPE has been read as an UnknownEntity",
+            "Entity in SortEntitiesTable 2996 not found 0", // 非 UnknownEntity 通知→忽略
+        };
+        var c = UnparsedCensus.FromNotifications(msgs);
+        Assert.Equal(4, c.TotalCount);
+        Assert.Equal(2, c.Classes.Single(x => x.CppClassName == "TCH_WALL").Count);
+        Assert.Equal(1, c.Classes.Single(x => x.CppClassName == "TCH_OPENING").Count);
+        Assert.Equal(1, c.Classes.Single(x => x.CppClassName == "TCH_PIPE").Count);
+    }
+
+    [Fact]
+    public void Load_DxfSourceWithTchClass_CensusNonEmpty_Yellow()
+    {
+        // 合成天正 DXF（CLASSES TCH_WALL + TCH_WALL 实体 + 原生 Line）：LoadDxf 通知捕获 →
+        // census 非空 → Summarize.Unparsed 非空 → GateDetector Yellow（有原生+未解析，只读审查）。
+        string path = DxfFixture.CreateTempTchDxf(withClass: true);
+        try
+        {
+            var session = DrawingSession.Load(path);
+            Assert.True(session.Unparsed.TotalCount > 0);
+            Assert.Contains(session.Unparsed.Classes, c => c.CppClassName == "TCH_WALL");
+            // KeepUnknownEntities=false → TCH 丢弃出对象图：图内 Unknowns 空，证据全在通知 census
+            var summary = session.Summarize();
+            Assert.Empty(summary.Unknowns);
+            Assert.NotNull(summary.Unparsed);
+            Assert.Contains(summary.Unparsed!, u => u.CppClassName == "TCH_WALL");
+            var report = GateDetector.Inspect(summary, new EmptySupportMatrix());
+            Assert.Equal(GateLevel.Yellow, report.Level);
+            Assert.Contains("只读审查", report.Guidance);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Load_DxfSourceTchNoClass_CensusNonEmpty()
+    {
+        // 类表无登记变体 "Entity not supported: TCH_WALL" 同样计入 census（防只匹配单一文本）。
+        string path = DxfFixture.CreateTempTchDxf(withClass: false);
+        try
+        {
+            var session = DrawingSession.Load(path);
+            Assert.True(session.Unparsed.TotalCount > 0);
+            Assert.Contains(session.Unparsed.Classes, c => c.CppClassName == "TCH_WALL");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Load_PlainDxf_CensusEmpty_Green_Verbatim()
+    {
+        // plain DXF（无 TCH 通知）→ census Empty → Summarize.Unparsed null → Green 逐字保持。
+        string path = DxfFixture.CreateTempDxf(DxfFixture.AddSampleLine);
+        try
+        {
+            var session = DrawingSession.Load(path);
+            Assert.Equal(0, session.Unparsed.TotalCount);
+            var summary = session.Summarize();
+            Assert.Null(summary.Unparsed);
+            var report = GateDetector.Inspect(summary, new EmptySupportMatrix());
+            Assert.Equal(GateLevel.Green, report.Level);
+            Assert.Equal("", report.Guidance);
+        }
+        finally { File.Delete(path); }
     }
 
     [Fact]

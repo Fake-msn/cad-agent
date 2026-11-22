@@ -157,11 +157,26 @@ public class ContextGateTests : IDisposable
     }
 
     [Fact]
-    public void Engine_NonStringSheetId_Ignored_LegacyTwoArg()
+    public void Engine_NumericSheetId_CoercedToThreeArg()
     {
-        // sheetId 契约仅 string；数值等非法类型 → 忽略走两参（不抛）
+        // R12（sanctioned 更新，原 Engine_NonStringSheetId_Ignored_LegacyTwoArg 意图作废）：
+        // number sheetId 镜像 handle number→decimal string 强制转换 → 三参作用域生效，
+        // 不再 fail-open 静默走两参 legacy（防 LLM 数值 sheetId 解除跨幅防护）。
         var gate = new SheetRecordingGate();
         var result = EngineWith(gate).Run(Plan("""{"handle":"h-ok","sheetId":42}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.True(result.Ok);
+        Assert.True(gate.ThreeArgCalled);
+        Assert.False(gate.TwoArgCalled);
+        Assert.Equal("42", gate.LastSheetId);
+    }
+
+    [Fact]
+    public void Engine_NonStringNonNumberSheetId_LegacyTwoArg()
+    {
+        // bool/null 等非法形态（非 number 非 string）→ 仍忽略走两参 legacy（行为保持，不抛）
+        var gate = new SheetRecordingGate();
+        var result = EngineWith(gate).Run(Plan("""{"handle":"h-ok","sheetId":true}"""),
             new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
         Assert.True(result.Ok);
         Assert.True(gate.TwoArgCalled);

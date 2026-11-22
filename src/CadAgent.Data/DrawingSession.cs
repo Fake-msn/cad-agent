@@ -75,6 +75,8 @@ public sealed class DrawingSession : IDrawingSession
     /// 通知一次性重建 census（只取 census，doc 丢弃，working 不重写）；源缺失 → 拒绝
     /// （InvalidOperationException，无法核验完整性，不得假 Green 放行）。
     /// T3：persisted 对 .dxf 源同样生效（sidecar 注入/恢复 census；null→Empty，无 census 行为逐字不变）。
+    /// R11：.dxf 源经 LoadDxf 通知通道重建 census（用户 DXF 含 TCH 防假 Green）；通知 census 非空
+    /// 优先于 persisted，无通知（plain/working DXF）回退 persisted——sidecar/LoadWithCensus 自然生效。
     /// </summary>
     public static DrawingSession Load(string path, UnparsedCensus? persisted = null)
     {
@@ -87,7 +89,8 @@ public sealed class DrawingSession : IDrawingSession
                 // The working copy is durable editable state: committed edits live there.
                 // Load it as-is; re-deriving from the pristine .dwg would wipe them.
                 // working DXF 已丢失 TCH 对象→census 优先靠 sidecar 持久化值（persisted）恢复。
-                CadDocument workingDoc = LoadDxf(workingPath);
+                // （LoadDxf 通知 census 此处丢弃：working 无 TCH 通知，证据走 persisted/R9 重建。）
+                var (workingDoc, _) = LoadDxf(workingPath);
                 if (persisted is { TotalCount: > 0 })
                     return new DrawingSession(workingPath, workingDoc, persisted);
                 // R9：persisted Empty/缺（切片前物化的陈旧 working + 新项目无 sidecar）——
@@ -106,18 +109,28 @@ public sealed class DrawingSession : IDrawingSession
             session.SaveWorking();
             return session;
         }
-        CadDocument doc = ext switch
-        {
-            ".dxf" => LoadDxf(path),
-            _ => throw new NotSupportedException($"不支持的图纸格式: {ext}")
-        };
-        return new DrawingSession(WorkingPathFor(path), doc, persisted);
+        if (ext != ".dxf")
+            throw new NotSupportedException($"不支持的图纸格式: {ext}");
+        var (doc, fresh) = LoadDxf(path);
+        // R11：用户 DXF 源含 TCH → 通知 census 为直接证据（优先于 sidecar）；无通知
+        // （plain DXF / 引擎 working DXF）→ 回退 persisted（T3 sidecar 恢复，无 census 行为逐字保持）。
+        var dxfCensus = fresh.TotalCount > 0 ? fresh : persisted;
+        return new DrawingSession(WorkingPathFor(path), doc, dxfCensus);
     }
 
-    private static CadDocument LoadDxf(string path)
+    /// <summary>
+    /// DXF 读取 + 通知 census 捕获（R11）：用户 DXF 源可能含天正 TCH_*，ACadSharp DXF 读取器
+    /// 将其读为 UnknownEntity 但 KeepUnknownEntities=false 默认丢弃出对象图——通知是唯一证据通道
+    /// （文本异于 DWG，见 UnparsedCensus.FromNotifications）。引擎写的 working DXF 无 TCH →
+    /// 无通知 → census Empty（行为保持）。
+    /// </summary>
+    private static (CadDocument Doc, UnparsedCensus Census) LoadDxf(string path)
     {
         using var reader = new DxfReader(path);
-        return reader.Read();
+        var messages = new List<string>();
+        reader.OnNotification += (_, e) => messages.Add(e.Message);
+        var doc = reader.Read();
+        return (doc, UnparsedCensus.FromNotifications(messages));
     }
 
     /// <summary>
@@ -187,7 +200,7 @@ public sealed class DrawingSession : IDrawingSession
 
     public void Reload()
     {
-        Doc = LoadDxf(SourcePath);
+        Doc = LoadDxf(SourcePath).Doc; // 通知 census 丢弃：census 保持原值（见下注）
         _sheets = null; // 文档整体替换→幅面登记簿缓存失效，下次访问重建
         _sheetsFingerprint = null;
         // Unparsed census 保持原值：working DXF 无 TCH 对象/通知，重读不产生新证据（首载或 sidecar 值仍有效）。

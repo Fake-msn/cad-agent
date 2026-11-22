@@ -154,6 +154,42 @@ public class LightingHandlerTests : IDisposable
     }
 
     [Fact]
+    public void Layout_NumericSheetId_RegionCrossesSheet_FailsWithBoundsError()
+    {
+        // R12：number sheetId 经 OptString 镜像强制转换 → confinement 生效（区域跨幅拒绝，
+        // 不再 fail-open：原 OptString number→null 解除 bounds 检查）。镜像 string 跨幅钉住。
+        string path = TwoSheetPath();
+        try
+        {
+            var s = DrawingSession.Load(path);
+            string s1 = s.Sheets[0].SheetId;
+            // 区域 [500,2500]×[100,500] 跨入 S2 → 超出 S1 bounds → 拒绝（零落图）
+            var r = new LayoutLightingHandler().Apply(s, P($$"""{"x":500,"y":100,"width":2000,"depth":400,"spacing":500,"block":"LUM","sheetId":{{s1}}}"""));
+            Assert.False(r.Ok);
+            Assert.Contains("区域超出幅面", r.Error);
+            Assert.Contains(s1, r.Error);
+            Assert.Empty(s.Doc.Entities.OfType<Insert>().Where(i => i.Block?.Name == "LUM"));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Layout_NumericSheetId_UnknownSheet_Fails()
+    {
+        // R12：number sheetId 不存在幅面 → "幅面不存在" 拒绝（coercion 后 confinement 生效）。
+        string path = TwoSheetPath();
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var r = new LayoutLightingHandler().Apply(s, P("""{"x":0,"y":0,"width":500,"depth":500,"spacing":250,"block":"LUM","sheetId":999999}"""));
+            Assert.False(r.Ok);
+            Assert.Contains("幅面不存在", r.Error);
+            Assert.Empty(s.Doc.Entities.OfType<Insert>().Where(i => i.Block?.Name == "LUM"));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void Handler_DeclaresRoomSemantics()
     {
         var h = new LayoutLightingHandler();

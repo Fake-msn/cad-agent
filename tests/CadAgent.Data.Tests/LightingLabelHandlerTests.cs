@@ -168,6 +168,47 @@ public class LightingLabelHandlerTests : IDisposable
     }
 
     [Fact]
+    public void Label_NumericSheetId_ConfinesInsertsToDeclaredSheet()
+    {
+        // R12：number sheetId 经 OptString 镜像强制转换 → confinement 生效（仅 S1 内 Insert 编号，
+        // S2 零编号文字；不再 fail-open：原 OptString number→null 解除幅面裁剪）。镜像 string 钉住。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var frame = new BlockRecord("院标准图框_A0");
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+            doc.BlockRecords.Add(frame);
+            for (int i = 0; i < 2; i++)
+            {
+                var fi = new Insert(frame) { InsertPoint = new XYZ(i * 2000, 0, 0) };
+                fi.Attributes.Add(new AttributeEntity { Tag = "图号", Value = $"Z-E0{i + 1}" });
+                doc.Entities.Add(fi);
+            }
+            var lum = new BlockRecord("LUM");
+            lum.Entities.Add(new Line { StartPoint = new XYZ(-50, 0, 0), EndPoint = new XYZ(50, 0, 0) });
+            doc.BlockRecords.Add(lum);
+            doc.Entities.Add(new Insert(lum) { InsertPoint = new XYZ(100, 100, 0) });   // S1
+            doc.Entities.Add(new Insert(lum) { InsertPoint = new XYZ(2100, 100, 0) });  // S2
+        });
+        try
+        {
+            var s = DrawingSession.Load(path);
+            string s1 = s.Sheets[0].SheetId;
+            var r = new LabelLuminairesHandler().Apply(s, P($$"""{"prefix":"AL","block":"LUM","sheetId":{{s1}}}"""));
+            Assert.True(r.Ok);
+            var t = Assert.Single(s.Doc.Entities.OfType<TextEntity>()); // 仅 S1 灯具编号
+            Assert.Equal("AL1", t.Value);
+            Assert.True(t.InsertPoint.X >= 0 && t.InsertPoint.X <= 1000); // S1 bounds 内
+            Assert.DoesNotContain(s.Doc.Entities.OfType<TextEntity>(),
+                x => x.Value.StartsWith("AL", StringComparison.Ordinal)
+                    && x.InsertPoint.X >= 2000 && x.InsertPoint.X <= 3000); // S2 零编号
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void Handler_DeclaresLightingSemantics()
     {
         var h = new LabelLuminairesHandler();

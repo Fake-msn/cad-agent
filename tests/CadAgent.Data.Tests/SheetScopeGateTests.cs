@@ -191,6 +191,32 @@ public class SheetScopeGateTests : IDisposable
         Assert.True(result.Ok);
     }
 
+    [Fact]
+    public void StepEngine_PlanWithNumericSheetId_CrossSheetRefusedAudited()
+    {
+        // R12：number sheetId 镜像 handle 强制转换后作用域生效——S1 确认 Lighting，plan 声明
+        // sheetId=S2（JSON 数值）→ 跨幅拒绝留痕（不再 fail-open 走两参 legacy 放行）。镜像 string 跨幅钉住。
+        var (session, overlay, _, s2) = Fixture();
+        var result = Engine(overlay).Run(Plan($$"""{"prefix":"AL","block":"E","sheetId":{{s2}}}"""), session, "s1");
+        Assert.False(result.Ok);
+        Assert.Equal(0, result.StepsDone);
+        Assert.Contains("Lighting", result.Error);
+        var last = _audit.ReadAll()[^1];
+        Assert.Equal("semantic-gate-refused", last.Entry.Kind);
+        Assert.Contains(s2, last.Entry.ParamsJson); // 拒绝留痕含目标幅面（coercion 后十进制字符串）
+        Assert.True(_audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void StepEngine_PlanWithNumericSheetId_SameSheetAllowed()
+    {
+        // number sheetId 同幅（S1）→ 放行执行（coercion 后与 string 同幅等价）
+        var (session, overlay, s1, _) = Fixture();
+        var result = Engine(overlay).Run(Plan($$"""{"prefix":"AL","block":"E","sheetId":{{s1}}}"""), session, "s1");
+        Assert.True(result.Ok);
+        Assert.Equal(1, result.StepsDone);
+    }
+
     // ---------- 检测器/推断 stamp SheetId（经 WalkedEntity.SheetId） ----------
 
     [Fact]
