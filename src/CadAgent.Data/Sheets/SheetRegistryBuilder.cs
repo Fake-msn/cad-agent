@@ -1,6 +1,7 @@
 using ACadSharp;
 using ACadSharp.Entities;
 using CadAgent.Core;
+using CadAgent.Core.Cad;
 
 namespace CadAgent.Data.Sheets;
 
@@ -58,24 +59,35 @@ public static class SheetRegistryBuilder
     private static bool Inside((double MinX, double MinY, double MaxX, double MaxY) b, double x, double y)
         => x >= b.MinX && x <= b.MaxX && y >= b.MinY && y <= b.MaxY;
 
-    /// <summary>图框块几何经插入变换（缩放/旋转/基点）展开求 bounds。</summary>
+    /// <summary>
+    /// 图框块几何经插入变换（Affine.InsertAffine：缩放/旋转/基点）展开求 bounds；
+    /// 嵌套 Insert 经 Compose 递归展开（深度守卫 maxDepth=32 + 块名访问栈，同 BlockWalker）。
+    /// 空几何倒置哨兵（minX&gt;maxX）→ 回退插入点单位框（±1），不产生非法 bounds。
+    /// </summary>
     private static (double MinX, double MinY, double MaxX, double MaxY) FrameBounds(Insert f)
     {
-        double cos = Math.Cos(f.Rotation), sin = Math.Sin(f.Rotation);
-        double a = cos * f.XScale, b = -sin * f.YScale, c = sin * f.XScale, d = cos * f.YScale;
-        var bp = f.Block!.BlockEntity?.BasePoint;
-        double bx = bp?.X ?? 0, by = bp?.Y ?? 0;
-        double tx = f.InsertPoint.X - (a * bx + b * by), ty = f.InsertPoint.Y - (c * bx + d * by);
         double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
-        foreach (var e in f.Block.Entities)
+        var stack = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Expand(Entity e, Affine t, int depth)
         {
             foreach (var (x, y) in PointsOf(e))
             {
-                double wx = a * x + b * y + tx, wy = c * x + d * y + ty;
+                var (wx, wy) = t.Apply(x, y);
                 if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
                 if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
             }
+            if (e is Insert ins && ins.Block != null && depth < 32 && stack.Add(ins.Block.Name))
+            {
+                var childT = t.Compose(Affine.InsertAffine(ins));
+                foreach (var child in ins.Block.Entities) Expand(child, childT, depth + 1);
+                stack.Remove(ins.Block.Name);
+            }
         }
+        var t0 = Affine.InsertAffine(f);
+        stack.Add(f.Block!.Name);
+        foreach (var e in f.Block.Entities) Expand(e, t0, 1);
+        if (minX > maxX)
+            return (f.InsertPoint.X - 1, f.InsertPoint.Y - 1, f.InsertPoint.X + 1, f.InsertPoint.Y + 1);
         return (minX, minY, maxX, maxY);
     }
 
@@ -83,8 +95,9 @@ public static class SheetRegistryBuilder
     {
         Line l => new[] { (l.StartPoint.X, l.StartPoint.Y), (l.EndPoint.X, l.EndPoint.Y) },
         LwPolyline lw => lw.Vertices.Select(v => (v.Location.X, v.Location.Y)),
+        Polyline2D p2 => p2.Vertices.Select(v => (v.Location.X, v.Location.Y)),
         TextEntity t => new[] { (t.InsertPoint.X, t.InsertPoint.Y) },
-        Circle c => new[] { (c.Center.X - c.Radius, c.Center.Y - c.Radius), (c.Center.X + c.Radius, c.Center.Y + c.Radius) },
+        Circle c => new[] { (c.Center.X - c.Radius, c.Center.Y - c.Radius), (c.Center.X + c.Radius, c.Center.Y + c.Radius) }, // Arc : Circle 同覆盖
         Insert ins => new[] { (ins.InsertPoint.X, ins.InsertPoint.Y) },
         _ => Array.Empty<(double, double)>()
     };

@@ -30,18 +30,21 @@ public static class SemanticScanner
     {
         var overlay = existing ?? new SemanticOverlay();
 
-        LayerInference.Annotate(session, overlay, skillAliases);
-        WallPairDetector.Detect(session, overlay);
-        AxisDetector.Detect(session, overlay);
-        DoorArcDetector.Detect(session, overlay);
-        RoomDetector.AnnotateRooms(session, overlay);
+        // T2：单次块遍历供全部信号共用（含 bound xref 嵌套实体；世界坐标+后缀句柄+归一层名）
+        var walked = BlockWalker.Walk(session.Doc, session.Sheets).ToList();
+        LayerInference.AnnotateWalked(walked, overlay, skillAliases);
+        WallPairDetector.DetectWalked(walked, overlay);
+        AxisDetector.DetectWalked(walked, overlay);
+        DoorArcDetector.DetectWalked(walked, overlay);
+        RoomDetector.AnnotateRoomsWalked(walked, overlay);
 
         // 剪枝（最终审查裁定）：已删除实体（或换图后不存在）的标注必须移除，
         // 否则操作级闸口的存在性检查会被幻影实体满足。图层级 Mappings 保留。
-        var liveHandles = new HashSet<string>(session.Doc.Entities.Select(e => e.Handle.ToString()));
+        // 存活口径=遍历句柄路径（顶层句柄+嵌套 "{parent}:{i}" 后缀）。
+        var liveHandles = new HashSet<string>(walked.Select(w => w.HandlePath));
         overlay.Annotations.RemoveAll(a => !liveHandles.Contains(a.TargetHandle));
 
-        return new ScanResult(overlay, CollectAmbiguousLayers(session, overlay, skillAliases));
+        return new ScanResult(overlay, CollectAmbiguousLayers(walked, overlay, skillAliases));
     }
 
     /// <summary>
@@ -51,23 +54,24 @@ public static class SemanticScanner
     /// reported. Case-insensitive on all checks;
     /// entities are grouped in document order, samples capped at 5 handles,
     /// results sorted by entity count descending.
+    /// T2：遍历口径（含嵌套实体）；约定/别名匹配用归一名，分组键与样本句柄保留原名/HandlePath。
     /// </summary>
     private static IReadOnlyList<AmbiguousLayer> CollectAmbiguousLayers(
-        DrawingSession session, SemanticOverlay overlay,
+        IReadOnlyList<WalkedEntity> walked, SemanticOverlay overlay,
         IReadOnlyDictionary<string, SemanticClass>? skillAliases = null)
     {
         var byLayer = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var e in session.Doc.Entities)
+        foreach (var w in walked)
         {
-            string layer = e.Layer?.Name ?? "0";
-            if (ConventionLibrary.ClassForLayer(layer) != SemanticClass.Unknown) continue;
-            if (overlay.Mappings.Any(m =>
-                    string.Equals(m.LayerName, layer, StringComparison.OrdinalIgnoreCase))) continue;
-            if (LayerInference.TryGetSkillClass(skillAliases, layer, out _)) continue;
+            string layer = w.Entity.Layer?.Name ?? "0";
+            string canon = w.CanonicalLayer;
+            if (ConventionLibrary.ClassForLayer(canon) != SemanticClass.Unknown) continue;
+            if (LayerInference.FindMapping(overlay, layer, canon) is not null) continue;
+            if (LayerInference.TryGetSkillClassForLayer(skillAliases, layer, canon, out _)) continue;
 
             if (!byLayer.TryGetValue(layer, out var handles))
                 byLayer[layer] = handles = new List<string>();
-            handles.Add(e.Handle.ToString());
+            handles.Add(w.HandlePath);
         }
 
         return byLayer

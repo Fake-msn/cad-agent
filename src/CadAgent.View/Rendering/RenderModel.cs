@@ -1,6 +1,7 @@
 using System.Globalization;
 using ACadSharp;
 using ACadSharp.Entities;
+using CadAgent.Core.Cad;
 using CadAgent.Data;
 
 namespace CadAgent.View.Rendering;
@@ -219,21 +220,9 @@ public static class RenderModelBuilder
 
     /// <summary>
     /// Local insert transform: p' = R(rotation) * S(xScale,yScale) * (p - blockBasePoint)
-    /// + insertPoint. Scale is applied BEFORE rotation (matches Insert.GetTransform's
-    /// matrix, verified by probe). The block base point is subtracted first so blocks
-    /// authored around a non-zero origin land correctly.
+    /// + insertPoint. R1 数学 consolidation：实现移入 Core（Affine.InsertAffine），此处委托。
     /// </summary>
-    private static Affine InsertTransform(Insert insert)
-    {
-        double cos = Math.Cos(insert.Rotation), sin = Math.Sin(insert.Rotation);
-        double a = cos * insert.XScale, b = -sin * insert.YScale;
-        double c = sin * insert.XScale, d = cos * insert.YScale;
-        CSMath.XYZ? bp = insert.Block?.BlockEntity?.BasePoint;
-        double bx = bp?.X ?? 0, by = bp?.Y ?? 0;
-        double tx = insert.InsertPoint.X - (a * bx + b * by);
-        double ty = insert.InsertPoint.Y - (c * bx + d * by);
-        return new Affine(a, b, c, d, tx, ty);
-    }
+    private static Affine InsertTransform(Insert insert) => Affine.InsertAffine(insert);
 
     private static uint ResolveColor(Entity e, uint? byBlockColor)
     {
@@ -261,31 +250,4 @@ public static class RenderModelBuilder
     private static double ToDeg(double radians) => radians * 180.0 / Math.PI;
 
     private static double NormDeg(double deg) => ((deg % 360.0) + 360.0) % 360.0;
-
-    /// <summary>
-    /// 2D affine map x' = A*x + B*y + Tx, y' = C*x + D*y + Ty. Composed through
-    /// nested insert expansion so block geometry lands in drawing space.
-    /// </summary>
-    private readonly record struct Affine(double A, double B, double C, double D, double Tx, double Ty)
-    {
-        public static Affine Identity => new(1, 0, 0, 1, 0, 0);
-
-        public (double X, double Y) Apply(double x, double y) => (A * x + B * y + Tx, C * x + D * y + Ty);
-
-        /// <summary>this(inner(p)) — inner transform applied first, then this one.</summary>
-        public Affine Compose(Affine inner) => new(
-            A * inner.A + B * inner.C,
-            A * inner.B + B * inner.D,
-            C * inner.A + D * inner.C,
-            C * inner.B + D * inner.D,
-            A * inner.Tx + B * inner.Ty + Tx,
-            C * inner.Tx + D * inner.Ty + Ty);
-
-        /// <summary>
-        /// Radius scale approximation: geometric mean of the column norms (exact
-        /// singular values for a single R*S; circles under non-uniform scale become
-        /// ellipses in true CAD — approximated here, documented limitation).
-        /// </summary>
-        public double RadiusScale => Math.Sqrt(Math.Sqrt(A * A + C * C) * Math.Sqrt(B * B + D * D));
-    }
 }

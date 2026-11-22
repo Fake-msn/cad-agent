@@ -113,6 +113,79 @@ public class SheetRegistryTests
         finally { File.Delete(path); }
     }
 
+    [Fact]
+    public void Build_ArcOnlyFrame_BoundsCoverArc_NotInverted()
+    {
+        // T2 收口：纯 Arc 图框（PointsOf 旧版无 Arc 分支）不得产生倒置哨兵 bounds
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_Arc");
+        frame.Entities.Add(new Arc { Center = new XYZ(500, 350, 0), Radius = 300, StartAngle = 0, EndAngle = 2 * Math.PI });
+        doc.BlockRecords.Add(frame);
+        doc.Entities.Add(new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) });
+        var sheets = SheetRegistryBuilder.Build(doc);
+        var b = Assert.Single(sheets).FrameBounds;
+        Assert.True(b.MinX <= b.MaxX && b.MinY <= b.MaxY);
+        Assert.Equal(200, b.MinX, 6);
+        Assert.Equal(50, b.MinY, 6);
+        Assert.Equal(800, b.MaxX, 6);
+        Assert.Equal(650, b.MaxY, 6);
+    }
+
+    [Fact]
+    public void Build_EmptyFrameBlock_FallbackUnitBoundsAtInsertPoint()
+    {
+        // T2 收口：空几何图框倒置哨兵（minX>maxX）→ 回退插入点单位框（±1）
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_空");
+        doc.BlockRecords.Add(frame);
+        doc.Entities.Add(new Insert(frame) { InsertPoint = new XYZ(100, 200, 0) });
+        var b = Assert.Single(SheetRegistryBuilder.Build(doc)).FrameBounds;
+        Assert.Equal(99, b.MinX, 6);
+        Assert.Equal(199, b.MinY, 6);
+        Assert.Equal(101, b.MaxX, 6);
+        Assert.Equal(201, b.MaxY, 6);
+    }
+
+    [Fact]
+    public void Build_NestedInsertFrame_ExpandsNestedGeometry()
+    {
+        // T2 收口：图框块内嵌套 Insert 递归展开（InsertAffine+Compose），scale 2 → bounds 翻倍
+        var doc = new CadDocument();
+        var inner = new BlockRecord("INNER");
+        inner.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        doc.BlockRecords.Add(inner);
+        var frame = new BlockRecord("院标准图框_嵌套");
+        frame.Entities.Add(new Insert(inner) { InsertPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        doc.Entities.Add(new Insert(frame) { InsertPoint = new XYZ(0, 0, 0), XScale = 2, YScale = 2 });
+        var b = Assert.Single(SheetRegistryBuilder.Build(doc)).FrameBounds;
+        Assert.Equal(0, b.MinX, 6);
+        Assert.Equal(0, b.MinY, 6);
+        Assert.Equal(2000, b.MaxX, 6);
+        Assert.Equal(1400, b.MaxY, 6);
+    }
+
+    [Fact]
+    public void Build_Polyline2DFrame_BoundsFromVertices()
+    {
+        // T2 收口：Polyline2D 顶点参与图框 bounds（旧版 PointsOf 无此分支→倒置哨兵）
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_P2");
+        var p2 = new Polyline2D { IsClosed = true };
+        p2.Vertices.Add(new Vertex2D { Location = new XYZ(0, 0, 0) });
+        p2.Vertices.Add(new Vertex2D { Location = new XYZ(1000, 0, 0) });
+        p2.Vertices.Add(new Vertex2D { Location = new XYZ(1000, 700, 0) });
+        p2.Vertices.Add(new Vertex2D { Location = new XYZ(0, 700, 0) });
+        frame.Entities.Add(p2);
+        doc.BlockRecords.Add(frame);
+        doc.Entities.Add(new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) });
+        var b = Assert.Single(SheetRegistryBuilder.Build(doc)).FrameBounds;
+        Assert.Equal(0, b.MinX, 6);
+        Assert.Equal(0, b.MinY, 6);
+        Assert.Equal(1000, b.MaxX, 6);
+        Assert.Equal(700, b.MaxY, 6);
+    }
+
     [SkippableFact]
     public void RealDrawing_NineSheets_NamesAndAttributes()
     {

@@ -16,8 +16,14 @@ public static class WallPairDetector
 
     public static void Detect(DrawingSession session, SemanticOverlay overlay,
         double minThickness = 100, double maxThickness = 400, double minOverlap = 500)
+        => DetectWalked(BlockWalker.Walk(session.Doc, session.Sheets).ToList(), overlay,
+            minThickness, maxThickness, minOverlap);
+
+    /// <summary>块遍历口径核心（扫描器复用同一次 Walk）：几何全部用 WorldPoints 世界坐标。</summary>
+    internal static void DetectWalked(IReadOnlyList<WalkedEntity> walked, SemanticOverlay overlay,
+        double minThickness = 100, double maxThickness = 400, double minOverlap = 500)
     {
-        var lines = CollectLines(session);
+        var lines = CollectLines(walked);
         foreach (var bucket in BucketByAngle(lines))
             DetectInBucket(bucket, overlay, minThickness, maxThickness, minOverlap);
     }
@@ -29,24 +35,25 @@ public static class WallPairDetector
     /// <summary>
     /// Collect Line entities with a normalized direction and an angle in [0,180).
     /// Zero-length lines have no direction and are skipped.
+    /// 端点取 WalkedEntity.WorldPoints（顶层=本地点，嵌套=插入变换后世界点）；句柄=HandlePath。
     /// </summary>
-    private static List<Segment> CollectLines(DrawingSession session)
+    private static List<Segment> CollectLines(IReadOnlyList<WalkedEntity> walked)
     {
         var result = new List<Segment>();
-        foreach (var e in session.Doc.Entities)
+        foreach (var w in walked)
         {
-            if (e is not Line line) continue;
-            double dx = line.EndPoint.X - line.StartPoint.X;
-            double dy = line.EndPoint.Y - line.StartPoint.Y;
+            if (w.Entity is not Line || w.WorldPoints.Count < 2) continue;
+            var (x1, y1) = w.WorldPoints[0];
+            var (x2, y2) = w.WorldPoints[1];
+            double dx = x2 - x1;
+            double dy = y2 - y1;
             double len = Math.Sqrt(dx * dx + dy * dy);
             if (len < 1e-9) continue;
             double ux = dx / len, uy = dy / len;
             double angle = Math.Atan2(dy, dx) * (180.0 / Math.PI);
             if (angle < 0) angle += 180.0;
             if (angle >= 180.0) angle -= 180.0; // Atan2(0,-x)=180 wraps to 0
-            result.Add(new Segment(e.Handle.ToString(),
-                line.StartPoint.X, line.StartPoint.Y, line.EndPoint.X, line.EndPoint.Y,
-                ux, uy, angle));
+            result.Add(new Segment(w.HandlePath, x1, y1, x2, y2, ux, uy, angle));
         }
         return result;
     }

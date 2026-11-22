@@ -76,6 +76,8 @@ public static class ConventionLibrary
 /// (HumanConfirmed 1.0) > skill alias hit (LayerInference 0.8) > convention
 /// library hit (LayerInference 0.8).
 /// Unknown layers get no annotation; the Scanner owns the ambiguous-layer list.
+/// T2：实体源改 BlockWalker（含 bound xref 嵌套实体，句柄=HandlePath）；
+/// 约定匹配用归一层名（"x$0$WALL"→WALL），映射/证据保留原名。
 /// </summary>
 public static class LayerInference
 {
@@ -83,6 +85,11 @@ public static class LayerInference
         Annotate(session, overlay, skillAliases: null);
 
     public static void Annotate(DrawingSession session, SemanticOverlay overlay,
+        IReadOnlyDictionary<string, SemanticClass>? skillAliases = null) =>
+        AnnotateWalked(BlockWalker.Walk(session.Doc, session.Sheets).ToList(), overlay, skillAliases);
+
+    /// <summary>块遍历口径核心（扫描器复用同一次 Walk）。</summary>
+    internal static void AnnotateWalked(IReadOnlyList<WalkedEntity> walked, SemanticOverlay overlay,
         IReadOnlyDictionary<string, SemanticClass>? skillAliases = null)
     {
         var humanConfirmedHandles = overlay.Annotations
@@ -90,14 +97,14 @@ public static class LayerInference
             .Select(a => a.TargetHandle)
             .ToHashSet();
 
-        foreach (var e in session.Doc.Entities)
+        foreach (var w in walked)
         {
-            string handle = e.Handle.ToString();
+            string handle = w.HandlePath;
             if (humanConfirmedHandles.Contains(handle)) continue;
 
-            string layer = e.Layer?.Name ?? "0";
-            var mapping = overlay.Mappings.FirstOrDefault(m =>
-                string.Equals(m.LayerName, layer, StringComparison.OrdinalIgnoreCase));
+            string layer = w.Entity.Layer?.Name ?? "0";
+            string canon = w.CanonicalLayer;
+            var mapping = FindMapping(overlay, layer, canon);
             if (mapping is not null)
             {
                 // Mirror Task 1 ApplyMappingToAnnotations: a human mapping override
@@ -108,19 +115,33 @@ public static class LayerInference
                 continue;
             }
 
-            if (TryGetSkillClass(skillAliases, layer, out var skillCls))
+            if (TryGetSkillClassForLayer(skillAliases, layer, canon, out var skillCls))
             {
                 overlay.UpsertAnnotation(new SemanticAnnotation(
                     handle, skillCls, Provenance.LayerInference, 0.8, $"skill别名: {layer}"));
                 continue;
             }
 
-            var cls = ConventionLibrary.ClassForLayer(layer);
+            var cls = ConventionLibrary.ClassForLayer(canon);
             if (cls == SemanticClass.Unknown) continue;
             overlay.UpsertAnnotation(new SemanticAnnotation(
                 handle, cls, Provenance.LayerInference, 0.8, $"图层约定: {layer}"));
         }
     }
+
+    /// <summary>
+    /// 人工映射查找：原名优先，其次归一名（人工映射 "WALL" 亦覆盖 "x$0$WALL"；
+    /// 映射清单本身保留原名）。与 Scanner 歧义判定共用，保持精确互逆。
+    /// </summary>
+    internal static LayerMapping? FindMapping(SemanticOverlay overlay, string layer, string canon) =>
+        overlay.Mappings.FirstOrDefault(m =>
+            string.Equals(m.LayerName, layer, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(m.LayerName, canon, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>skill 别名查找：原名优先，其次归一名（与约定匹配同口径）。</summary>
+    internal static bool TryGetSkillClassForLayer(
+        IReadOnlyDictionary<string, SemanticClass>? skillAliases, string layer, string canon, out SemanticClass cls) =>
+        TryGetSkillClass(skillAliases, layer, out cls) || TryGetSkillClass(skillAliases, canon, out cls);
 
     /// <summary>
     /// Shared skill-alias lookup for Annotate and the Scanner's ambiguous list,

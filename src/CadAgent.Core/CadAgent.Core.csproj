@@ -7,6 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- R1 数学 consolidation：Affine.InsertAffine 消费 ACadSharp Insert（与 Data/View 同版本） -->
+    <PackageReference Include="ACadSharp" Version="3.8.35" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <PackageReference Include="YamlDotNet" Version="16.2.1" />
