@@ -370,4 +370,167 @@ public class VisionCrossCheckerTests
         }
         finally { File.Delete(path); }
     }
+
+    // ---- Fix Round 1：包含短值守卫 + 命中优先级 + 多幅面无佐证抑制 ----
+
+    /// <summary>最小图框夹具（单线幅面 1000×700，镜像既有测试口径）。</summary>
+    private static CadDocument FrameOnlyDoc()
+    {
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        doc.BlockRecords.Add(frame);
+        doc.Entities.Add(new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) });
+        return doc;
+    }
+
+    [Fact]
+    public void CrossCheck_SingleCharAxisGt_ContainmentGuard_NotSeeded()
+    {
+        // 短值守卫（GT 侧）：实图轴号 GT "1" 单字符 ubiquitous，claim "配电箱AL1" 包含 "1"
+        // 不得佐证——否则 Equipment 0.9 种子到轴号句柄披"已验证"外衣（诚实约束击穿）。
+        var doc = FrameOnlyDoc();
+        var axisLayer = new Layer("AXIS_TEXT");
+        doc.Layers.Add(axisLayer);
+        var axis = new TextEntity { InsertPoint = new XYZ(50, 350, 0), Value = "1", Height = 3.5, Layer = axisLayer };
+        doc.Entities.Add(axis);
+        var (sheets, walked) = Walk(doc);
+        var vision = new VisionReadResult(new[] { new VisionClaim("配电箱AL1", "tile-1", 0.9) });
+
+        var result = VisionCrossChecker.Check(vision, new SemanticOverlay(), walked, sheets[0].SheetId);
+
+        Assert.Empty(result.Seeded);
+        var amb = Assert.Single(result.Ambiguous);
+        Assert.Equal("配电箱AL1", amb.Claim);
+        Assert.Contains("不可读/无矢量佐证", amb.Reason);
+    }
+
+    [Fact]
+    public void CrossCheck_SingleCharClaim_ContainmentGuard_NotSeeded()
+    {
+        // 短值守卫（claim 侧）：单字符 claim "灯" 不得以包含匹配佐证图例长句"深照型灯(吸顶安装)"。
+        var doc = FrameOnlyDoc();
+        var legend = new TextEntity { InsertPoint = new XYZ(100, 100, 0), Value = "深照型灯(吸顶安装)", Height = 3.5 };
+        doc.Entities.Add(legend);
+        var (sheets, walked) = Walk(doc);
+        var vision = new VisionReadResult(new[] { new VisionClaim("灯", "tile-1", 0.8) });
+
+        var result = VisionCrossChecker.Check(vision, new SemanticOverlay(), walked, sheets[0].SheetId);
+
+        Assert.Empty(result.Seeded);
+        var amb = Assert.Single(result.Ambiguous);
+        Assert.Contains("不可读/无矢量佐证", amb.Reason);
+    }
+
+    [Fact]
+    public void CrossCheck_SingleCharExactMatch_StillSeeds()
+    {
+        // 精确通道不受短值守卫影响：claim "1" == GT "1"（轴号层约定成类 Axis）→ 仍可种子。
+        var doc = FrameOnlyDoc();
+        var axisLayer = new Layer("AXIS_TEXT");
+        doc.Layers.Add(axisLayer);
+        var axis = new TextEntity { InsertPoint = new XYZ(50, 350, 0), Value = "1", Height = 3.5, Layer = axisLayer };
+        doc.Entities.Add(axis);
+        var (sheets, walked) = Walk(doc);
+        var vision = new VisionReadResult(new[] { new VisionClaim("1", "tile-1", 0.9) });
+
+        var result = VisionCrossChecker.Check(vision, new SemanticOverlay(), walked, sheets[0].SheetId);
+
+        var a = Assert.Single(result.Seeded);
+        Assert.Equal(axis.Handle.ToString(), a.TargetHandle);
+        Assert.Equal(SemanticClass.Axis, a.Class);
+        Assert.Equal(Provenance.LlmInference, a.Provenance);
+    }
+
+    [Fact]
+    public void CrossCheck_HitPriority_CoreAttributeBeatsFrameAndText()
+    {
+        // 命中优先级：核心 Tag 属性(A/N/$TEXT$) > 图框属性 > 普通文字——
+        // 同 claim 多命中取优先级高者，非文档序首个（普通文字故意排最前）。
+        var doc = new CadDocument();
+        var legend = new TextEntity { InsertPoint = new XYZ(100, 100, 0), Value = "深照型灯", Height = 3.5 };
+        doc.Entities.Add(legend);
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        doc.BlockRecords.Add(frame);
+        var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        frameIns.Attributes.Add(new AttributeEntity { Tag = "备注", Value = "深照型灯" });
+        doc.Entities.Add(frameIns);
+        var e = new BlockRecord("E");
+        e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
+        doc.BlockRecords.Add(e);
+        var ins = new Insert(e) { InsertPoint = new XYZ(200, 100, 0) };
+        ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
+        doc.Entities.Add(ins);
+        var (sheets, walked) = Walk(doc);
+        var vision = new VisionReadResult(new[] { new VisionClaim("深照型灯", "tile-1", 0.8) });
+
+        var result = VisionCrossChecker.Check(vision, new SemanticOverlay(), walked, sheets[0].SheetId);
+
+        var a = Assert.Single(result.Seeded);
+        Assert.Equal(ins.Handle.ToString(), a.TargetHandle);
+        Assert.Contains("块属性 A=深照型灯", a.Evidence);
+    }
+
+    [Fact]
+    public void CrossCheck_HitPriority_FrameAttributeBeatsPlainText()
+    {
+        // 命中优先级第二档：无核心属性命中时，图框属性 > 普通文字（文字文档序在前也不取）。
+        var doc = new CadDocument();
+        var legend = new TextEntity { InsertPoint = new XYZ(100, 100, 0), Value = "深照型灯", Height = 3.5 };
+        doc.Entities.Add(legend);
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        doc.BlockRecords.Add(frame);
+        var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        frameIns.Attributes.Add(new AttributeEntity { Tag = "备注", Value = "深照型灯" });
+        doc.Entities.Add(frameIns);
+        var (sheets, walked) = Walk(doc);
+        var vision = new VisionReadResult(new[] { new VisionClaim("深照型灯", "tile-1", 0.8) });
+
+        var result = VisionCrossChecker.Check(vision, new SemanticOverlay(), walked, sheets[0].SheetId);
+
+        var a = Assert.Single(result.Seeded);
+        Assert.Equal(frameIns.Handle.ToString(), a.TargetHandle);
+        Assert.Contains("图框属性 备注=深照型灯", a.Evidence);
+    }
+
+    [Fact]
+    public void Scan_MultiSheet_SeededClaim_NoSupportAmbiguitySuppressed()
+    {
+        // 多幅面抑制：claim 在 A 幅吻合种子后，B 幅不得再产"无矢量佐证"假歧义污染人工纠偏清单；
+        // 矛盾 claim（两幅均在）与全局无佐证 claim（未种子）照常上报。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            PopulateVisionDoc(doc);
+            var frame = doc.BlockRecords.First(b => b.Name == "院标准图框_A0");
+            var frame2 = new Insert(frame) { InsertPoint = new XYZ(2000, 0, 0) };
+            frame2.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E02" });
+            frame2.Attributes.Add(new AttributeEntity { Tag = "日期", Value = "2018.10" });
+            doc.Entities.Add(frame2);
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            Assert.Equal(2, session.Sheets.Count);
+            var vision = new VisionReadResult(new[]
+            {
+                new VisionClaim("深照型灯", "tile-1", 0.8),
+                new VisionClaim("2023.06", "图签", 0.9),
+                new VisionClaim("碳素波纹管", "说明区", 0.9),
+            });
+
+            var result = SemanticScanner.Scan(session, vision: vision);
+
+            // A 幅佐证种子仍在；B 幅对同一 claim 的"无矢量佐证"被抑制（任何 reason 都不剩）
+            var ins = session.Doc.Entities.OfType<Insert>().First(i => i.Block?.Name == "E");
+            Assert.Contains(result.Overlay.Annotations,
+                a => a.TargetHandle == ins.Handle.ToString() && a.Provenance == Provenance.LlmInference);
+            Assert.DoesNotContain(result.VisionAmbiguous, v => v.Claim == "深照型灯");
+            // 矛盾（真问题）与全局无佐证（未种子）保留
+            Assert.Contains(result.VisionAmbiguous, v => v.Claim == "2023.06" && v.Reason.Contains("与矢量事实矛盾"));
+            Assert.Contains(result.VisionAmbiguous, v => v.Claim == "碳素波纹管" && v.Reason.Contains("不可读/无矢量佐证"));
+        }
+        finally { File.Delete(path); }
+    }
 }

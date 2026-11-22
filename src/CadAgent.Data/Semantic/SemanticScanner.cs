@@ -61,15 +61,21 @@ public static class SemanticScanner
         //（跨幅跑偏拒绝），种子 Upsert（键=handle+provenance，与 NativeObject/LayerInference
         // 共存，闸口 Any(conf≥min) 取高置信）；歧义清单按 (Claim,Reason) 去重并入 ScanResult。
         // vision=null → legacy 行为不变（VisionAmbiguous 空）。
+        // Fix Round 1 多幅面抑制：任一幅度已种子的 claim，其他幅面必产的"无矢量佐证"
+        // 是假歧义（已决事项不得污染人工纠偏清单）——循环后按种子 claim 集过滤；
+        // 矛盾/无法归类歧义项保留（那是真问题）。
         var visionAmbiguous = new List<VisionAmbiguous>();
         if (vision is not null)
         {
+            var seededClaims = new HashSet<string>(StringComparer.Ordinal);
             foreach (var sheet in session.Sheets)
             {
                 var cross = VisionCrossChecker.Check(vision, overlay, walked, sheet.SheetId);
                 foreach (var a in cross.Seeded) overlay.UpsertAnnotation(a);
+                foreach (var c in cross.SeededClaims) seededClaims.Add(c);
                 visionAmbiguous.AddRange(cross.Ambiguous);
             }
+            visionAmbiguous.RemoveAll(v => v.Reason == VisionCrossChecker.NoSupportReason && seededClaims.Contains(v.Claim));
         }
 
         return new ScanResult(overlay, CollectAmbiguousLayers(walked, overlay, skillAliases),
