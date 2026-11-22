@@ -34,10 +34,19 @@ public sealed class DrawingSession : IDrawingSession
         }
     }
 
-    private DrawingSession(string path, CadDocument doc)
+    /// <summary>
+    /// 读取器通知 census（防假 Green）：ACadSharp 把天正 TCH_* 读为 UnknownEntity 但不暴露进对象图，
+    /// 图内 Unknowns 普查为 0 也不代表图纸可全解析——本 census 记录通知侧的未解析对象类×计数。
+    /// 无 TCH 图纸恒为 Empty（行为保持）；Reload/RestoreState 不重置（内存 DXF 无 TCH，census 保持原值）。
+    /// </summary>
+    public UnparsedCensus Unparsed { get; }
+
+    // R1：internal（原 private）+ 第三可选参——经 InternalsVisibleTo 供 Data.Tests 合成 session；public 面不变。
+    internal DrawingSession(string path, CadDocument doc, UnparsedCensus? unparsed = null)
     {
         SourcePath = path;
         Doc = doc;
+        Unparsed = unparsed ?? UnparsedCensus.Empty;
     }
 
     /// <summary>
@@ -59,7 +68,11 @@ public sealed class DrawingSession : IDrawingSession
     /// </summary>
     internal static bool ShouldLoadWorkingCopy(string workingPath) => File.Exists(workingPath);
 
-    public static DrawingSession Load(string path)
+    /// <summary>
+    /// 加载图纸。.dwg 首载经 DWG 通知通道重建 census；working 分支内存 DXF 无 TCH 通知，
+    /// census 由调用方经 <paramref name="persisted"/> 传入（sidecar UnparsedCensusStore.Load），缺省 Empty。
+    /// </summary>
+    public static DrawingSession Load(string path, UnparsedCensus? persisted = null)
     {
         string ext = Path.GetExtension(path).ToLowerInvariant();
         if (ext == ".dwg")
@@ -69,10 +82,12 @@ public sealed class DrawingSession : IDrawingSession
             {
                 // The working copy is durable editable state: committed edits live there.
                 // Load it as-is; re-deriving from the pristine .dwg would wipe them.
-                return new DrawingSession(workingPath, LoadDxf(workingPath));
+                // working DXF 已丢失 TCH 对象→census 只能靠 sidecar 持久化值（persisted）恢复。
+                return new DrawingSession(workingPath, LoadDxf(workingPath), persisted ?? UnparsedCensus.Empty);
             }
             // First load only: materialize the working DXF from the read-only original.
-            var session = new DrawingSession(workingPath, LoadDwg(path));
+            var (dwgDoc, census) = LoadDwg(path);
+            var session = new DrawingSession(workingPath, dwgDoc, census);
             session.SaveWorking();
             return session;
         }
@@ -90,10 +105,17 @@ public sealed class DrawingSession : IDrawingSession
         return reader.Read();
     }
 
-    private static CadDocument LoadDwg(string path)
+    /// <summary>
+    /// DWG 读取 + 通知 census 捕获：ACadSharp 3.8.35 将天正 TCH_* 读为 UnknownEntity 但
+    /// 不暴露进文档对象图（实证：OnNotification 数千条/全块表普查 0）——通知是唯一证据通道。
+    /// </summary>
+    private static (CadDocument Doc, UnparsedCensus Census) LoadDwg(string path)
     {
         using var reader = new DwgReader(path);
-        return reader.Read();
+        var messages = new List<string>();
+        reader.OnNotification += (_, e) => messages.Add(e.Message);
+        var doc = reader.Read();
+        return (doc, UnparsedCensus.FromNotifications(messages));
     }
 
     /// <summary>
@@ -153,6 +175,7 @@ public sealed class DrawingSession : IDrawingSession
         Doc = LoadDxf(SourcePath);
         _sheets = null; // 文档整体替换→幅面登记簿缓存失效，下次访问重建
         _sheetsFingerprint = null;
+        // Unparsed census 保持原值：working DXF 无 TCH 对象/通知，重读不产生新证据（首载或 sidecar 值仍有效）。
     }
 
     /// <summary>步级 undo（3b-ii）：内存 DXF 序列化捕获模型状态，不触磁盘文件。</summary>
@@ -171,6 +194,7 @@ public sealed class DrawingSession : IDrawingSession
         Doc = reader.Read();
         _sheets = null; // undo 恢复整体替换文档→幅面登记簿缓存失效
         _sheetsFingerprint = null;
+        // Unparsed census 保持原值：内存 DXF 无 TCH（undo 不改变源图未解析对象事实）。
     }
 
     public DrawingSummary Summarize()
@@ -191,6 +215,13 @@ public sealed class DrawingSession : IDrawingSession
             else
                 entities.Add(new EntityBrief(handle, e.GetType().Name, layer));
         }
-        return new DrawingSummary(SourcePath, Doc.Header.Version.ToString(), layers, entities, unknowns);
+        // census briefs 与图内 Unknowns 分离（不混入）：通知侧未解析对象无句柄/图层可言，
+        // Handle=""、ObjectName=CppClassName（通知只给 DXF 名）、ApplicationName=""。
+        // 逐对象展开（类×Count → Count 条 brief）：Unparsed.Count == census.TotalCount，
+        // 与实体计数同口径（T1 测试钉住：TCH_WALL×2 → 2 条；闸口按对象数比较）。
+        var unparsed = Unparsed.Classes
+            .SelectMany(c => Enumerable.Repeat(new UnknownBrief("", c.CppClassName, c.CppClassName, ""), c.Count))
+            .ToList();
+        return new DrawingSummary(SourcePath, Doc.Header.Version.ToString(), layers, entities, unknowns, unparsed);
     }
 }
