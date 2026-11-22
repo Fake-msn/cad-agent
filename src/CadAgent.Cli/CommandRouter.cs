@@ -357,9 +357,11 @@ public static partial class CommandRouter
     {
         // R9 补留痕：此前 Load 在 try/catch 外——异常经 Run 兜底 exit 1 但无审计（spec §9 缺口）。
         // LoadOrReject 复用 intake-rejected 模式（Source="rollback"，与 semantic/check 同一守卫）。
+        // R10 Minor#2：裸 Load → LoadWithCensus——sidecar 有效（路径+源哈希匹配）时用
+        // persisted census，避免全量重读源；Yellow 上 rollback 保持 R7 撤回豁免（不加闸）。
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath,
             session, audit, op, stderr, source: "rollback");
         if (drawing == null) return 1;
         // 快照必须属于当前图纸：防止把别的图纸的快照覆盖到本图纸上

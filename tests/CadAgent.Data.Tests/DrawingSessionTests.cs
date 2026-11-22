@@ -178,7 +178,9 @@ public class DrawingSessionTests : IDisposable
         {
             DrawingSession.Load(dwg); // 首载物化 working
             File.WriteAllBytes(dwg, new byte[] { 0x00, 0x01, 0x02, 0x03 }); // 源损坏（不可读）
-            Assert.ThrowsAny<Exception>(() => DrawingSession.Load(dwg));
+            // R10 收紧：源损坏（4 字节垃圾）时 DwgReader.readFileHeader 经 StreamIO.ReadBytes
+            // 抛 EndOfStreamException（IOException 子类，实测核定 data-red-probe.log）。
+            Assert.Throws<EndOfStreamException>(() => DrawingSession.Load(dwg));
         }
         finally
         {

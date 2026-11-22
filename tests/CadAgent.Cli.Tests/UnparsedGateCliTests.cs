@@ -464,6 +464,106 @@ public class UnparsedGateCliTests : IDisposable
         Assert.True(audit.VerifyChain(out _));
     }
 
+    // ===== R10：sidecar 有效 + 源删除的 CLI 钉住 + rollback LoadWithCensus =====
+
+    /// <summary>在项目内落一份合成 .dwg 源（首载 intake 物化 working；避免临时目录残留）。</summary>
+    private string CreateProjectDwg(string name)
+    {
+        string tmp = DxfFixture.CreateTempDwg(DxfFixture.AddSampleLine);
+        string dwg = Path.Combine(_project, name);
+        File.Move(tmp, dwg);
+        return dwg;
+    }
+
+    [Fact]
+    public void IntakeRun_SidecarCensusPresent_SourceDeleted_RejectedExit1_AuditTrail()
+    {
+        // R10 钉住：sidecar 在（census 非空、源哈希曾匹配）+ 源 .dwg 删除 →
+        // Store.Load 源缺失诚实 Empty → Load 抛 InvalidOperationException（R9 第三分支）→
+        // intake/run 既有 catch 映射拒绝 exit 1 + 留痕（不得拿 sidecar 旧 census 假放行，
+        // 也不得静默 Green）。working/sidecar 字节不变（拒绝零副作用）。
+        string dwg = CreateProjectDwg("specimen.dwg");
+        var (baselineCode, _, _) = Run("intake", dwg);
+        Assert.Equal(0, baselineCode); // 合成源无 TCH → Green 基线，working 已物化
+        string working = DrawingSession.WorkingPathFor(dwg);
+        Assert.True(File.Exists(working));
+        UnparsedCensusStore.Save(_project, dwg,
+            new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) }));
+        Assert.Equal(2, UnparsedCensusStore.Load(_project, dwg).TotalCount); // sidecar 有效前提
+        File.Delete(dwg); // 源删除
+        byte[] workingBefore = File.ReadAllBytes(working);
+        string sidecarPath = Path.Combine(_project, ".cadagent", "unparsed.json");
+        byte[] sidecarBefore = File.ReadAllBytes(sidecarPath);
+        string planPath = WritePlan();
+
+        var (intakeCode, intakeOut, intakeErr) = Run("intake", dwg);
+
+        Assert.Equal(1, intakeCode);
+        Assert.Contains("无法核验完整性", intakeErr);
+        Assert.Empty(intakeOut);
+
+        var (runCode, runOut, runErr) = Run("run", planPath, "--drawing", dwg);
+
+        Assert.Equal(1, runCode);
+        Assert.Contains("无法核验完整性", runErr);
+        Assert.DoesNotContain("\"ok\"", runOut);
+        Assert.Equal(workingBefore, File.ReadAllBytes(working)); // working 未被触碰
+        Assert.Equal(sidecarBefore, File.ReadAllBytes(sidecarPath)); // census 证据保留
+        var records = AuditRecords();
+        var intakeRejected = Assert.Single(records, r => r.Entry.Kind == "intake-rejected");
+        Assert.Equal("intake", intakeRejected.Entry.Source);
+        using (var p = JsonDocument.Parse(intakeRejected.Entry.ParamsJson))
+            Assert.Contains("无法核验完整性", p.RootElement.GetProperty("Error").GetString());
+        var runRejected = Assert.Single(records, r => r.Entry.Kind == "run-rejected");
+        Assert.Equal("run", runRejected.Entry.Source);
+        using (var p = JsonDocument.Parse(runRejected.Entry.ParamsJson))
+        {
+            Assert.Equal("LoadFailed", p.RootElement.GetProperty("level").GetString());
+            Assert.Contains("无法核验完整性", p.RootElement.GetProperty("error").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Rollback_ValidSidecarCensus_DoesNotRereadSource()
+    {
+        // R10 Minor#2：rollback 裸 Load → LoadWithCensus——sidecar 有效（路径+源哈希匹配）
+        // 时用 persisted census，不重读源。构造：Green 提交事务后源损坏 + sidecar 对当前
+        // 源字节仍有效（Store 契约即路径+哈希匹配）→ 修复前裸 Load 走 R9 重建分支重读
+        // 损坏源 → 抛 → intake-rejected exit 1；修复后 persisted 直载 → 撤回成功。
+        // 同时钉住 Yellow census 上 rollback 的 R7 撤回豁免（不加闸）。
+        string dwg = CreateProjectDwg("rollback-src.dwg");
+        var (intakeCode, _, _) = Run("intake", dwg);
+        Assert.Equal(0, intakeCode); // Green 基线 + working 物化
+        string planPath = WritePlan();
+        var (runCode, runOut, _) = Run("run", planPath, "--drawing", dwg);
+        Assert.Equal(0, runCode);
+        string txId = JsonDocument.Parse(runOut).RootElement.GetProperty("txId").GetString()!;
+        // 源损坏（不可读）+ sidecar 对当前源字节有效（census 非空 → Yellow 态）。
+        File.WriteAllBytes(dwg, new byte[] { 0x00, 0x01, 0x02, 0x03 });
+        UnparsedCensusStore.Save(_project, dwg,
+            new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) }));
+        byte[] sourceBefore = File.ReadAllBytes(dwg);
+
+        var (code, stdout, stderr) = Run("rollback", txId, "--drawing", dwg);
+
+        Assert.Equal(0, code); // 修复前：裸 Load 重读损坏源 → exit 1（RED）
+        Assert.Contains("已撤回事务", stdout);
+        Assert.Equal(sourceBefore, File.ReadAllBytes(dwg)); // 源只读（不重写不修复）
+        var records = AuditRecords();
+        Assert.Contains(records, r => r.Entry.Kind == "rollback");
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "intake-rejected"); // 未走拒绝通道
+        // working 已恢复快照（1 条实体）：以 persisted 加载核验（不触发源重读）。
+        var session = DrawingSession.Load(dwg, UnparsedCensusStore.Load(_project, dwg));
+        Assert.Single(session.Summarize().Entities);
+        Assert.Equal(2, session.Unparsed.TotalCount); // Yellow census 保持（豁免不改判定）
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

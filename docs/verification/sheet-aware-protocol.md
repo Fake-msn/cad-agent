@@ -237,7 +237,17 @@ TCH_BLOCK_INSERT 1），AC1027（`intake-court.json` / `court-classification.txt
   本次**未执行 map、未伪造任何人工确认**（Yellow 标本上 map 无意义且修改被闸）。
 - 四份原生标本均 Yellow → 同样不可作真实 🟢 载体；🟢 真实重取统一待用户 T3 导出件。
 
-### 5.5 残余缺口 R9（实战新发现，留 T5/用户裁定，本切片不修）
+### 5.5 残余缺口 R9（实战新发现；已于 e7211f0 闭合——下方原文保留为历史记录）
+
+> **R10 注记（闭合确认）**：本节所述缺口已于 **e7211f0** 闭合（Fix Round 1，非留 T5）——
+> `DrawingSession.Load` working 分支三分：**persisted 非空优先**（不重读源）/ **源在则从源
+> DWG 通知重建 census**（只取 census，doc 丢弃，working 不重写）/ **源缺则拒绝**
+> （InvalidOperationException"无法核验完整性"）；六消费点（intake/run/agent/repl/export/skill）
+> 既有 catch/LoadOrReject 留痕核实 + **rollback 补 LoadOrReject 留痕**（R9 前无审计缺口）；
+> R10 再补 rollback 裸 Load → LoadWithCensus（sidecar 有效时避免全量重读源，Yellow 上
+> 保持 R7 撤回豁免不加闸）。`bypass-demo/` 复现证据保留为历史（修复前行为在案）。
+> 裁定内代价注记：**Green 图纸源删除后 rollback 被 blanket 拒绝**（Green census 空不回写
+> sidecar → persisted Empty + 源缺 → 拒绝；可操作指引：提供源图后重试撤回）。
 
 **陈旧 working 副本 + 新项目 = 假 Green 旁路**：census sidecar 以项目键控，working DXF 以源
 键控且丢失 TCH 通知——防假 Green 切片**之前**物化的 working（无 sidecar）在新项目 intake
@@ -247,6 +257,8 @@ TCH_BLOCK_INSERT 1），AC1027（`intake-court.json` / `court-classification.txt
 Yellow 5985。影响面：outputs/tarch-native、tarch-native2 与法院目录的既有旧 working 均属此态
 （法院目录旧 working 删除裁定归用户）。候选修复方向：sidecar 随 working 源旁持久化
 （源哈希键控）或 sidecar 缺失时强制 DWG 通知重读——留 T5 裁定，不在 T4 范围。
+（历史裁定原文：实际修复提前于 Fix Round 1 e7211f0 落地，采"sidecar 缺失时强制 DWG 通知
+重读 + 源缺拒绝"方向，见上方 R10 注记。）
 
 ### 5.6 证据清单（outputs/tarch-gate-recombat/）
 
@@ -254,5 +266,8 @@ Yellow 5985。影响面：outputs/tarch-native、tarch-native2 与法院目录�
 `t4-green-filtered.log`；`plan-addline.json`；`{run,agent,repl,export,skill}-refused*.{json,txt}`；
 `refusal-hashes-{before,after}.txt`；`audit-p1-refusal-params.txt`；`verify-p{1..4}.json`；
 `intake-court.json` / `court-classification.txt` / `run-court-refused*` /
-`audit-court-refusal-params.txt` / `verify-court.json`；`bypass-demo/`（R9 复现）。
+`audit-court-refusal-params.txt` / `verify-court.json`；`bypass-demo/`（R9 复现，历史证据）。
+R9 修复证据：`r9-fix/{data,cli}-{red,green-filtered,full}.log`（RED 实证 + filtered GREEN +
+全量 Data 288/288、Cli 196/196）。R10 修复证据：`r10-fix/{cli-red,data-red-probe,cli-green-filtered,data-green-filtered,cli-full,data-full}.log`
+（rollback LoadWithCensus 真 RED + 钉住断言活性变异 + 异常类型核定 EndOfStreamException + 全量）。
 法院副本与项目：`outputs/tarch-court/`。
