@@ -22,6 +22,10 @@ public enum RenderKind { Line, Circle, Arc, Polyline, Text }
 /// string (e.Handle.ToString(), same convention as audit/semantic TargetHandle).
 /// Insert-expanded children carry the parent Insert's handle plus a child-index
 /// suffix "{insertHandle}:{childIndex}" (nested: "{top}:{i}:{j}") for uniqueness.
+/// <see cref="Closed"/> 仅对 Polyline 有意义：true 表示画布须将末点连回首点闭合
+/// （整圆 tessellation 产 72 唯一点、不重复首点，靠此标志闭合）；既有闭合多段线
+/// （LwPolyline.IsClosed 重复首点）保持 Closed=false，重复首点自闭合，行为不变。
+/// 可选参置于 Handle 之后，后续 DashPattern/Fill 等追加其后（位置构造兼容）。
 /// </summary>
 public sealed record RenderItem(
     RenderKind Kind,
@@ -31,7 +35,8 @@ public sealed record RenderItem(
     string? Text,
     double TextHeight,
     double RotationDeg,
-    string Handle);
+    string Handle,
+    bool Closed = false);
 
 /// <summary>
 /// DrawingSession -> flat render-item list (plan 4 task 2). Pure logic: no Avalonia
@@ -241,11 +246,13 @@ public static class RenderModelBuilder
                     skipped++;
                     break;
                 }
-                // Insert 的 OCS 作用于块内几何：ocs 作为最内层变换复合。
-                // 镜像法向（如 (0,0,-1)）精确；倾斜法向 = XY 投影近似（丢弃 WCS Z）。
+                // DXF INSERT 插入点为 OCS 坐标（ACadSharp 往返保持原值，不转 WCS）：
+                // canonical 变换 = M·T(ip)·R·S —— ocs 包在 InsertTransform（含 OCS
+                // 插入点平移）之外，再与父变换 t 复合。镜像法向（如 (0,0,-1)）精确
+                // （插入点与块内容一并镜像）；倾斜法向 = XY 投影近似（丢弃 WCS Z）。
                 // identity 时 Compose 为精确恒等，行为保持。
                 var (ocs, _) = OcsMapper(insert.Normal);
-                Affine composed = t.Compose(InsertTransform(insert)).Compose(ocs);
+                Affine composed = t.Compose(ocs.Compose(InsertTransform(insert)));
                 double rot = rotationDeg + ToDeg(insert.Rotation);
                 double hs = heightScale * Math.Abs(insert.YScale);
                 int childIndex = 0;
@@ -351,10 +358,12 @@ public static class RenderModelBuilder
     {
         // 整圆（|sweep|≥360）取 segments 个均匀采样点、不重复首点：点集均值即圆心、
         // 最大偏移即半径（测试断言口径）；若重复闭合点，均值会偏移 radius/(segments+1)。
-        // 代价：画布按开放折线绘制，整圆留一条 5° 弦缺口（诚实近似的一部分，见报告）。
-        // 圆弧需含末端点，取 segments+1 个采样。radius 为 OCS 半径，缩放由 t.Apply
-        // 统一施加（勿预乘 t.RadiusScale，否则双重缩放；非均匀缩放下自然得椭圆投影）。
-        int samples = Math.Abs(sweepDeg) >= 360.0 ? segments : segments + 1;
+        // 闭合改由 Closed:true 表达（画布 EndFigure 连回首点，消除 5° 弦缺口）。
+        // 圆弧需含末端点，取 segments+1 个采样，保持开放（Closed:false）。radius 为
+        // OCS 半径，缩放由 t.Apply 统一施加（勿预乘 t.RadiusScale，否则双重缩放；
+        // 非均匀缩放下自然得椭圆投影）。
+        bool fullCircle = Math.Abs(sweepDeg) >= 360.0;
+        int samples = fullCircle ? segments : segments + 1;
         var pts = new List<(double X, double Y)>(samples);
         for (int i = 0; i < samples; i++)
         {
@@ -362,7 +371,7 @@ public static class RenderModelBuilder
             (double ox, double oy) = ocs.Apply(cx + radius * Math.Cos(a), cy + radius * Math.Sin(a));
             pts.Add(t.Apply(ox, oy));
         }
-        items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle));
+        items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle, Closed: fullCircle));
     }
 
     /// <summary>

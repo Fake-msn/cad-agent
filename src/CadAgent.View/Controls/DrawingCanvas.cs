@@ -176,6 +176,9 @@ public sealed class DrawingCanvas : Control
                 {
                     g.BeginFigure(ScreenPoint(item.Points[0]), false);
                     for (int i = 1; i < item.Points.Count; i++) g.LineTo(ScreenPoint(item.Points[i]));
+                    // Closed=true（整圆 tessellation）连回首点闭合，消除弦缺口；
+                    // 默认 false 保持开放——既有闭合多段线重复首点自闭合，行为不变。
+                    g.EndFigure(item.Closed);
                 }
                 context.DrawGeometry(null, pen, geo);
                 break;

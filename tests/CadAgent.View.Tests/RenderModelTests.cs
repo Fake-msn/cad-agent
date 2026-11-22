@@ -653,6 +653,7 @@ public class RenderModelTests
             var item = Assert.Single(items);
             Assert.Equal(RenderKind.Polyline, item.Kind); // 非默认法向→tessellation（真椭圆投影的诚实近似）
             Assert.True(item.Points.Count >= 72);
+            Assert.True(item.Closed); // 整圆经 Closed 标志闭合（画布 EndFigure 连回首点，无 5° 弦缺口）
             double cx = item.Points.Average(p => p.X);
             double cy = item.Points.Average(p => p.Y);
             Assert.Equal(-5, cx, 3);
@@ -728,10 +729,45 @@ public class RenderModelTests
             var item = Assert.Single(RenderModelBuilder.Build(s));
             Assert.Equal(RenderKind.Polyline, item.Kind);
             Assert.Equal(73, item.Points.Count); // 弧含末端点：72 段 + 1
+            Assert.False(item.Closed); // 非整圆弧保持开放
             Assert.Equal(0, item.Points[0].X, 3);
             Assert.Equal(-1, item.Points[0].Y, 3);
             Assert.Equal(-1, item.Points[^1].X, 3);
             Assert.Equal(0, item.Points[^1].Y, 3);
+        });
+    }
+
+    [Fact]
+    public void Insert_MirroredNormalWithRotation_InsertionPointMirrored()
+    {
+        // DXF INSERT 插入点为 OCS 坐标（controller 探针核定：InsertPoint=(5,5,0)+
+        // Normal=(0,0,-1) DXF 往返保持原值，ACadSharp 不转换）→ canonical 变换
+        // M·T(ip)·R·S：先块内 R·S，再平移到 OCS 插入点，最后整体经 OCS 映射。
+        // 块含线 (0,0)→(1,0)，Insert ip=(5,5,0)、Normal=(0,0,-1)、Rotation=π/2：
+        // start = M·ip = (-5,5)；end = M·(R90·(1,0)+ip) = M·(5,6) = (-5,6)。
+        // 错误序 T(ip)·R·S·M 会得 (5,5)→(5,4)：位置未镜像 + 内容转向错误。
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("MIRINS");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block)
+            {
+                InsertPoint = new XYZ(5, 5, 0),
+                XScale = 1,
+                YScale = 1,
+                ZScale = 1,
+                Rotation = Math.PI / 2,
+                Normal = new XYZ(0, 0, -1)
+            });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Line, item.Kind);
+            Assert.Equal(-5, item.Points[0].X, 6);
+            Assert.Equal(5, item.Points[0].Y, 6);
+            Assert.Equal(-5, item.Points[1].X, 6);
+            Assert.Equal(6, item.Points[1].Y, 6);
         });
     }
 }
