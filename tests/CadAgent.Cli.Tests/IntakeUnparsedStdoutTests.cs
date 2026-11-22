@@ -62,9 +62,12 @@ public class IntakeUnparsedStdoutTests : IDisposable
         try
         {
             var (code, stdout, _) = Run("intake", path);
-            // 图内 Unknowns=0（ACadSharp 暴露盲区）→ 现闸口 Green；census 闸口消费属 T2，不在本测试断言面。
-            Assert.Equal(0, code);
+            // T2 闸口三分：图内 Unknowns=0（ACadSharp 暴露盲区）但 census 非空且有原生实体
+            // → Yellow（exit 2）+ 只读审查 guidance。修改拒绝/agent 闸语义属 T3，不在本测试断言面。
+            Assert.Equal(2, code);
             using var doc = JsonDocument.Parse(stdout);
+            Assert.Equal("Yellow", doc.RootElement.GetProperty("level").GetString());
+            Assert.Contains("只读审查", doc.RootElement.GetProperty("guidance").GetString());
             var summary = doc.RootElement.GetProperty("summary");
             Assert.True(summary.TryGetProperty("Unparsed", out var unparsed));
             Assert.Equal(JsonValueKind.Array, unparsed.ValueKind);
