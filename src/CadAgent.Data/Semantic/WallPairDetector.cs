@@ -30,12 +30,13 @@ public static class WallPairDetector
 
     private sealed record Segment(
         string Handle, double X1, double Y1, double X2, double Y2,
-        double Ux, double Uy, double Angle);
+        double Ux, double Uy, double Angle, string? SheetId);
 
     /// <summary>
     /// Collect Line entities with a normalized direction and an angle in [0,180).
     /// Zero-length lines have no direction and are skipped.
     /// 端点取 WalkedEntity.WorldPoints（顶层=本地点，嵌套=插入变换后世界点）；句柄=HandlePath。
+    /// T4：幅面归属随段携带（WalkedEntity.SheetId），产出标注 stamp。
     /// </summary>
     private static List<Segment> CollectLines(IReadOnlyList<WalkedEntity> walked)
     {
@@ -53,7 +54,7 @@ public static class WallPairDetector
             double angle = Math.Atan2(dy, dx) * (180.0 / Math.PI);
             if (angle < 0) angle += 180.0;
             if (angle >= 180.0) angle -= 180.0; // Atan2(0,-x)=180 wraps to 0
-            result.Add(new Segment(w.HandlePath, x1, y1, x2, y2, ux, uy, angle));
+            result.Add(new Segment(w.HandlePath, x1, y1, x2, y2, ux, uy, angle, w.SheetId));
         }
         return result;
     }
@@ -111,15 +112,16 @@ public static class WallPairDetector
             if (overlap < minOverlap) continue;
 
             string evidence = $"平行线对 d={d:F0} overlap={overlap:F0}";
-            Annotate(overlay, a.Handle, evidence);
-            Annotate(overlay, b.Handle, evidence);
+            Annotate(overlay, a.Handle, evidence, a.SheetId);
+            Annotate(overlay, b.Handle, evidence, b.SheetId);
         }
     }
 
-    private static void Annotate(SemanticOverlay overlay, string handle, string evidence)
+    private static void Annotate(SemanticOverlay overlay, string handle, string evidence, string? sheetId)
     {
         if (overlay.Annotations.Any(x => x.TargetHandle == handle && x.Confidence > 0.6)) return;
+        // T4：stamp 幅面归属（框外=null legacy 全局）
         overlay.UpsertAnnotation(new SemanticAnnotation(
-            handle, SemanticClass.Wall, Provenance.GeometryInference, 0.6, evidence));
+            handle, SemanticClass.Wall, Provenance.GeometryInference, 0.6, evidence, sheetId));
     }
 }

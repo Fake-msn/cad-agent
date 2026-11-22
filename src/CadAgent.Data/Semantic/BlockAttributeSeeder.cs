@@ -28,6 +28,11 @@ public static class BlockAttributeSeeder
         foreach (var w in walked)
         {
             if (w.Entity is not Insert ins || humanConfirmedHandles.Contains(w.HandlePath)) continue;
+            // R7（T4）：先清除该句柄陈旧 NativeObject 再种子——"当前原生数据"语义：
+            // 属性改判（深照型灯→未知）后 re-scan 不得残留旧类标注放行闸口。
+            // 当前仅 seeder 产 NativeObject（视觉管道 LlmInference/人工 HumanConfirmed 不受影响）；
+            // HumanConfirmed 句柄整体跳过（上方 continue），人工确认不动。
+            overlay.Annotations.RemoveAll(a => a.TargetHandle == w.HandlePath && a.Provenance == Provenance.NativeObject);
             string? aValue = null;
             var extras = new List<string>();
             foreach (var att in ins.Attributes)

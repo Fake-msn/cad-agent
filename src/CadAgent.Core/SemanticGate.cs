@@ -28,4 +28,12 @@ public interface ISemanticGate
 public interface ISemanticContextGate : ISemanticGate
 {
     GateDecision CheckContext(IReadOnlyList<SemanticClass> required, string? targetHandle);
+
+    /// <summary>
+    /// 幅面作用域（T4 加性）：sheetId 非 null 时所需类标注须归属该幅面
+    /// （SheetId==sheetId）或为 legacy 全局（SheetId==null）；targetHandle null →
+    /// 操作级同幅过滤。默认实现委托两参——仅实现两参的既有闸口/fake 不感知幅面亦不破坏。
+    /// </summary>
+    GateDecision CheckContext(IReadOnlyList<SemanticClass> required, string? targetHandle, string? sheetId)
+        => CheckContext(required, targetHandle);
 }

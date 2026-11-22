@@ -21,17 +21,18 @@ public static class AxisDetector
         double minRadius = 100, double maxRadius = 1000)
         => DetectWalked(BlockWalker.Walk(session.Doc, session.Sheets).ToList(), overlay, minRadius, maxRadius);
 
-    /// <summary>块遍历口径核心（扫描器复用同一次 Walk）：圆心/文本插入点/半径均用世界坐标。</summary>
+    /// <summary>块遍历口径核心（扫描器复用同一次 Walk）：圆心/文本插入点/半径均用世界坐标。
+    /// T4：幅面归属随实体携带（WalkedEntity.SheetId），产出标注 stamp。</summary>
     internal static void DetectWalked(IReadOnlyList<WalkedEntity> walked, SemanticOverlay overlay,
         double minRadius = 100, double maxRadius = 1000)
     {
-        var texts = new List<(string Handle, double X, double Y, string Value)>();
+        var texts = new List<(string Handle, double X, double Y, string Value, string? SheetId)>();
         foreach (var w in walked)
         {
             if (w.Entity is not TextEntity text || string.IsNullOrEmpty(text.Value)) continue;
             string value = text.Value.Trim();
             if (!NumberPattern.IsMatch(value)) continue;
-            texts.Add((w.HandlePath, w.WorldX, w.WorldY, value));
+            texts.Add((w.HandlePath, w.WorldX, w.WorldY, value, w.SheetId));
         }
         if (texts.Count == 0) return;
 
@@ -44,7 +45,7 @@ public static class AxisDetector
 
             // Nearest qualifying number text within radius×1.5 (2D distance).
             double maxDist = radius * 1.5;
-            (string Handle, double X, double Y, string Value)? best = null;
+            (string Handle, double X, double Y, string Value, string? SheetId)? best = null;
             double bestDist = double.MaxValue;
             foreach (var t in texts)
             {
@@ -60,15 +61,16 @@ public static class AxisDetector
             if (best is null) continue;
 
             string evidence = $"轴号圆圈 r={radius:F0} 编号={best.Value.Value}";
-            Annotate(overlay, w.HandlePath, evidence);
-            Annotate(overlay, best.Value.Handle, evidence);
+            Annotate(overlay, w.HandlePath, evidence, w.SheetId);
+            Annotate(overlay, best.Value.Handle, evidence, best.Value.SheetId);
         }
     }
 
-    private static void Annotate(SemanticOverlay overlay, string handle, string evidence)
+    private static void Annotate(SemanticOverlay overlay, string handle, string evidence, string? sheetId)
     {
         if (overlay.Annotations.Any(x => x.TargetHandle == handle && x.Confidence > Confidence)) return;
+        // T4：stamp 幅面归属（框外=null legacy 全局）
         overlay.UpsertAnnotation(new SemanticAnnotation(
-            handle, SemanticClass.Axis, Provenance.GeometryInference, Confidence, evidence));
+            handle, SemanticClass.Axis, Provenance.GeometryInference, Confidence, evidence, sheetId));
     }
 }

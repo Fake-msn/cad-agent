@@ -114,6 +114,55 @@ public class SheetRegistryTests
     }
 
     [Fact]
+    public void Session_Sheets_RebuiltAfterInPlaceFrameAdd()
+    {
+        // T4 接住 T1 minor：handler 就地编辑 Doc（加图框）后 Sheets 缓存不得陈旧；
+        // 指纹未变时复用缓存（同一实例），变化则重建
+        string path = Path.Combine(Path.GetTempPath(), $"cadagent-sheet-{Guid.NewGuid():N}.dxf");
+        try
+        {
+            var doc = new CadDocument();
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 10, 0) });
+            using (var fs = File.Create(path)) ACadSharp.IO.DxfWriter.Write(fs, doc);
+            var session = DrawingSession.Load(path);
+            Assert.Equal("S0", Assert.Single(session.Sheets).SheetId); // 无图框→默认幅面
+            Assert.Same(session.Sheets, session.Sheets); // 指纹未变→缓存命中
+
+            // 就地加图框（不 Reload/RestoreState）
+            var frame = new BlockRecord("院标准图框_A0");
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+            session.Doc.BlockRecords.Add(frame);
+            var ins = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+            ins.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+            session.Doc.Entities.Add(ins);
+
+            var sheets = session.Sheets;
+            Assert.Equal(ins.Handle.ToString(), Assert.Single(sheets).SheetId);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Session_Sheets_RebuiltAfterFrameMove()
+    {
+        // 图框就地移动（句柄集/实体计数不变）→ 指纹含插入点 → bounds 跟随更新
+        string path = Path.Combine(Path.GetTempPath(), $"cadagent-sheet-{Guid.NewGuid():N}.dxf");
+        try
+        {
+            using (var fs = File.Create(path)) ACadSharp.IO.DxfWriter.Write(fs, TwoSheetDoc());
+            var session = DrawingSession.Load(path);
+            Assert.Equal(0, session.Sheets[0].FrameBounds.MinX, 6);
+            var frameIns = session.Doc.Entities.OfType<Insert>().First(i => i.Block?.Name == "院标准图框_A0");
+            frameIns.InsertPoint = new XYZ(frameIns.InsertPoint.X + 500, frameIns.InsertPoint.Y, 0);
+            Assert.Equal(500, session.Sheets[0].FrameBounds.MinX, 6);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void Build_ArcOnlyFrame_BoundsCoverArc_NotInverted()
     {
         // T2 收口：纯 Arc 图框（PointsOf 旧版无 Arc 分支）不得产生倒置哨兵 bounds

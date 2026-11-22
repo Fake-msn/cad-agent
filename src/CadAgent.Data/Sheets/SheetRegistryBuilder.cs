@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using ACadSharp;
 using ACadSharp.Entities;
 using CadAgent.Core;
@@ -14,13 +16,44 @@ public static class SheetRegistryBuilder
 {
     private static readonly string[] FrameMarkers = { "图框", "图签", "BORD" };
 
+    /// <summary>图框 Insert 判定（Build 与 Sheets 缓存指纹共用同一口径）。</summary>
+    internal static bool IsFrameInsert(Insert i) =>
+        i.Block != null &&
+        (FrameMarkers.Any(m => i.Block.Name.Contains(m, StringComparison.OrdinalIgnoreCase))
+         || i.Attributes.Any(a => a.Tag == "图号"));
+
+    /// <summary>
+    /// Sheets 缓存轻量指纹（T4 接住 T1 minor）：实体计数 + 图框 Insert 句柄/插入点/属性集。
+    /// handler 就地编辑（增删实体、增删/移动图框、改图框属性）→ 指纹变化 → getter 重建；
+    /// 指纹不变则复用缓存（避免每次访问重复展开图框几何）。
+    /// 诚实边界：非图框文字的值编辑（如改幅面名文字）不在指纹内——该场景经 Reload 失效。
+    /// </summary>
+    internal static string Fingerprint(CadDocument doc)
+    {
+        var sb = new StringBuilder();
+        int count = 0;
+        var frames = new List<Insert>();
+        foreach (var e in doc.Entities)
+        {
+            count++;
+            if (e is Insert ins && IsFrameInsert(ins)) frames.Add(ins);
+        }
+        sb.Append(count).Append('|');
+        foreach (var f in frames.OrderBy(f => f.Handle))
+        {
+            sb.Append(f.Handle).Append('@')
+              .Append(f.InsertPoint.X.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+              .Append(f.InsertPoint.Y.ToString("R", CultureInfo.InvariantCulture)).Append(';');
+            foreach (var a in f.Attributes.OrderBy(a => a.Tag, StringComparer.Ordinal))
+                sb.Append(a.Tag).Append('=').Append(a.Value).Append(';');
+            sb.Append('|');
+        }
+        return sb.ToString();
+    }
+
     public static IReadOnlyList<SheetRecord> Build(CadDocument doc)
     {
-        var frames = doc.Entities.OfType<Insert>()
-            .Where(i => i.Block != null &&
-                (FrameMarkers.Any(m => i.Block.Name.Contains(m, StringComparison.OrdinalIgnoreCase))
-                 || i.Attributes.Any(a => a.Tag == "图号")))
-            .ToList();
+        var frames = doc.Entities.OfType<Insert>().Where(IsFrameInsert).ToList();
         if (frames.Count == 0)
         {
             var b = ModelBounds(doc);

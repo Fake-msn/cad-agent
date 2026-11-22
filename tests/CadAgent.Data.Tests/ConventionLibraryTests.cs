@@ -95,4 +95,23 @@ public class ConventionLibraryTests : IDisposable
         Assert.Equal(Provenance.HumanConfirmed, forHandle[0].Provenance);
         Assert.Equal(1.0, forHandle[0].Confidence);
     }
+
+    [Fact]
+    public void FindMapping_ExactOriginalNameWins_OverCanonical()
+    {
+        // T4 顺带 T2 minor：两段式查找——先精确原名扫描再归一名扫描（原名优先）。
+        // mappings=[WALL→Wall, x$0$WALL→Column]：层 x$0$WALL 须命中 Column（精确原名），
+        // 不得被 WALL→Wall 的归一名匹配抢先。
+        var overlay = new SemanticOverlay();
+        overlay.ConfirmMapping(new LayerMapping("WALL", SemanticClass.Wall, "u", DateTimeOffset.UnixEpoch));
+        overlay.ConfirmMapping(new LayerMapping("x$0$WALL", SemanticClass.Column, "u", DateTimeOffset.UnixEpoch));
+        var m = LayerInference.FindMapping(overlay, "x$0$WALL", "WALL");
+        Assert.NotNull(m);
+        Assert.Equal(SemanticClass.Column, m!.Class);
+        // 原名 WALL 仍命中 WALL；无精确原名时归一名兜底（人工映射 WALL 覆盖 x$0$WALL）
+        Assert.Equal(SemanticClass.Wall, LayerInference.FindMapping(overlay, "WALL", "WALL")!.Class);
+        var onlyCanon = new SemanticOverlay();
+        onlyCanon.ConfirmMapping(new LayerMapping("WALL", SemanticClass.Wall, "u", DateTimeOffset.UnixEpoch));
+        Assert.Equal(SemanticClass.Wall, LayerInference.FindMapping(onlyCanon, "x$0$WALL", "WALL")!.Class);
+    }
 }

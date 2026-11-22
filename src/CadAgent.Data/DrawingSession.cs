@@ -14,8 +14,25 @@ public sealed class DrawingSession : IDrawingSession
     public string SourcePath { get; }
 
     private IReadOnlyList<SheetRecord>? _sheets;
-    /// <summary>幅面登记簿（懒加载；图框检测+属性+名称，spec 幅面感知读图）。</summary>
-    public IReadOnlyList<SheetRecord> Sheets => _sheets ??= Data.Sheets.SheetRegistryBuilder.Build(Doc);
+    private string? _sheetsFingerprint;
+    /// <summary>
+    /// 幅面登记簿（懒加载 + 轻量指纹校验，T4）：每次访问校验实体计数+图框句柄/插入点/属性指纹，
+    /// handler 就地编辑（加图框/移动图框等）后指纹变化→重建，不再陈旧；指纹不变→复用缓存。
+    /// Reload/RestoreState 整体替换文档仍显式失效。
+    /// </summary>
+    public IReadOnlyList<SheetRecord> Sheets
+    {
+        get
+        {
+            string fp = Data.Sheets.SheetRegistryBuilder.Fingerprint(Doc);
+            if (_sheets == null || _sheetsFingerprint != fp)
+            {
+                _sheets = Data.Sheets.SheetRegistryBuilder.Build(Doc);
+                _sheetsFingerprint = fp;
+            }
+            return _sheets;
+        }
+    }
 
     private DrawingSession(string path, CadDocument doc)
     {
@@ -135,6 +152,7 @@ public sealed class DrawingSession : IDrawingSession
     {
         Doc = LoadDxf(SourcePath);
         _sheets = null; // 文档整体替换→幅面登记簿缓存失效，下次访问重建
+        _sheetsFingerprint = null;
     }
 
     /// <summary>步级 undo（3b-ii）：内存 DXF 序列化捕获模型状态，不触磁盘文件。</summary>
@@ -152,6 +170,7 @@ public sealed class DrawingSession : IDrawingSession
         using var reader = new DxfReader(ms);
         Doc = reader.Read();
         _sheets = null; // undo 恢复整体替换文档→幅面登记簿缓存失效
+        _sheetsFingerprint = null;
     }
 
     public DrawingSummary Summarize()

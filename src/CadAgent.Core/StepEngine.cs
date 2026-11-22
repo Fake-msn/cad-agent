@@ -112,6 +112,7 @@ public sealed class StepEngine
             if (_semanticGate != null && handler is ISemanticAware aware && aware.RequiredSemantics.Count > 0)
             {
                 string? targetHandle = null;
+                string? sheetId = null;
                 GateDecision decision;
                 if (_semanticGate is ISemanticContextGate contextGate)
                 {
@@ -124,7 +125,17 @@ public sealed class StepEngine
                             _ => null
                         };
                     }
-                    decision = contextGate.CheckContext(aware.RequiredSemantics, targetHandle);
+                    // T4：params 含 "sheetId"（string）→ 三参幅面作用域校验（防跨幅跑偏）；
+                    // 无 sheetId/非 string → 两参 legacy 路径（行为保持）
+                    if (step.Params.TryGetProperty("sheetId", out var sEl) && sEl.ValueKind == JsonValueKind.String)
+                    {
+                        sheetId = sEl.GetString();
+                        decision = contextGate.CheckContext(aware.RequiredSemantics, targetHandle, sheetId);
+                    }
+                    else
+                    {
+                        decision = contextGate.CheckContext(aware.RequiredSemantics, targetHandle);
+                    }
                 }
                 else
                 {
@@ -137,6 +148,7 @@ public sealed class StepEngine
                         {
                             required = aware.RequiredSemantics.Select(c => c.ToString()).ToArray(),
                             handle = targetHandle,
+                            sheetId,
                             reason = decision.Reason
                         }),
                         beforeHash, beforeHash, snapshot, plan.PlanId);

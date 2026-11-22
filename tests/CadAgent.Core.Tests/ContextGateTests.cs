@@ -101,4 +101,80 @@ public class ContextGateTests : IDisposable
         Assert.False(result.Ok);
         Assert.Null(_gate.LastHandle);
     }
+
+    // ---------- T4：sheetId 传递（三参 CheckContext）+ 默认接口方法兼容 ----------
+
+    private sealed class SheetRecordingGate : ISemanticContextGate
+    {
+        public string? LastHandle;
+        public string? LastSheetId;
+        public bool TwoArgCalled;
+        public bool ThreeArgCalled;
+        public GateDecision Check(IReadOnlyList<SemanticClass> required) => new(true, "");
+        public GateDecision CheckContext(IReadOnlyList<SemanticClass> required, string? targetHandle)
+        {
+            TwoArgCalled = true;
+            LastHandle = targetHandle;
+            return new(true, "");
+        }
+        public GateDecision CheckContext(IReadOnlyList<SemanticClass> required, string? targetHandle, string? sheetId)
+        {
+            ThreeArgCalled = true;
+            LastHandle = targetHandle;
+            LastSheetId = sheetId;
+            return new(true, "");
+        }
+    }
+
+    private StepEngine EngineWith(ISemanticGate gate) =>
+        new(_audit, new SnapshotStore(Path.Combine(_dir, "s")),
+            new FixedIdentity(new OperatorIdentity("T\\u", Role.Draw)), new RoleChecker(),
+            new IStepHandler[] { new AwareHandler() }, gate);
+
+    [Fact]
+    public void Engine_PassesSheetId_ToThreeArgCheckContext()
+    {
+        var gate = new SheetRecordingGate();
+        var result = EngineWith(gate).Run(Plan("""{"handle":"h-ok","sheetId":"S1"}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.True(result.Ok);
+        Assert.True(gate.ThreeArgCalled);
+        Assert.False(gate.TwoArgCalled);
+        Assert.Equal("h-ok", gate.LastHandle);
+        Assert.Equal("S1", gate.LastSheetId);
+    }
+
+    [Fact]
+    public void Engine_NoSheetId_UsesLegacyTwoArg()
+    {
+        // 无 sheetId → 两参 legacy 路径（行为保持）
+        var gate = new SheetRecordingGate();
+        var result = EngineWith(gate).Run(Plan("""{"handle":"h-ok"}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.True(result.Ok);
+        Assert.True(gate.TwoArgCalled);
+        Assert.False(gate.ThreeArgCalled);
+    }
+
+    [Fact]
+    public void Engine_NonStringSheetId_Ignored_LegacyTwoArg()
+    {
+        // sheetId 契约仅 string；数值等非法类型 → 忽略走两参（不抛）
+        var gate = new SheetRecordingGate();
+        var result = EngineWith(gate).Run(Plan("""{"handle":"h-ok","sheetId":42}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.True(result.Ok);
+        Assert.True(gate.TwoArgCalled);
+        Assert.False(gate.ThreeArgCalled);
+    }
+
+    [Fact]
+    public void Engine_SheetId_TwoArgOnlyFake_DefaultInterfaceDelegates()
+    {
+        // 仅实现两参的既有 fake（ContextGate）：三参默认接口方法委托两参，不破坏
+        var result = _engine.Run(Plan("""{"handle":"h-ok","sheetId":"S9"}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.True(result.Ok);
+        Assert.Equal("h-ok", _gate.LastHandle);
+    }
 }

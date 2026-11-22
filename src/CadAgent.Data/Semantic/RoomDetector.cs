@@ -93,8 +93,9 @@ public static class RoomDetector
             string handle = w.HandlePath;
             if (overlay.Annotations.Any(a => a.TargetHandle == handle
                     && a.Class == SemanticClass.Room && a.Confidence >= 0.6)) continue;
+            // T4：stamp 幅面归属（WalkedEntity.SheetId；框外=null legacy 全局）
             overlay.UpsertAnnotation(new SemanticAnnotation(handle, SemanticClass.Room,
-                Provenance.GeometryInference, 0.6, $"房名模式: {name}"));
+                Provenance.GeometryInference, 0.6, $"房名模式: {name}", w.SheetId));
         }
     }
 

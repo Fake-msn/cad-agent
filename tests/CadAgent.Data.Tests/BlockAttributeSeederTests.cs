@@ -219,6 +219,44 @@ public class BlockAttributeSeederTests
         Assert.Empty(overlay.Annotations);
     }
 
+    [Fact]
+    public void Seed_RescanAfterAttributeChange_RemovesStaleNativeObject_GateRefuses()
+    {
+        // R7：属性 深照型灯→未知构件 改后 re-seed → 旧 Lighting NativeObject 清除
+        //（"当前原生数据"语义）→ 闸口拒绝（陈旧语义不得放行）
+        var doc = EquipDoc();
+        var sheets = SheetRegistryBuilder.Build(doc);
+        var overlay = new SemanticOverlay();
+        BlockAttributeSeeder.Seed(doc, overlay, sheets);
+        var ins = doc.Entities.OfType<Insert>().First(i => i.Block?.Name == "E");
+        string h = ins.Handle.ToString();
+        Assert.Contains(overlay.Annotations, a => a.TargetHandle == h && a.Provenance == Provenance.NativeObject && a.Class == SemanticClass.Lighting);
+
+        ins.Attributes.First(a => a.Tag == "A").Value = "未知构件";
+        BlockAttributeSeeder.Seed(doc, overlay, sheets);
+
+        Assert.DoesNotContain(overlay.Annotations, a => a.TargetHandle == h && a.Provenance == Provenance.NativeObject);
+        var gate = new CadAgent.Data.Semantic.SemanticGate(overlay);
+        Assert.False(gate.CheckContext(new[] { SemanticClass.Lighting }, h).Allowed);
+    }
+
+    [Fact]
+    public void Seed_Rescan_KeepsHumanConfirmed_Untouched()
+    {
+        // R7 边界：HumanConfirmed 不动——人工改判句柄 seeder 整体跳过，人工标注保留
+        var doc = EquipDoc();
+        var sheets = SheetRegistryBuilder.Build(doc);
+        var overlay = new SemanticOverlay();
+        var ins = doc.Entities.OfType<Insert>().First(i => i.Block?.Name == "E");
+        string h = ins.Handle.ToString();
+        overlay.UpsertAnnotation(new SemanticAnnotation(h, SemanticClass.Column, Provenance.HumanConfirmed, 1.0, "人工改判柱"));
+        ins.Attributes.First(a => a.Tag == "A").Value = "未知构件";
+        BlockAttributeSeeder.Seed(doc, overlay, sheets);
+        var a = Assert.Single(overlay.Annotations.Where(x => x.TargetHandle == h));
+        Assert.Equal(Provenance.HumanConfirmed, a.Provenance);
+        Assert.Equal(SemanticClass.Column, a.Class);
+    }
+
     [SkippableFact]
     public void RealDrawing_LuminaireCount_MatchesProbe()
     {

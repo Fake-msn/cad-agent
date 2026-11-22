@@ -41,8 +41,9 @@ public static class DoorArcDetector
             string evidence = $"门弧 r={radius:F0} sweep={sweep:F0}°";
             if (overlay.Annotations.Any(x => x.TargetHandle == w.HandlePath && x.Confidence > Confidence))
                 continue;
+            // T4：stamp 幅面归属（WalkedEntity.SheetId；框外=null legacy 全局）
             overlay.UpsertAnnotation(new SemanticAnnotation(
-                w.HandlePath, SemanticClass.Door, Provenance.GeometryInference, Confidence, evidence));
+                w.HandlePath, SemanticClass.Door, Provenance.GeometryInference, Confidence, evidence, w.SheetId));
         }
     }
 }
