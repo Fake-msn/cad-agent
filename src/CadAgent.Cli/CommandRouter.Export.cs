@@ -14,7 +14,7 @@ public static partial class CommandRouter
     /// <summary>测试注入运行时工厂；null→生产运行时（CADAGENT_RUNTIME 选择，Available 检查）。</summary>
     internal static Func<ICadRuntime?>? RuntimeFactory;
 
-    /// <summary>运行时选择 seam（默认读 CADAGENT_RUNTIME 环境变量；null/空→zwcad）。</summary>
+    /// <summary>运行时选择 seam（默认读 CADAGENT_RUNTIME 环境变量；null→zwcad；空白/未知→硬错误）。</summary>
     internal static Func<string?> RuntimeSelector =
         () => Environment.GetEnvironmentVariable("CADAGENT_RUNTIME");
 

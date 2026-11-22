@@ -83,7 +83,12 @@ public sealed class ZwcadRuntime : ICadRuntime
 
     public void Close(bool save) => Run(() =>
     {
-        if (_doc != null) { _doc.Close(save); _doc = null; }
+        // 与 AcadRuntime.Close 同款：COM 失败统一 CadRuntimeException（ExportService 只捕该型，
+        // 裸 COMException 逃逸会跳过 Restart 重试与 export-failed 审计）；
+        // 仅 Close 成功后清空 _doc——失败时文档可能仍开，保留引用供重试/Restart。
+        try { if (_doc != null) { _doc.Close(save); _doc = null; } }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"Close 失败: {ex.Message}", ex); }
     });
 
     public void Restart() => Run(() =>

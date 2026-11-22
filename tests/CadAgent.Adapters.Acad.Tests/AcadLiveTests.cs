@@ -8,7 +8,7 @@ namespace CadAgent.Adapters.Acad.Tests;
 
 /// <summary>
 /// AutoCAD 条件真机测试（spec §11：Verified 须真机证据）。
-/// 探针不可用→SkippableFact 显式跳过（原因见 AcadProbe.SkipReason 三态，不是静默绿）。
+/// 探针不可用→SkippableFact 显式跳过（原因见 AcadProbe.SkipReason 四态，不是静默绿）。
 /// 工作环境执行协议：docs/verification/autocad-adapter-protocol.md。
 /// </summary>
 [Trait("Category", "RequiresAutoCAD")]
