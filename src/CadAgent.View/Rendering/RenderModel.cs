@@ -7,7 +7,7 @@ using CSMath;
 namespace CadAgent.View.Rendering;
 
 /// <summary>Flat render primitive kinds produced by <see cref="RenderModelBuilder"/>.</summary>
-public enum RenderKind { Line, Circle, Arc, Polyline, Text }
+public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 
 /// <summary>
 /// One flat render primitive. Point conventions (all coordinates already transformed
@@ -25,7 +25,13 @@ public enum RenderKind { Line, Circle, Arc, Polyline, Text }
 /// <see cref="Closed"/> 仅对 Polyline 有意义：true 表示画布须将末点连回首点闭合
 /// （整圆 tessellation 产 72 唯一点、不重复首点，靠此标志闭合）；既有闭合多段线
 /// （LwPolyline.IsClosed 重复首点）保持 Closed=false，重复首点自闭合，行为不变。
-/// 可选参置于 Handle 之后，后续 DashPattern/Fill 等追加其后（位置构造兼容）。
+/// Hatch: Points 为各边界路径的顶点序列（GetPoints(16) 弧段插值），**各路径之间以
+/// (NaN,NaN) 分隔**——画布按分隔符拆分 figure 并以 EvenOdd 填充规则跨路径挖岛；
+/// 分隔符不是坐标，Bounds 等消费方必须跳过。
+/// <see cref="DashPattern"/> 为 Task 3（线型虚实）预置：虚线段长序列（世界单位，
+/// 空/null=实线），本任务不消费；<see cref="Fill"/> 仅对 Hatch 有意义：true=实心
+/// 填充（IsSolid），false=仅描边界轮廓（图案填充的图案线生成 deferred）。
+/// 可选参置于 Handle 之后（Closed→DashPattern→Fill 顺序追加，位置构造兼容）。
 /// </summary>
 public sealed record RenderItem(
     RenderKind Kind,
@@ -36,12 +42,15 @@ public sealed record RenderItem(
     double TextHeight,
     double RotationDeg,
     string Handle,
-    bool Closed = false);
+    bool Closed = false,
+    IReadOnlyList<double>? DashPattern = null,
+    bool Fill = false);
 
 /// <summary>
 /// DrawingSession -> flat render-item list (plan 4 task 2). Pure logic: no Avalonia
 /// dependency, safe to unit-test headless. Supported entities: Line, Circle, Arc,
-/// LwPolyline, Polyline2D, TextEntity, MText, Insert (block expansion). Anything
+/// LwPolyline, Polyline2D, TextEntity, MText, Insert (block expansion), Dimension
+/// (anonymous-block expansion), Hatch (boundary paths + solid fill). Anything
 /// else is skipped and counted via the <c>out skippedCount</c> overload.
 /// ACadSharp 3.8.35 API verified via package XML docs + runtime probe:
 /// Insert.Block (BlockRecord) / InsertPoint / XScale / YScale / Rotation (radians);
@@ -50,6 +59,7 @@ public sealed record RenderItem(
 /// -1=true color) / IsTrueColor / R / G / B; BlockRecord.BlockEntity.BasePoint.
 /// OCS（任意轴算法，计划4 延迟项 Task 1）：非默认法向的 Circle/Arc/LwPolyline/
 /// TextEntity/MText/Insert 经 OcsMapper 投影到 WCS XY；默认法向 (0,0,1) 走原路径。
+/// Hatch 边界顶点同为 OCS 坐标，经同一 OcsMapper 投影（Task 2）。
 /// </summary>
 public static class RenderModelBuilder
 {
@@ -74,7 +84,8 @@ public static class RenderModelBuilder
     /// <summary>
     /// Builds the flat render list. <paramref name="skippedCount"/> reports entities
     /// the builder does not support (unknown types, unsupported primitives, and
-    /// Inserts beyond the depth guard).
+    /// Inserts beyond the depth guard), plus honest skips: Dimensions without a
+    /// block (no generated geometry) and Hatches without boundary points.
     /// </summary>
     public static IReadOnlyList<RenderItem> Build(DrawingSession session, out int skippedCount)
     {
@@ -118,7 +129,13 @@ public static class RenderModelBuilder
             }
             else
             {
-                foreach ((double x, double y) in item.Points) Expand(x, y);
+                // Hatch 与 Polyline 同路径遍历顶点；Hatch 的 (NaN,NaN) 路径分隔符
+                // 不是坐标，显式跳过（NaN 比较恒 false，守卫使约定显式化）。
+                foreach ((double x, double y) in item.Points)
+                {
+                    if (double.IsNaN(x)) continue;
+                    Expand(x, y);
+                }
             }
         }
 
@@ -262,6 +279,38 @@ public static class RenderModelBuilder
                         handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture));
                     childIndex++;
                 }
+                break;
+            }
+
+            case Dimension dim:
+            {
+                // 尺寸标注经匿名块（*Dnn）展开——块内即厂商绘制的标注几何（延伸线/尺寸线/箭头/文本），
+                // 探针核定 DXF 往返保留。块缺失（未生成标注几何）→诚实 skip+计数。
+                if (dim.Block is null) { skipped++; break; }
+                int childIndex = 0;
+                foreach (Entity child in dim.Block.Entities)
+                    Append(child, items, ref skipped, t, rotationDeg, heightScale, byBlockColor, depth + 1,
+                        handle + ":" + childIndex++.ToString(CultureInfo.InvariantCulture));
+                break;
+            }
+
+            case Hatch hatch:
+            {
+                var (ocs, _) = OcsMapper(hatch.Normal);
+                var pts = new List<(double X, double Y)>();
+                foreach (Hatch.BoundaryPath path in hatch.Paths)
+                {
+                    if (pts.Count > 0) pts.Add((double.NaN, double.NaN)); // 路径分隔（EvenOdd 挖岛）
+                    foreach (XY p in path.GetPoints(16)) // 弧段 16 点插值（探针核定）
+                    {
+                        // 边界顶点为 OCS 坐标：先 OCS→WCS XY 投影再走父仿射（同 LwPolyline 双 Apply）。
+                        (double ox, double oy) = ocs.Apply(p.X, p.Y);
+                        pts.Add(t.Apply(ox, oy));
+                    }
+                }
+                if (pts.Count == 0) { skipped++; break; }
+                // 图案填充（非 solid）渲染边界轮廓；图案线生成 deferred（spec 注记，不假装）
+                items.Add(new RenderItem(RenderKind.Hatch, pts, layer, color, null, 0, 0, handle, Fill: hatch.IsSolid));
                 break;
             }
 

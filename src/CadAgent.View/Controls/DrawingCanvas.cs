@@ -200,6 +200,37 @@ public sealed class DrawingCanvas : Control
                 context.DrawText(text, new Point(p.X, p.Y - text.Height));
                 break;
             }
+
+            case RenderKind.Hatch:
+            {
+                // Hatch Points 约定：各边界路径以 (NaN,NaN) 分隔（RenderItem XML doc）。
+                // 逐路径 BeginFigure/EndFigure(true) 闭合 + FillRule.EvenOdd → 跨路径
+                // 挖岛（内环为洞）。实心（Fill=true）填充+描边；图案填充（非 solid）
+                // 仅描边界轮廓——图案线生成 deferred（spec 注记，不假装已渲染图案）。
+                if (item.Points.Count < 3) break;
+                var geo = new StreamGeometry();
+                using (StreamGeometryContext g = geo.Open())
+                {
+                    // Avalonia 11 无 StreamGeometry.FillRule 属性——填充规则经上下文
+                    // SetFillRule 设置（须在 BeginFigure 之前；默认即 EvenOdd，显式钉住）。
+                    g.SetFillRule(FillRule.EvenOdd);
+                    bool inFigure = false;
+                    foreach ((double x, double y) in item.Points)
+                    {
+                        if (double.IsNaN(x))
+                        {
+                            if (inFigure) g.EndFigure(true);
+                            inFigure = false;
+                            continue;
+                        }
+                        if (!inFigure) { g.BeginFigure(ScreenPoint((x, y)), item.Fill); inFigure = true; }
+                        else g.LineTo(ScreenPoint((x, y)));
+                    }
+                    if (inFigure) g.EndFigure(true);
+                }
+                context.DrawGeometry(item.Fill ? pen.Brush : null, pen, geo);
+                break;
+            }
         }
     }
 

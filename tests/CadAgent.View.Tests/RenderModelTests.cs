@@ -770,4 +770,125 @@ public class RenderModelTests
             Assert.Equal(6, item.Points[1].Y, 6);
         });
     }
+
+    // ---- 计划4 视图延迟项 Task 2：Dimension 匿名块展开 + Hatch 边界/实心填充 ----
+    // 夹具沿用既有 WithSession/DxfFixture 模式：经真实 DXF 写/读往返。探针核定：
+    // Dimension.Block 可设且往返保留匿名块（*Dnn，AssignDocument 重命名为 *D{handle}）；
+    // DxfWriter 默认配置不重生成标注几何（UpdateDimensionsInModel/InBlocks 默认 false，
+    // 块内厂商绘制的图元原样保留）；Hatch.BoundaryPath.GetPoints(16) 弧段插值。
+
+    /// <summary>
+    /// 辅助：4 条 Line 边构造矩形边界路径（探针核定 new Hatch.BoundaryPath.Line(new Line{...})
+    /// 边构造 + new Hatch.BoundaryPath(edges) 路径构造）。
+    /// </summary>
+    private static Hatch.BoundaryPath SquarePath(double x0, double y0, double x1, double y1)
+    {
+        return new Hatch.BoundaryPath(new Hatch.BoundaryPath.Edge[]
+        {
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x0, y0, 0), EndPoint = new XYZ(x1, y0, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x1, y0, 0), EndPoint = new XYZ(x1, y1, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x1, y1, 0), EndPoint = new XYZ(x0, y1, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x0, y1, 0), EndPoint = new XYZ(x0, y0, 0) }),
+        });
+    }
+
+    [Fact]
+    public void Dimension_WithAnonymousBlock_ExpandsBlockEntities()
+    {
+        WithSession(doc =>
+        {
+            var blk = new BlockRecord("*D1");
+            blk.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            blk.Entities.Add(new TextEntity { InsertPoint = new XYZ(5, 2, 0), Value = "10", Height = 2.5 });
+            doc.BlockRecords.Add(blk);
+            doc.Entities.Add(new DimensionLinear { Block = blk, DefinitionPoint = new XYZ(0, 0, 0), InsertionPoint = new XYZ(5, 5, 0) });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            Assert.Equal(2, items.Count);
+            Assert.Contains(items, i => i.Kind == RenderKind.Line);
+            Assert.Contains(items, i => i.Kind == RenderKind.Text && i.Text == "10");
+            // 子图元句柄后缀口径同 Insert："{dimHandle}:{childIndex}"（取加载后的真实句柄）。
+            string dimHandle = s.Doc.Entities.OfType<DimensionLinear>().Single().Handle.ToString();
+            Assert.All(items, i => Assert.StartsWith(dimHandle, i.Handle));
+        });
+    }
+
+    [Fact]
+    public void Dimension_NullBlock_SkippedAndCounted()
+    {
+        WithSession(doc => doc.Entities.Add(new DimensionLinear()), s =>
+        {
+            var items = RenderModelBuilder.Build(s, out int skipped);
+            Assert.Empty(items);
+            Assert.Equal(1, skipped); // 诚实计数，不假装已渲染
+        });
+    }
+
+    [Fact]
+    public void Hatch_SolidSquare_ProducesFilledHatchItem()
+    {
+        WithSession(doc =>
+        {
+            var h = new Hatch { IsSolid = true };
+            h.Paths.Add(SquarePath(0, 0, 10, 10));
+            doc.Entities.Add(h);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Hatch, item.Kind);
+            Assert.True(item.Fill);
+            // 方形 4 顶点；GetPoints 每边输出起点+终点（相邻顶点重复，探针实测
+            // DXF 往返后方形单路径 8 点）——按实际输出钉住精确点数。
+            Assert.Equal(8, item.Points.Count(p => !double.IsNaN(p.X)));
+        });
+    }
+
+    [Fact]
+    public void Hatch_TwoPaths_NaNSeparated()
+    {
+        WithSession(doc =>
+        {
+            var h = new Hatch { IsSolid = true };
+            h.Paths.Add(SquarePath(0, 0, 10, 10));
+            h.Paths.Add(SquarePath(3, 3, 7, 7)); // 岛
+            doc.Entities.Add(h);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Contains(item.Points, p => double.IsNaN(p.X)); // 路径分隔符
+        });
+    }
+
+    [Fact]
+    public void Hatch_MirroredNormal_PointsMirrored()
+    {
+        WithSession(doc =>
+        {
+            var h = new Hatch { IsSolid = true, Normal = new XYZ(0, 0, -1) };
+            h.Paths.Add(SquarePath(1, 1, 3, 3));
+            doc.Entities.Add(h);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.All(item.Points.Where(p => !double.IsNaN(p.X)), p => Assert.True(p.X < 0));
+        });
+    }
+
+    [Fact]
+    public void Bounds_HatchNaNSeparators_Skipped()
+    {
+        // Hatch Points 的 (NaN,NaN) 路径分隔符不是坐标：Bounds 必须跳过，
+        // 包围盒只由真实顶点决定（NaN 比较恒 false，守卫前后行为一致——钉住约定）。
+        var items = new[]
+        {
+            new RenderItem(RenderKind.Hatch, new (double, double)[]
+            {
+                (0, 0), (10, 0), (10, 10), (0, 10),
+                (double.NaN, double.NaN),
+                (3, 3), (7, 3), (7, 7), (3, 7)
+            }, "0", 0xFFFFFF, null, 0, 0, "H1", Fill: true)
+        };
+        Assert.Equal((0.0, 0.0, 10.0, 10.0), RenderModelBuilder.Bounds(items));
+    }
 }
