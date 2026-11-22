@@ -96,6 +96,66 @@ public class MoveEntityTests
         finally { File.Delete(path); }
     }
 
+    // ---- 最终审查 Imp#1：Move OCS 反向（镜像法向精确逆映射） ----
+    // Circle/Arc/MText/Insert/LwPolyline/Polyline2D/TextEntity 坐标为 OCS 原值
+    // （ACadSharp 不转换）；WCS dx/dy 须经任意轴算法逆投影到 OCS 再施加。
+    // 镜像法向 N=(0,0,-1)：Ax=(-1,0,0), Ay=(0,1,0) → odx=-dx, ody=dy。
+    // 算法与 View RenderModel.OcsMapper 同款（注释互指，防双处漂移）。
+
+    [Fact]
+    public void Move_MirroredNormalCircle_InverseOcsDelta()
+    {
+        string path = DxfFixture.CreateTempDxf(doc =>
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(0, 0, -1) }));
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var circle = s.Doc.Entities.OfType<Circle>().Single();
+            Assert.Equal(-1, circle.Normal.Z, 3); // 镜像法向经 DXF 往返保持
+            var r = new MoveEntityHandler().Apply(s, P($"{{\"handle\":\"{circle.Handle}\",\"dx\":3,\"dy\":4}}"));
+            Assert.True(r.Ok);
+            var after = s.Doc.Entities.OfType<Circle>().Single();
+            // OCS 原值施加 (-3,+4)：Center=(2,9,0)；WCS 投影 = Ax*2+Ay*9 = (-2,9)
+            // ——若 WCS dx 直施 OCS（旧缺陷）得 (8,9)→WCS(-8,9)，实际位移 -dx。
+            Assert.Equal(2, after.Center.X, 3);
+            Assert.Equal(9, after.Center.Y, 3);
+            Assert.Equal(0, after.Center.Z, 3);
+            // WCS 投影核验：Ax=(-1,0,0), Ay=(0,1,0) → WCS=(-2,9)，位移 +3/+4 精确。
+            double wcsX = -after.Center.X, wcsY = after.Center.Y;
+            Assert.Equal(-2, wcsX, 3);
+            Assert.Equal(9, wcsY, 3);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Move_MirroredNormalLwPolyline_VerticesInverseOcsDelta()
+    {
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var lw = new LwPolyline { Elevation = 7, Normal = new XYZ(0, 0, -1) };
+            lw.Vertices.Add(new LwPolyline.Vertex(new XY(1, 2)));
+            lw.Vertices.Add(new LwPolyline.Vertex(new XY(5, 2)));
+            doc.Entities.Add(lw);
+        });
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var lw = s.Doc.Entities.OfType<LwPolyline>().Single();
+            Assert.Equal(-1, lw.Normal.Z, 3);
+            var r = new MoveEntityHandler().Apply(s, P($"{{\"handle\":\"{lw.Handle}\",\"dx\":3,\"dy\":4}}"));
+            Assert.True(r.Ok);
+            var after = s.Doc.Entities.OfType<LwPolyline>().Single();
+            // 顶点 XY 同为 OCS：(-3,+4) → (-2,6)/(2,6)；Elevation 不动。
+            Assert.Equal(-2, after.Vertices[0].Location.X, 3);
+            Assert.Equal(6, after.Vertices[0].Location.Y, 3);
+            Assert.Equal(2, after.Vertices[1].Location.X, 3);
+            Assert.Equal(6, after.Vertices[1].Location.Y, 3);
+            Assert.Equal(7, after.Elevation, 3);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Move_UnsupportedEntity_StillHonestStepFailed()
     {

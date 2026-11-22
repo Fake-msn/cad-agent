@@ -236,4 +236,79 @@ public class PlanPreviewViewModelTests
         Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
         Assert.True(f.Audit.VerifyChain(out string error), error);
     }
+
+    // ---- 最终审查 Imp#2：前奏（profile/key/semantic 加载）损坏配置不崩 UI ----
+
+    [Fact]
+    public async Task CorruptLlmProfiles_GracefulFailure_NoThrow()
+    {
+        using var f = new Fixture();
+        // 垃圾字节 llm-profiles.json：LlmConfigStore.Load 抛 JsonException——
+        // 前奏须在 try/catch 内 → ErrorMessage 诚实失败，绝不沿 async void 崩进程。
+        File.WriteAllBytes(Path.Combine(f.AgentDir, "llm-profiles.json"), new byte[] { 0xFF, 0xFE, 0x00, 0x7B, 0x22 });
+        PlanPreviewViewModel vm = f.MakeVm(); // 无 override → 走真实 Load 路径
+
+        await vm.GenerateAsync(); // 不抛即为首要断言
+
+        Assert.False(string.IsNullOrEmpty(vm.ErrorMessage));
+        Assert.Equal("Failed", vm.Status);
+        Assert.False(vm.IsBusy);
+        Assert.Empty(f.Audit.ReadAll()); // 未触达编排，无审计
+    }
+
+    [Fact]
+    public async Task CorruptSemanticOverlay_GracefulFailure_NoThrow()
+    {
+        using var f = new Fixture();
+        // 垃圾字节 semantic.json：SemanticOverlay.Load 抛 JsonException（前奏段）。
+        File.WriteAllBytes(Path.Combine(f.AgentDir, "semantic.json"), new byte[] { 0xFF, 0xFE, 0x00, 0x7B, 0x22 });
+        PlanPreviewViewModel vm = f.MakeVm(new FakeLlmClient(PlanJson), LocalProfile);
+        int countBefore = f.Session.Doc.Entities.Count;
+
+        await vm.GenerateAsync();
+
+        Assert.False(string.IsNullOrEmpty(vm.ErrorMessage));
+        Assert.Equal("Failed", vm.Status);
+        Assert.False(vm.IsBusy);
+        Assert.Equal(countBefore, f.Session.Doc.Entities.Count);
+        Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "tx-start");
+    }
+
+    // ---- 最终审查 Imp#4：PlanExecuted 释闸后触发（刷新不再绕闸竞态） ----
+
+    [Fact]
+    public async Task PlanExecuted_FiresAfterSessionGateReleased()
+    {
+        using var f = new Fixture();
+        var gate = new SemaphoreSlim(1, 1);
+        var vm = new PlanPreviewViewModel(f.Session, f.ProjectDir, f.Audit,
+            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+            new RoleChecker(), gate, new FakeLlmClient(PlanJson), LocalProfile);
+        // 事件触发瞬间闸必须已可用（WaitAsync(0) 确定性钉住释闸先于事件）；
+        // 旧缺陷：持闸内触发 → WaitAsync(0) 失败。取得后立即归还，不干扰编排收尾。
+        bool gateFreeAtEvent = false;
+        void OnExecuted()
+        {
+            gateFreeAtEvent = gate.WaitAsync(0).GetAwaiter().GetResult();
+            if (gateFreeAtEvent) gate.Release();
+        }
+        vm.PlanExecuted += OnExecuted;
+        TaskCompletionSource ready = ReadySignal(vm, out Action handler);
+        try
+        {
+            Task run = vm.GenerateAsync();
+            await ready.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            vm.ConfirmPlan(true);
+            await run.WaitAsync(TimeSpan.FromSeconds(15));
+
+            Assert.Equal("Executed", vm.Status);
+            Assert.True(gateFreeAtEvent, "PlanExecuted 触发时会话闸应已释放");
+            Assert.Equal(1, gate.CurrentCount); // 闸完整归还（无泄漏）
+        }
+        finally
+        {
+            vm.PlanExecuted -= OnExecuted;
+            vm.PreviewReady -= handler;
+        }
+    }
 }

@@ -113,6 +113,12 @@ public sealed class MainWindow : Window
     /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
     private (double X, double Y)? _moveBase;
 
+    /// <summary>最终审查顺手修（T10 deferred）：预览确认/拒绝按钮的轮次闸。
+    /// PreviewReady 处理时置位（启用按钮）；确认/拒绝点击后立即复位（禁用）——
+    /// 防纠正循环二次 confirmPlan 时，用户在下一轮 PreviewReady 的 Post 处理前
+    /// 点击确认（确认到尚未显示的旧计划）。仅 PreviewReady 重新启用，RunCompleted 不复位。</summary>
+    private bool _planConfirmPending;
+
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null,
         PlanPreviewViewModel? planPreview = null)
     {
@@ -703,10 +709,10 @@ public sealed class MainWindow : Window
         };
         PlanPreviewList = previewList;
         var confirmPlan = new Button { Content = "确认执行", Margin = new Thickness(4, 2) };
-        confirmPlan.Click += (_, _) => { PlanPreview?.ConfirmPlan(true); UpdatePlanPanel(); };
+        confirmPlan.Click += (_, _) => { _planConfirmPending = false; PlanPreview?.ConfirmPlan(true); UpdatePlanPanel(); };
         ConfirmPlanButton = confirmPlan;
         var rejectPlan = new Button { Content = "拒绝", Margin = new Thickness(4, 2) };
-        rejectPlan.Click += (_, _) => { PlanPreview?.ConfirmPlan(false); UpdatePlanPanel(); };
+        rejectPlan.Click += (_, _) => { _planConfirmPending = false; PlanPreview?.ConfirmPlan(false); UpdatePlanPanel(); };
         RejectPlanButton = rejectPlan;
         var previewButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         previewButtons.Children.Add(confirmPlan);
@@ -736,7 +742,8 @@ public sealed class MainWindow : Window
         planPanel.Children.Add(previewSection); // LastChildFill：预览步骤占满其余区域
 
         // 事件 marshal：VM 事件在编排线程触发（Task.Run）→ Dispatcher.Post 回 UI 线程。
-        PlanPreview.PreviewReady += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
+        // PreviewReady 处理时置位轮次闸（启用确认/拒绝按钮）——新一轮计划已显示方可应答。
+        PlanPreview.PreviewReady += () => Dispatcher.UIThread.Post(() => { _planConfirmPending = true; UpdatePlanPanel(); });
         PlanPreview.RunCompleted += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
         PlanPreview.EgressConsentRequired += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
         PlanPreview.PlanExecuted += () => Dispatcher.UIThread.Post(() =>
@@ -1457,6 +1464,15 @@ public sealed class MainWindow : Window
         SetEditWarning(""); // T7：切换工具清掉上一次编辑的警示（与错误通道同口径）
     }
 
+    /// <summary>
+    /// Imp#3：Insert/Dimension 子图元渲染句柄为 "{parent}:{i}"（嵌套 "{top}:{i}:{j}"，
+    /// RenderModel 展开口径）。编辑语义 = 编辑父实体/块整体——剥后缀取顶层句柄传处理器
+    /// （EditViewModel.WithHandle 的 ulong.TryParse 只认十进制顶层句柄，后缀会致"非法句柄"
+    /// 拒绝，块/标注几何在视图内 Move/Delete/ChangeLayer 不可达）。独立子图元编辑 deferred
+    /// （spec §12 注记）。三编辑入口（Move/Delete/ChangeLayer）统一经此。
+    /// </summary>
+    private static string ParentHandle(string handle) => handle.Split(':')[0];
+
     /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。
     /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
     /// 视图闭环 T9：第二击先经模态确认（ConfirmDialog.ShowDialog&lt;bool&gt;；headless
@@ -1465,8 +1481,9 @@ public sealed class MainWindow : Window
     private async Task OnDeleteClickAsync()
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
-        if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
+        if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string selected)
         {
+            string handle = ParentHandle(selected); // Imp#3：子图元句柄→父实体整体删除
             string msg = $"确认删除选中实体（句柄 {handle}）？删除经审计管线，可 Undo 撤回。";
             bool confirmed = ConfirmDeleteOverride is not null
                 ? await ConfirmDeleteOverride(msg)
@@ -1495,9 +1512,9 @@ public sealed class MainWindow : Window
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.ChangeLayer
-            && Canvas.SelectedHandle is string handle
+            && Canvas.SelectedHandle is string selected
             && EditLayerSelector?.SelectedItem is string layer)
-            _ = RunEditAsync(() => Edit.ChangeLayerAsync(handle, layer));
+            _ = RunEditAsync(() => Edit.ChangeLayerAsync(ParentHandle(selected), layer)); // Imp#3：父实体整体改层
     }
 
     /// <summary>
@@ -1534,7 +1551,8 @@ public sealed class MainWindow : Window
                     return true;
                 }
                 // 视图闭环 T9：字高取输入框（InvariantCulture；非法/≤0 → 默认 3.5，不崩）。
-                double height = double.TryParse(TextHeightInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && h > 0 ? h : DefaultTextHeight;
+                // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查）。
+                double height = double.TryParse(TextHeightInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && double.IsFinite(h) && h > 0 ? h : DefaultTextHeight;
                 _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, height));
                 return true;
 
@@ -1546,8 +1564,10 @@ public sealed class MainWindow : Window
                     return true;
                 }
                 // 视图闭环 T9：缩放非法/≤0 → 1；旋转 UI 度 → handler 弧度（非法 → 0）。
-                double scale = double.TryParse(BlockScaleInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && s > 0 ? s : 1;
-                double rotation = double.TryParse(BlockRotationInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double deg) ? deg * Math.PI / 180.0 : 0;
+                // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查；
+                // NaN/∞ 入 JsonSerializer 会抛异常致编辑静默失败）。
+                double scale = double.TryParse(BlockScaleInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && double.IsFinite(s) && s > 0 ? s : 1;
+                double rotation = double.TryParse(BlockRotationInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double deg) && double.IsFinite(deg) ? deg * Math.PI / 180.0 : 0;
                 _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy, scale, rotation));
                 return true;
 
@@ -1563,7 +1583,8 @@ public sealed class MainWindow : Window
                 else if (Canvas.SelectedHandle is string moveHandle && _moveBase is (double bx, double by))
                 {
                     _moveBase = null;
-                    _ = RunEditAsync(() => Edit.MoveAsync(moveHandle, wx - bx, wy - by));
+                    // Imp#3：子图元句柄→父 Insert/Dimension 整体移动（块/标注几何随父平移）。
+                    _ = RunEditAsync(() => Edit.MoveAsync(ParentHandle(moveHandle), wx - bx, wy - by));
                 }
                 return true;
 
@@ -1675,9 +1696,18 @@ public sealed class MainWindow : Window
         if (PlanPreview is null || _editBusy || _diffBusy || PlanPreview.IsBusy) return;
         PlanPreview.Intent = PlanIntentInput?.Text ?? "";
         if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = false;
-        try { await PlanPreview.GenerateAsync(); }
+        try
+        {
+            await PlanPreview.GenerateAsync();
+            UpdatePlanPanel();
+        }
+        catch (Exception ex)
+        {
+            // Imp#2 防御兜底（镜像既有 async void 惯例 OnAdjudicateClick）：GenerateAsync
+            // 已内部全捕获前奏/编排异常，此处兜底装配/刷新意外——异常入错误通道，绝不崩进程。
+            SetPlanError(ex.Message);
+        }
         finally { if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = true; }
-        UpdatePlanPanel();
     }
 
     /// <summary>视图闭环 T10：计划面板刷新——预览/出境同意可见性 + 步骤列表 +
@@ -1691,6 +1721,10 @@ public sealed class MainWindow : Window
         if (EgressConsentSection is not null) EgressConsentSection.IsVisible = PlanPreview.IsEgressConsentVisible;
         if (EgressPromptText is not null) EgressPromptText.Text = PlanPreview.EgressPrompt;
         if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = !PlanPreview.IsBusy;
+        // 最终审查顺手修（T10）：确认/拒绝按钮仅在 PreviewReady 处理后启用（_planConfirmPending），
+        // 点击应答后立即禁用至下一轮 PreviewReady——防纠正循环确认到尚未显示的计划。
+        if (ConfirmPlanButton is not null) ConfirmPlanButton.IsEnabled = _planConfirmPending;
+        if (RejectPlanButton is not null) RejectPlanButton.IsEnabled = _planConfirmPending;
         if (PlanStatusText is not null)
         {
             string text = PlanPreview.Status;

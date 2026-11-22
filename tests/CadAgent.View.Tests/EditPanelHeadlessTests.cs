@@ -42,8 +42,10 @@ public class EditPanelHeadlessTests
         public string AgentDir => Path.Combine(ProjectDir, ".cadagent");
         public string AuditDbPath => Path.Combine(AgentDir, "audit.db");
 
-        /// <summary>withLumBlock=true 追加块定义 LUM（插块测试用；块内实体不进模型空间，既有计数断言不变）。</summary>
-        public Fixture(bool withLumBlock = false)
+        /// <summary>withLumBlock=true 追加块定义 LUM（插块测试用；块内实体不进模型空间，既有计数断言不变）。
+        /// withLumInsert=true 追加 LUM 块 + 模型空间 Insert@(50,10)（Imp#3 子图元句柄测试）；
+        /// withDimension=true 追加带匿名块的 DimensionLinear（块内线 y=20，避开夹具 WALL 线）。</summary>
+        public Fixture(bool withLumBlock = false, bool withLumInsert = false, bool withDimension = false)
         {
             ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-ui-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(AgentDir);
@@ -52,7 +54,21 @@ public class EditPanelHeadlessTests
                 var wall = new Layer("WALL");
                 doc.Layers.Add(wall);
                 doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0), Layer = wall });
-                if (withLumBlock) DxfFixture.AddLumBlock(doc);
+                if (withLumBlock || withLumInsert) DxfFixture.AddLumBlock(doc);
+                if (withLumInsert)
+                {
+                    var block = doc.BlockRecords.First(b => b.Name == "LUM");
+                    doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(50, 10, 0) });
+                }
+                if (withDimension)
+                {
+                    // 探针核定（RenderModelTests 先例）：Dimension.Block 可设且 DXF 往返保留匿名块。
+                    var blk = new BlockRecord("*D1");
+                    blk.Entities.Add(new Line { StartPoint = new XYZ(0, 20, 0), EndPoint = new XYZ(10, 20, 0) });
+                    blk.Entities.Add(new TextEntity { InsertPoint = new XYZ(5, 22, 0), Value = "10", Height = 2.5 });
+                    doc.BlockRecords.Add(blk);
+                    doc.Entities.Add(new DimensionLinear { Block = blk, DefinitionPoint = new XYZ(0, 20, 0), InsertionPoint = new XYZ(5, 25, 0) });
+                }
             });
         }
 
@@ -70,9 +86,10 @@ public class EditPanelHeadlessTests
         public OperatorIdentity Current { get; }
     }
 
-    private static (MainWindow Window, Fixture F) ShowWindow(bool withLumBlock = false)
+    private static (MainWindow Window, Fixture F) ShowWindow(bool withLumBlock = false,
+        bool withLumInsert = false, bool withDimension = false)
     {
-        var f = new Fixture(withLumBlock);
+        var f = new Fixture(withLumBlock, withLumInsert, withDimension);
         var vm = new MainViewModel(f.DxfPath, f.ProjectDir);
         Assert.Null(vm.ErrorMessage);
         var window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
@@ -426,6 +443,147 @@ public class EditPanelHeadlessTests
             Assert.Single(records, r => r.Entry.Kind == "tx-commit");
             AuditRecord step = Assert.Single(records, r => r.Entry.Kind == "step");
             Assert.Contains("delete-entity", step.Entry.ParamsJson);
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    // ---- 最终审查 Imp#3：子图元后缀句柄（"{parent}:{i}"）编辑入口剥后缀 ----
+    // 语义 = 编辑父实体/块整体（独立子图元编辑 deferred，spec §12 注记）。
+
+    [AvaloniaFact]
+    public async Task Move_InsertSubEntitySelected_MovesParentInsert()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withLumInsert: true);
+        try
+        {
+            // 夹具：WALL 线 + LUM Insert@(50,10)（块内对角线 (49,9)-(51,11) 展开为子图元）。
+            Assert.Equal(2, window.Canvas!.Items.Count);
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+
+            ClickCanvasAtWorld(window, 50, 10); // 命中子图元 → 选中 "{insert}:0" + 记基准 (49,9)
+            Assert.NotNull(window.Canvas.SelectedHandle);
+            Assert.Contains(":", window.Canvas.SelectedHandle); // 子图元后缀口径（RenderModel）
+            ulong parentHandle = ulong.Parse(window.Canvas.SelectedHandle!.Split(':')[0]);
+
+            // 第二击空白处 (70,10) → dx=21, dy=1 → 父 Insert (50,10)→(71,11)。
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 70, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage); // 旧缺陷：ulong.TryParse("{h}:0") 失败 → 非法句柄
+            Assert.Single(window.Edit.RecentTxIds);
+            RenderItem child = Assert.Single(window.Canvas.Items, i => i.Handle.Contains(':'));
+            Assert.Equal(70, child.Points[0].X, 3); // 子图元随父 Insert 平移（块整体语义）
+            Assert.Equal(10, child.Points[0].Y, 3);
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
+            Assert.Contains("move-entity", step.Entry.ParamsJson);
+            // WithHandle 剥后缀后以 ulong 入处理器 → 审计 Params.handle 为数字（顶层句柄，无后缀）。
+            JsonElement stepParams = JsonDocument.Parse(step.Entry.ParamsJson).RootElement.GetProperty("Params");
+            Assert.Equal(parentHandle, stepParams.GetProperty("handle").GetUInt64());
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task Delete_DimensionSubEntitySelected_DeletesParentDimension()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withDimension: true);
+        try
+        {
+            // 夹具：WALL 线 + Dimension 匿名块展开（线 y=20 + 文本 (5,22)）→ 3 render items。
+            Assert.Equal(3, window.Canvas!.Items.Count);
+            window.ConfirmDeleteOverride = _ => Task.FromResult(true);
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+
+            ClickCanvasAtWorld(window, 5, 20); // 命中标注子图元线 → 选中 "{dim}:0"
+            Assert.NotNull(window.Canvas.SelectedHandle);
+            Assert.Contains(":", window.Canvas.SelectedHandle);
+            ulong parentHandle = ulong.Parse(window.Canvas.SelectedHandle!.Split(':')[0]);
+
+            await ActAndWaitForEditAsync(window, () =>
+                ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
+            Assert.Null(window.Edit!.ErrorMessage); // 旧缺陷：后缀句柄 → 非法句柄，标注不可删
+            Assert.Single(window.Canvas.Items); // 父标注整体删除（两子图元一并消失），WALL 线保留
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
+            Assert.Contains("delete-entity", step.Entry.ParamsJson);
+            // WithHandle 剥后缀后以 ulong 入处理器 → 审计 Params.handle 为数字（父标注顶层句柄）。
+            JsonElement stepParams = JsonDocument.Parse(step.Entry.ParamsJson).RootElement.GetProperty("Params");
+            Assert.Equal(parentHandle, stepParams.GetProperty("handle").GetUInt64());
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    // ---- 最终审查顺手修（T9 deferred）：字高/缩放/旋转 double.IsFinite 守卫 ----
+
+    [AvaloniaFact]
+    public async Task InsertBlockTool_NaNRotation_FallsBackZero()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withLumBlock: true);
+        try
+        {
+            ToolButton(window, "InsertBlock").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditBlockInput!.Text = "LUM";
+            window.BlockRotationInput!.Text = "NaN"; // NaN → fallback 0（旧缺陷：NaN 入 JSON 序列化抛异常）
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 50, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord req = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "view-edit");
+            JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
+            Assert.Equal(0, args.GetProperty("rotation").GetDouble(), 6);
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task InsertBlockTool_InfinityScale_FallsBackOne()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withLumBlock: true);
+        try
+        {
+            ToolButton(window, "InsertBlock").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditBlockInput!.Text = "LUM";
+            window.BlockScaleInput!.Text = "Infinity"; // +∞ 通过 >0 检查 → 须 IsFinite 拦截 → 1
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 50, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord req = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "view-edit");
+            JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
+            Assert.Equal(1, args.GetProperty("scale").GetDouble(), 6);
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task TextTool_InfinityHeight_FallsBackDefault()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "注记";
+            window.TextHeightInput!.Text = "Infinity"; // +∞ 通过 >0 检查 → 须 IsFinite 拦截 → 3.5
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            RenderItem text = Assert.Single(window.Canvas!.Items, i => i.Kind == RenderKind.Text);
+            Assert.Equal(3.5, text.TextHeight, 3);
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord req = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "view-edit");
+            JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
+            Assert.Equal(3.5, args.GetProperty("height").GetDouble(), 3);
             Assert.True(audit.VerifyChain(out string error), error);
         }
         finally { Cleanup(window, f); }

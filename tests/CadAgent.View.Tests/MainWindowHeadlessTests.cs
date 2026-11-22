@@ -537,6 +537,11 @@ public class MainWindowHeadlessTests
                 Assert.Equal(before, window.Canvas.Items.Count); // 预览不改图
 
                 window.ConfirmPlanButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Dispatcher.UIThread.RunJobs();
+                // 最终审查顺手修（T10 deferred）：确认后立即禁用确认/拒绝按钮，
+                // 至下次 PreviewReady 才重新启用（防纠正循环二次 confirmPlan 时确认未见计划）。
+                Assert.False(window.ConfirmPlanButton!.IsEnabled);
+                Assert.False(window.RejectPlanButton!.IsEnabled);
                 await doneTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
                 Dispatcher.UIThread.RunJobs();
                 // PlanExecuted 联动的问题清单重评完成（check-run 审计落盘后再清理夹具）。

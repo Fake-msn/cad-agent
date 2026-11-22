@@ -75,48 +75,52 @@ public sealed class PlanPreviewViewModel
         ErrorMessage = null;
         Status = "";
         LastTxId = null;
-        string agentDir = Path.Combine(_projectDir, ".cadagent");
-        ProviderProfile? profile = _profileOverride;
-        ILlmClient? client = _clientOverride;
-        if (profile is null)
-        {
-            var store = LlmConfigStore.Load(Path.Combine(agentDir, "llm-profiles.json"));
-            string? name = store.ActiveProfileName;
-            profile = name is null ? null : store.Profiles.FirstOrDefault(p =>
-                string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
-        }
-        if (profile is null)
-        {
-            ErrorMessage = "无活动 LLM profile——请先在 CLI 执行 llm add / llm use 配置（spec §8）。";
-            RunCompleted?.Invoke();
-            return;
-        }
-        if (client is null)
-        {
-            var protector = new DpapiKeyProtector(Path.Combine(agentDir, "keys"));
-            string? key = DpapiKeyProtector.ResolveKey(protector, profile.Name);
-            if (string.IsNullOrEmpty(key))
-            {
-                ErrorMessage = "无可用密钥（CLI llm add --key 或 CADAGENT_LLM_API_KEY 环境变量）。";
-                RunCompleted?.Invoke();
-                return;
-            }
-            client = new OpenAiClient(profile, key);
-        }
-
-        string overlayPath = Path.Combine(agentDir, "semantic.json");
-        var overlay = File.Exists(overlayPath) ? SemanticOverlay.Load(overlayPath) : null;
-        ISemanticGate? gate = overlay is not null ? new SemanticGate(overlay) : null;
-        var engine = new StepEngine(_audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
-            _identity, _roles, HandlerRegistry.All(), gate);
-        var orch = new AgentOrchestrator(client, new UsageMeter(profile.Limits), new EgressPolicy(agentDir),
-            engine, _audit, _identity, profile.Model, profile);
-        var allowedKinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet(StringComparer.Ordinal);
-
-        _cts = new CancellationTokenSource();
         IsBusy = true;
+        bool executed = false; // Imp#4：内层记录执行成功，释闸后才触发 PlanExecuted
         try
         {
+            // ---- 前奏（Imp#2：整体纳入 try/catch）----
+            // LlmConfigStore.Load / DpapiKeyProtector.ResolveKey / SemanticOverlay.Load
+            // 损坏的 llm-profiles.json/semantic.json 会抛 JsonException——此前在 try/catch
+            // 外，经 MainWindow async void 崩进程（违反 §9 降级不变量）。现降级为
+            // ErrorMessage + Status="Failed" + RunCompleted（finally），不抛。
+            string agentDir = Path.Combine(_projectDir, ".cadagent");
+            ProviderProfile? profile = _profileOverride;
+            ILlmClient? client = _clientOverride;
+            if (profile is null)
+            {
+                var store = LlmConfigStore.Load(Path.Combine(agentDir, "llm-profiles.json"));
+                string? name = store.ActiveProfileName;
+                profile = name is null ? null : store.Profiles.FirstOrDefault(p =>
+                    string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            }
+            if (profile is null)
+            {
+                ErrorMessage = "无活动 LLM profile——请先在 CLI 执行 llm add / llm use 配置（spec §8）。";
+                return; // RunCompleted 由 finally 统一触发
+            }
+            if (client is null)
+            {
+                var protector = new DpapiKeyProtector(Path.Combine(agentDir, "keys"));
+                string? key = DpapiKeyProtector.ResolveKey(protector, profile.Name);
+                if (string.IsNullOrEmpty(key))
+                {
+                    ErrorMessage = "无可用密钥（CLI llm add --key 或 CADAGENT_LLM_API_KEY 环境变量）。";
+                    return; // RunCompleted 由 finally 统一触发
+                }
+                client = new OpenAiClient(profile, key);
+            }
+
+            string overlayPath = Path.Combine(agentDir, "semantic.json");
+            var overlay = File.Exists(overlayPath) ? SemanticOverlay.Load(overlayPath) : null;
+            ISemanticGate? gate = overlay is not null ? new SemanticGate(overlay) : null;
+            var engine = new StepEngine(_audit, new SnapshotStore(Path.Combine(agentDir, "snapshots")),
+                _identity, _roles, HandlerRegistry.All(), gate);
+            var orch = new AgentOrchestrator(client, new UsageMeter(profile.Limits), new EgressPolicy(agentDir),
+                engine, _audit, _identity, profile.Model, profile);
+            var allowedKinds = HandlerRegistry.All().Select(h => h.Kind).ToHashSet(StringComparer.Ordinal);
+
+            _cts = new CancellationTokenSource();
             await _sessionGate.WaitAsync();
             try
             {
@@ -148,10 +152,14 @@ public sealed class PlanPreviewViewModel
                 if (result.Status == OrchestrationStatus.Executed)
                 {
                     IsPreviewVisible = false;
-                    PlanExecuted?.Invoke();
+                    executed = true; // 仅记录——不在此（持闸内）触发事件
                 }
             }
             finally { _sessionGate.Release(); }
+            // Imp#4：PlanExecuted 移到会话闸 Release 之后触发——MainWindow 经 Dispatcher.Post
+            // 的全视图刷新（RefreshAfterEdit/Issues/Audit）不再与并发手动编辑的 Doc 枚举竞态
+            // （此前持闸内触发，Post 排队到 UI 线程执行时闸可能已被另一编辑持有/释放，刷新绕闸）。
+            if (executed) PlanExecuted?.Invoke();
         }
         catch (OperationCanceledException)
         {
