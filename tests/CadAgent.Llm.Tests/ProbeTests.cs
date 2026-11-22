@@ -52,6 +52,68 @@ public class ProbeTests
         Assert.StartsWith("data:image/png;base64,", client.Last.ImageUrl);
     }
 
+    /// <summary>模拟 qwen3-vl 系约束的 fake：拒绝宽/高 <=10 的探针图；可注入视觉调用异常。</summary>
+    private sealed class VisionConstraintClient : ILlmClient
+    {
+        public bool ThrowOnVision { get; set; }
+        public string VisionError { get; set; } = "vision failed";
+        public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default)
+        {
+            if (request.ImageUrl != null)
+            {
+                if (ThrowOnVision) throw new LlmException(VisionError);
+                // 解析 PNG IHDR 宽高（字节 16..23，大端），复刻 "height:1 or width:1 must be larger than 10"
+                var png = Convert.FromBase64String(request.ImageUrl.Split(',')[1]);
+                int w = (png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19];
+                int h = (png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23];
+                if (w <= 10 || h <= 10)
+                    throw new LlmException($"height:{h} or width:{w} must be larger than 10");
+            }
+            return Task.FromResult(new ChatResponse("OK", new TokenUsage(3, 2), "m"));
+        }
+        public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<string>>(new[] { "m" });
+    }
+
+    [Fact]
+    public async Task Probe_Vision_ImageAcceptedByQwenVlConstraint()
+    {
+        // qwen3-vl 系拒绝 <=10px 图：探针图必须 16×16 才能 visionOk=true
+        var result = await new LlmProbe(new VisionConstraintClient()).RunAsync(testVision: true);
+        Assert.True(result.Connected);
+        Assert.True(result.CompletionOk);
+        Assert.True(result.VisionOk);
+        Assert.Null(result.Error);
+    }
+
+    [Fact]
+    public async Task Probe_VisionFailure_KeepsCompletionSuccess()
+    {
+        // 部分结果保真：补全成功 + 视觉抛 → (true, true, false, 脱敏error, 补全usage)
+        var client = new VisionConstraintClient { ThrowOnVision = true, VisionError = "vision endpoint 400" };
+        var result = await new LlmProbe(client).RunAsync(testVision: true);
+        Assert.True(result.Connected);
+        Assert.True(result.CompletionOk);
+        Assert.False(result.VisionOk);
+        Assert.NotNull(result.Error);
+        Assert.Equal(5, result.Usage!.PromptTokens + result.Usage.CompletionTokens);
+    }
+
+    [Fact]
+    public async Task Probe_Failure_RedactsWorkspaceStyleKey()
+    {
+        // workspace 键含 . 与 -（假键样式）：脱敏正则必须覆盖，绝不回显密钥
+        var client = new VisionConstraintClient
+        {
+            ThrowOnVision = true,
+            VisionError = "invalid api key sk-ws-FAKE.KEY-123456789 rejected"
+        };
+        var result = await new LlmProbe(client).RunAsync(testVision: true);
+        Assert.NotNull(result.Error);
+        Assert.Contains("***", result.Error);
+        Assert.DoesNotContain("sk-ws-FAKE.KEY-123456789", result.Error);
+    }
+
     private sealed class MockHandler : HttpMessageHandler
     {
         public string Body = "";
