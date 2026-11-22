@@ -177,7 +177,9 @@ public static class SheetRegistryBuilder
     }
 
     public static string? SheetIdForPoint(IReadOnlyList<SheetRecord> sheets, double x, double y)
-        => sheets.FirstOrDefault(s => Inside(s.FrameBounds, x, y))?.SheetId;
+        // R11：模型点归属仅模型幅面——跳过布局幅面（FrameBounds 为纸面坐标，与模型世界坐标
+        // 数值重叠时不得把 stray 模型实体误归 "L…"，防闸口 InScope 跨空间污染）。
+        => sheets.FirstOrDefault(s => s.LayoutName is null && Inside(s.FrameBounds, x, y))?.SheetId;
 
     private static bool Inside((double MinX, double MinY, double MaxX, double MaxY) b, double x, double y)
         => x >= b.MinX && x <= b.MaxX && y >= b.MinY && y <= b.MaxY;

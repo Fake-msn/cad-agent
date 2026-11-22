@@ -17,6 +17,10 @@ namespace CadAgent.Cli.Tests;
 ///    semantic-gate-refused 审计含 sheetId，重规划一次仍拒→Escalated，零落图）；
 /// ② sheetId=S1 同幅 → Executed + tx-commit + agent-verify 绿 + 验链；
 /// ③ 无 sheetId legacy 计划 → 全局 overlay 放行（行为保持）。
+/// R10 执行裁剪：夹具两幅各含灯具 Insert（S2 无 Lighting 语义）+ S1 房名文字；
+/// ② sheetId=S1 → 仅 S1 编号（S2 bounds 零 AL*）；③ legacy 全图编号保持；
+/// ④ layout-lighting sheetId=S1 区域跨 S2 → step-failed 留痕 + Escalated 零落图；
+/// ⑤ 区域含于 S1 → Executed（裁剪不过度拒绝）。
 /// semantic scan stdout 加性 sheets 摘要数组 {sheetId,name,number}（T7 新契约）。
 /// </summary>
 public class SheetAwareAgentE2ETests : IDisposable
@@ -56,6 +60,18 @@ public class SheetAwareAgentE2ETests : IDisposable
             var lum = new Insert(e) { InsertPoint = new XYZ(100, 100, 0) };
             lum.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
             doc.Entities.Add(lum);
+            // R10：S2 亦含灯具 Insert（同块 E，但无 Lighting 语义属性→不种子 Lighting），
+            // 钉住 sheetId=S1 计划不得给 S2 灯具编号（执行裁剪）。
+            doc.Entities.Add(new Insert(e) { InsertPoint = new XYZ(2100, 100, 0) });
+            // R10：S1 房名文字（ROOM-NAME 层）→ scan 推断 Room 0.6，map 确认 1.0 供 layout-lighting 闸口放行。
+            doc.Layers.Add(new Layer("ROOM-NAME"));
+            doc.Entities.Add(new TextEntity
+            {
+                InsertPoint = new XYZ(300, 300, 0),
+                Value = "客厅",
+                Height = 20,
+                Layer = doc.Layers.First(l => l.Name == "ROOM-NAME")
+            });
         });
     }
 
@@ -151,8 +167,14 @@ public class SheetAwareAgentE2ETests : IDisposable
         Assert.Contains("Executed", stdout);
         Assert.Contains("\"verificationRounds\": 1", stdout); // 读回验证环走通
 
-        Assert.Contains(DrawingSession.Load(_drawing).Doc.Entities.OfType<TextEntity>(),
-            t => t.Value == "AL1"); // 编号落图
+        var doc = DrawingSession.Load(_drawing).Doc;
+        Assert.Contains(doc.Entities.OfType<TextEntity>(), t => t.Value == "AL1"); // 编号落图
+        // R10 执行裁剪钉住：sheetId=S1 → 仅 S1 灯具编号；S2 bounds 内零 AL* 文字
+        var alTexts = doc.Entities.OfType<TextEntity>()
+            .Where(t => t.Value.StartsWith("AL", StringComparison.Ordinal)).ToList();
+        Assert.Single(alTexts); // S2 灯具 Insert 不被编号（全图匹配旧缺陷会产 AL2）
+        Assert.All(alTexts, t => Assert.True(t.InsertPoint.X >= 0 && t.InsertPoint.X <= 1000)); // S1 bounds
+        Assert.DoesNotContain(alTexts, t => t.InsertPoint.X >= 2000 && t.InsertPoint.X <= 3000); // S2 零编号
         using var audit = OpenAudit();
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "tx-commit");
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "agent-verify" && r.Entry.ParamsJson.Contains("ok"));
@@ -171,10 +193,74 @@ public class SheetAwareAgentE2ETests : IDisposable
         var (code, stdout, _) = Run("agent", "--drawing", _drawing, "--intent", "给灯具编号", "--yes");
         Assert.Equal(0, code);
         Assert.Contains("Executed", stdout);
-        Assert.Contains(DrawingSession.Load(_drawing).Doc.Entities.OfType<TextEntity>(),
-            t => t.Value == "AL1");
+        var legacyTexts = DrawingSession.Load(_drawing).Doc.Entities.OfType<TextEntity>()
+            .Where(t => t.Value.StartsWith("AL", StringComparison.Ordinal)).ToList();
+        // R10 legacy 行为逐字保持：无 sheetId → 全图编号（S1+S2 两灯具各得编号）
+        Assert.Contains(legacyTexts, t => t.Value == "AL1");
+        Assert.Contains(legacyTexts, t => t.Value == "AL2");
+        Assert.Equal(2, legacyTexts.Count);
         using var audit = OpenAudit();
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "tx-commit");
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    // ---------- ④ R10：layout-lighting sheetId=S1 区域跨 S2 → 拒绝留痕（执行裁剪） ----------
+
+    [Fact]
+    public void Agent_LayoutLightingSheetS1_RegionCrossesS2_FailedAudited_NoDrawingChange()
+    {
+        var (s1, _) = SheetIds();
+        SetupProfile($$"""{"steps":[{"kind":"layout-lighting","params":{"x":500,"y":100,"width":2000,"depth":400,"spacing":500,"block":"E","sheetId":"{{s1}}" } } ] }""");
+        Run("semantic", "scan", "--drawing", _drawing);
+        // Room 人工确认（ROOM-NAME 层→1.0）使闸口放行，隔离出 handler 区域 bounds 裁剪
+        var (mapCode, _, mapErr) = Run("semantic", "map", "--layer", "ROOM-NAME", "--class", "Room", "--drawing", _drawing);
+        Assert.Equal(0, mapCode);
+        Assert.Empty(mapErr);
+
+        var (code, stdout, _) = Run("agent", "--drawing", _drawing, "--intent", "在一层布灯", "--yes");
+        Assert.Equal(1, code);
+        Assert.Contains("Escalated", stdout); // 区域 [500,2500] 跨 S2 → 拒绝，重规划一次仍拒→升级
+
+        using var audit = OpenAudit();
+        var failed = audit.ReadAll().Where(r => r.Entry.Kind == "step-failed").ToList();
+        Assert.NotEmpty(failed);
+        // ParamsJson 经 System.Text.Json 默认编码非 ASCII 转义→解析 Error 属性再断言中文消息
+        Assert.All(failed, r =>
+        {
+            using var jd = JsonDocument.Parse(r.Entry.ParamsJson);
+            string err = jd.RootElement.GetProperty("Error").GetString()!;
+            Assert.Contains("区域超出幅面", err); // 引擎失败留痕
+            Assert.Contains(s1, err);
+        });
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "tx-commit");
+        Assert.True(audit.VerifyChain(out _));
+        // 零落图：E 块 Insert 仍为原 2 灯具（无网格新增）
+        Assert.Equal(2, DrawingSession.Load(_drawing).Doc.Entities.OfType<Insert>().Count(i => i.Block?.Name == "E"));
+        Assert.All(audit.ReadAll(), r => Assert.DoesNotContain("sk-sheetkey12345678", r.Entry.ParamsJson));
+    }
+
+    // ---------- ⑤ R10：layout-lighting sheetId=S1 区域含于 S1 → 放行（裁剪不过度拒绝） ----------
+
+    [Fact]
+    public void Agent_LayoutLightingSheetS1_RegionWithinS1_Executed()
+    {
+        var (s1, _) = SheetIds();
+        SetupProfile($$"""{"steps":[{"kind":"layout-lighting","params":{"x":100,"y":100,"width":800,"depth":500,"spacing":400,"block":"E","sheetId":"{{s1}}" } } ] }""");
+        Run("semantic", "scan", "--drawing", _drawing);
+        Run("semantic", "map", "--layer", "ROOM-NAME", "--class", "Room", "--drawing", _drawing);
+
+        var (code, stdout, _) = Run("agent", "--drawing", _drawing, "--intent", "在一层布灯", "--yes");
+        Assert.Equal(0, code);
+        Assert.Contains("Executed", stdout);
+        var inserts = DrawingSession.Load(_drawing).Doc.Entities.OfType<Insert>()
+            .Where(i => i.Block?.Name == "E").ToList();
+        // 原 2 灯具 + 网格 2 点（(300,300)/(700,300)）= 4；网格全落 S1，S2 原灯具不动
+        Assert.Equal(4, inserts.Count);
+        Assert.Equal(3, inserts.Count(i => i.InsertPoint.X >= 0 && i.InsertPoint.X <= 1000)); // S1：原 1 + 网格 2
+        Assert.Single(inserts, i => i.InsertPoint.X >= 2000 && i.InsertPoint.X <= 3000);     // S2 原灯具保持
+        using var audit = OpenAudit();
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "tx-commit");
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "step-failed");
         Assert.True(audit.VerifyChain(out _));
     }
 

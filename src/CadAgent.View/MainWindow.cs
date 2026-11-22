@@ -1510,6 +1510,10 @@ public sealed class MainWindow : Window
     private void RefreshAfterEdit(MainViewModel vm)
     {
         if (Canvas is null || Layers is null || Edit is null) return;
+        // R11：undo/rollback（StepEngine.Rollback→RestoreState）整体替换 Session.Doc——
+        // 同步 _doc 引用，否则布局幅面 ItemsForSheet（FindViewport/BuildViewport）用 detached
+        // 旧文档渲染 undo 前状态。模型幅面经 _fullModelItems 重建已跟随，布局幅面依赖 _doc。
+        _doc = vm.Session.Doc;
         _fullModelItems = RenderModelBuilder.Build(vm.Session);
         _sheets = vm.Session.Sheets;
         SheetRecord sheet = _sheets.FirstOrDefault(s => s.SheetId == _currentSheetId) ?? _sheets[0];

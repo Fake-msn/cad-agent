@@ -298,4 +298,67 @@ public class SheetSelectorHeadlessTests
         }
         finally { Cleanup(window, path, projectDir); }
     }
+
+    // ===== Final fix（R11 Imp#3）：undo/rollback 后 _doc 同步 =====
+
+    /// <summary>触发编辑的 UI 动作并等待 EditCompleted（T8 模式）。
+    /// EditCompleted 在 RunEditAsync 的 finally 清 _editBusy 之前触发——tcs 经 Background
+    /// 优先级 dispatcher job 完成，确保清 busy（Normal 优先级续体）先跑，后续幅面切换不被 busy 闸误拒。</summary>
+    private static async Task ActAndWaitForEditAsync(MainWindow window, Action action)
+    {
+        var tcs = new TaskCompletionSource();
+        void Handler() => Dispatcher.UIThread.Post(() => tcs.TrySetResult(), DispatcherPriority.Background);
+        window.Edit!.EditCompleted += Handler;
+        try
+        {
+            action();
+            await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Dispatcher.UIThread.RunJobs();
+        }
+        finally { window.Edit.EditCompleted -= Handler; }
+    }
+
+    /// <summary>
+    /// R11：编辑（加线）→ undo（StepEngine.Rollback→RestoreState 整体替换 Doc）→ 切布局幅面
+    /// → BuildViewport 必须用恢复后的 Doc（仅原始近线入视口），而非 undo 前 detached doc
+    /// （含已撤销新线 → 2 项）。RefreshAfterEdit 顶部同步 _doc 钉住。
+    /// </summary>
+    [AvaloniaFact]
+    public async Task UndoThenLayoutSheet_RendersRestoredState_NotStaleDoc()
+    {
+        (MainWindow window, string path, string projectDir) = Show(LayoutDxf(),
+            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+        try
+        {
+            Assert.Equal(0, window.SheetSelector!.SelectedIndex); // 默认模型幅面 S0
+            Assert.Equal(2, window.Canvas!.Items.Count);
+
+            // 编辑：加一条落在视口模型区域内的线（锚点 (20,20) ∈ viewTarget±区域）
+            ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 20, 20); // 预览锚点
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 80, 30));
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Equal(3, window.Canvas.Items.Count);
+            Assert.Single(window.Edit.RecentTxIds);
+
+            // undo → RestoreState 替换 Doc（模型幅面恢复 2 线）
+            await ActAndWaitForEditAsync(window, () =>
+                window.UndoButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.Empty(window.Edit.RecentTxIds);
+            Assert.Equal(2, window.Canvas.Items.Count);
+            Assert.True(window.EditToolbar!.IsEnabled); // busy 已清（幅面切换不被 busy 闸误拒）
+
+            // 切布局幅面 → 渲染须反映恢复态：仅原始近线入视口（新线已撤销）
+            window.SheetSelector.SelectedIndex = 1;
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains("布局1", window.Status!.Text);
+            var item = Assert.Single(window.Canvas.Items); // 陈旧 _doc 会多渲染已撤销线 → 2 项（RED）
+            Assert.Equal(RenderKind.Line, item.Kind);
+            Assert.Equal(500, item.Points[0].X, 6);
+            Assert.Equal(350, item.Points[0].Y, 6);
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
 }

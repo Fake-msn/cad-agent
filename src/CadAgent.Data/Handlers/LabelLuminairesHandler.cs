@@ -3,6 +3,7 @@ using ACadSharp;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using CadAgent.Core;
+using CadAgent.Data.Sheets;
 using CSMath;
 
 namespace CadAgent.Data.Handlers;
@@ -31,12 +32,20 @@ public sealed class LabelLuminairesHandler : IStepHandler, ISemanticAware
         int start = p.TryGetProperty("start", out var iv) ? iv.GetInt32() : 1;
         string? blockFilter = p.TryGetProperty("block", out var bv) ? bv.GetString() : null;
         string? layerName = p.TryGetProperty("layer", out var lv) ? lv.GetString() : null;
+        // R10：params 含 sheetId（string）→ 候选 Insert 限世界插入点归属 declared sheet
+        // （防 plan 声明 S1 却给 S2 灯具编号）；无 sheetId → 全图 legacy 行为逐字保持。
+        string? sheetId = HandlerHelpers.OptString(p, "sheetId");
 
-        var inserts = s.Doc.Entities.OfType<Insert>()
+        var candidates = s.Doc.Entities.OfType<Insert>()
             .Where(i => blockFilter == null
-                || string.Equals(i.Block?.Name, blockFilter, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(i => i.Handle)
-            .ToList();
+                || string.Equals(i.Block?.Name, blockFilter, StringComparison.OrdinalIgnoreCase));
+        if (sheetId != null)
+        {
+            var sheets = s.Sheets; // 一次捕获，避免逐 Insert 重算指纹
+            candidates = candidates.Where(i =>
+                SheetRegistryBuilder.SheetIdForPoint(sheets, i.InsertPoint.X, i.InsertPoint.Y) == sheetId);
+        }
+        var inserts = candidates.OrderBy(i => i.Handle).ToList();
         if (inserts.Count == 0) return new StepResult(false, "无灯具 Insert 可编号", "");
 
         double height = System.Math.Max(2.5, size / 4);

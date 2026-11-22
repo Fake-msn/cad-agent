@@ -58,6 +58,43 @@ public class SheetRegistryTests
     }
 
     [Fact]
+    public void SheetIdForPoint_ModelPoint_NeverAttributedToLayoutSheet()
+    {
+        // R11：模型框 + 纸视口数值 bounds 重叠 → stray 模型点（模型框外但纸 bounds 内）
+        // 归属须 null（模型点只归模型幅面），不得误归 "L…"（纸面坐标混入模型归属）。
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        var ins = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        ins.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+        doc.Entities.Add(ins);
+        // 纸视口 Center(800,350) 1000×700 → 纸 bounds (300,0)-(1300,700)，与模型框 (0,0)-(1000,700) 数值重叠
+        var layout = new Layout("布局1");
+        doc.Layouts.Add(layout);
+        layout.AddViewport(new Viewport
+        {
+            Center = new XYZ(800, 350, 0),
+            Width = 1000,
+            Height = 700,
+            ViewTarget = new XYZ(0, 0, 0),
+            ViewHeight = 200,
+        });
+        var sheets = SheetRegistryBuilder.Build(doc);
+        Assert.Equal(2, sheets.Count); // 模型幅面 + 布局幅面
+        var modelSheet = sheets[0];
+        Assert.Null(modelSheet.LayoutName);
+        Assert.StartsWith("L", sheets[1].SheetId);
+        // 框内模型点 → 模型幅面（不被布局幅面抢占）
+        Assert.Equal(modelSheet.SheetId, SheetRegistryBuilder.SheetIdForPoint(sheets, 500, 350));
+        // stray 模型点 (1200,350)：模型框外（x>1000）但纸 bounds 内（300..1300）→ null 非 "L…"
+        Assert.Null(SheetRegistryBuilder.SheetIdForPoint(sheets, 1200, 350));
+    }
+
+    [Fact]
     public void Build_NoFrame_SingleDefaultSheet()
     {
         var doc = new CadDocument();
