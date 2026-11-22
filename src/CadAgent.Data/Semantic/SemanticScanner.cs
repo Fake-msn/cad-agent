@@ -1,4 +1,5 @@
 using CadAgent.Core;
+using CadAgent.Data.Vision;
 
 namespace CadAgent.Data.Semantic;
 
@@ -6,8 +7,16 @@ namespace CadAgent.Data.Semantic;
 /// Outcome of one composed scan: the (possibly pre-existing) overlay enriched
 /// with inference annotations, plus the evidence list of layers that neither
 /// the convention library, a human mapping nor a skill alias can classify.
+/// T6：末尾可选 VisionAmbiguous（视觉声称歧义清单）——legacy 两参构造默认空列表，
+/// 既有调用点/消费端全兼容（null 归一为空，消费端无需判空）。
 /// </summary>
-public sealed record ScanResult(SemanticOverlay Overlay, IReadOnlyList<AmbiguousLayer> Ambiguous);
+public sealed record ScanResult(SemanticOverlay Overlay, IReadOnlyList<AmbiguousLayer> Ambiguous,
+    IReadOnlyList<VisionAmbiguous>? VisionAmbiguous = null)
+{
+    // 位置 record 允许手写属性接管合成：构造参数喂入，属性把 null 归一为空清单。
+    public IReadOnlyList<VisionAmbiguous> VisionAmbiguous { get; init; } =
+        VisionAmbiguous ?? Array.Empty<VisionAmbiguous>();
+}
 
 /// <summary>
 /// Single entry point composing all deterministic reading signals:
@@ -27,7 +36,7 @@ public static class SemanticScanner
         Scan(session, existing, skillAliases: null);
 
     public static ScanResult Scan(DrawingSession session, SemanticOverlay? existing = null,
-        IReadOnlyDictionary<string, SemanticClass>? skillAliases = null)
+        IReadOnlyDictionary<string, SemanticClass>? skillAliases = null, VisionReadResult? vision = null)
     {
         var overlay = existing ?? new SemanticOverlay();
 
@@ -48,7 +57,23 @@ public static class SemanticScanner
         var liveHandles = new HashSet<string>(walked.Select(w => w.HandlePath));
         overlay.Annotations.RemoveAll(a => !liveHandles.Contains(a.TargetHandle));
 
-        return new ScanResult(overlay, CollectAmbiguousLayers(walked, overlay, skillAliases));
+        // T6 视觉管道（可选，第五级来源）：逐幅面交叉验证——声称只以本幅面矢量 GT 佐证
+        //（跨幅跑偏拒绝），种子 Upsert（键=handle+provenance，与 NativeObject/LayerInference
+        // 共存，闸口 Any(conf≥min) 取高置信）；歧义清单按 (Claim,Reason) 去重并入 ScanResult。
+        // vision=null → legacy 行为不变（VisionAmbiguous 空）。
+        var visionAmbiguous = new List<VisionAmbiguous>();
+        if (vision is not null)
+        {
+            foreach (var sheet in session.Sheets)
+            {
+                var cross = VisionCrossChecker.Check(vision, overlay, walked, sheet.SheetId);
+                foreach (var a in cross.Seeded) overlay.UpsertAnnotation(a);
+                visionAmbiguous.AddRange(cross.Ambiguous);
+            }
+        }
+
+        return new ScanResult(overlay, CollectAmbiguousLayers(walked, overlay, skillAliases),
+            visionAmbiguous.Distinct().ToList());
     }
 
     /// <summary>
