@@ -82,7 +82,7 @@ public static partial class CommandRouter
     internal static bool GateRefusesRun(GateReport report) => report.Level != GateLevel.Green;
 
     /// <summary>
-    /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent 四消费点共用。
+    /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent/repl/export 消费点共用。
     /// persisted=Store.Load → DrawingSession.Load(path, persisted) → census 非空回写（原子写）。
     /// agentDir 约定 = project/.cadagent（Run 唯一装配点），sidecar 以 projectDir 键控。
     /// 已知限制（T1 单文件多源互斥）：第二源 Save 覆盖第一源，Load 靠 SourcePath 匹配诚实

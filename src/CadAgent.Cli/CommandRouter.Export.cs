@@ -8,6 +8,9 @@ namespace CadAgent.Cli;
 /// <summary>
 /// export 命令（3c，spec §3 保真双闸口）：厂商 SaveAs DWG + ACadSharp 读回计数闸口；
 /// 无厂商→DXF 降级（显式风险审计）。RuntimeFactory 测试注入（null→降级路径）。
+/// 防假 Green（T3 R8）：加载接 census sidecar（LoadWithCensus）+ 准入闸——Yellow/Red
+/// 图纸产衍生产物（DWG/DXF）会静默丢失天正内容（spec ⑥/保真锚），一律先于交付路径
+/// 拒绝（export-rejected 既有 kind 留痕，不产任何衍生产物）；Green 路径逐字保持。
 /// </summary>
 public static partial class CommandRouter
 {
@@ -20,8 +23,28 @@ public static partial class CommandRouter
         string outPath = RequireOption(args, "--out");
         using var audit = OpenAudit(agentDir);
         var op = (IdentityOverride ?? Identity(agentDir)).Current;
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath, session, audit, op, stderr, source: "export");
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath, session, audit, op, stderr, source: "export");
         if (drawing == null) return 1;
+        // 准入闸（T3 R8 缺口闭合）：export 此前 census-blind Load——Yellow/Red 经降级/厂商
+        // 路径产衍生产物静默丢失天正内容。闸先于 RuntimeFactory（vendor/降级均不可达），
+        // 拒绝留痕复用既有 export-rejected kind（params level/unparsedCount/guidance）。
+        var gateReport = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
+        if (GateRefusesRun(gateReport))
+        {
+            string gateHash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "export", "export-rejected", drawingPath,
+                JsonSerializer.Serialize(new
+                {
+                    level = gateReport.Level.ToString(),
+                    unsupportedCount = gateReport.Unsupported.Count,
+                    unparsedCount = drawing.Unparsed.TotalCount,
+                    guidance = gateReport.Guidance
+                }),
+                gateHash, gateHash, "", ""));
+            stderr.WriteLine(gateReport.Guidance);
+            return 1;
+        }
 
         ICadRuntime? runtime = RuntimeFactory != null
             ? RuntimeFactory()

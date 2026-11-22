@@ -52,7 +52,7 @@ public static partial class CommandRouter
         // 准入闸（防假 Green T3 缺口闭合）：agent 路径此前无 GateDetector 检查——
         // Yellow/Red 一律先于 LLM 调用拒绝（run-rejected 留痕，spec ⑥/§9；只读审查全图级拦截）。
         var gateReport = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
-        if (gateReport.Level != GateLevel.Green)
+        if (GateRefusesRun(gateReport))
         {
             string gateHash = drawing.ComputeHash();
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
