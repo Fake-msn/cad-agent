@@ -2,6 +2,7 @@ using System.Globalization;
 using ACadSharp;
 using ACadSharp.Entities;
 using CadAgent.Data;
+using CSMath;
 
 namespace CadAgent.View.Rendering;
 
@@ -42,6 +43,8 @@ public sealed record RenderItem(
 /// Arc.StartAngle / EndAngle (radians); LwPolyline.Vertices (Vertex.Location XY);
 /// Polyline2D.Vertices (Vertex2D.Location XYZ); Color.Index (short, 256=ByLayer,
 /// -1=true color) / IsTrueColor / R / G / B; BlockRecord.BlockEntity.BasePoint.
+/// OCS（任意轴算法，计划4 延迟项 Task 1）：非默认法向的 Circle/Arc/LwPolyline/
+/// TextEntity/MText/Insert 经 OcsMapper 投影到 WCS XY；默认法向 (0,0,1) 走原路径。
 /// </summary>
 public static class RenderModelBuilder
 {
@@ -131,6 +134,7 @@ public static class RenderModelBuilder
         switch (e)
         {
             case Line line:
+                // Line 端点为 WCS（DXF 约定：LINE 不受 OCS 法向影响）——不接 OCS。
                 items.Add(new RenderItem(RenderKind.Line,
                     new[] { t.Apply(line.StartPoint.X, line.StartPoint.Y), t.Apply(line.EndPoint.X, line.EndPoint.Y) },
                     layer, color, null, 0, 0, handle));
@@ -139,6 +143,19 @@ public static class RenderModelBuilder
             // Arc : Circle — must precede the Circle case.
             case Arc arc:
             {
+                var (ocs, ocsId) = OcsMapper(arc.Normal);
+                if (!ocsId)
+                {
+                    // 非默认法向：OCS 内 tessellate 后逐点映射（椭圆投影诚实近似，72 段）。
+                    // sweep 为 CCW 正角差；半径缩放由 AppendTessellatedArc 内 t.Apply 施加。
+                    // 起始角不预加 rotationDeg：insert 旋转已含于 t，点集经 t.Apply
+                    // 几何变换一次即可（预加会二次旋转——与 identity 路径的角度元数据
+                    // 口径不同，见 Arc_MirroredNormalInsideRotatedInsert 测试）。
+                    AppendTessellatedArc(items, layer, color, handle, t, ocs,
+                        arc.Center.X, arc.Center.Y, arc.Radius,
+                        ToDeg(arc.StartAngle), NormDeg(ToDeg(arc.EndAngle - arc.StartAngle)));
+                    break;
+                }
                 (double cx, double cy) = t.Apply(arc.Center.X, arc.Center.Y);
                 double r = arc.Radius * t.RadiusScale;
                 items.Add(new RenderItem(RenderKind.Arc,
@@ -149,6 +166,15 @@ public static class RenderModelBuilder
 
             case Circle circle:
             {
+                var (ocs, ocsId) = OcsMapper(circle.Normal);
+                if (!ocsId)
+                {
+                    // 非默认法向：整圆 tessellation（startDeg 0 / sweep 360）。
+                    AppendTessellatedArc(items, layer, color, handle, t, ocs,
+                        circle.Center.X, circle.Center.Y, circle.Radius,
+                        startDeg: 0, sweepDeg: 360);
+                    break;
+                }
                 (double cx, double cy) = t.Apply(circle.Center.X, circle.Center.Y);
                 double r = circle.Radius * t.RadiusScale;
                 items.Add(new RenderItem(RenderKind.Circle,
@@ -159,8 +185,15 @@ public static class RenderModelBuilder
 
             case LwPolyline lw:
             {
+                // LwPolyline 顶点为 OCS 坐标：先 OCS→WCS XY 投影再走 insert 仿射。
+                // 默认法向时 ocs 为 identity，双 Apply 恒等于原路径（无分支，行为保持）。
+                var (ocs, _) = OcsMapper(lw.Normal);
                 var pts = new List<(double X, double Y)>(lw.Vertices.Count + 1);
-                foreach (LwPolyline.Vertex v in lw.Vertices) pts.Add(t.Apply(v.Location.X, v.Location.Y));
+                foreach (LwPolyline.Vertex v in lw.Vertices)
+                {
+                    (double ox, double oy) = ocs.Apply(v.Location.X, v.Location.Y);
+                    pts.Add(t.Apply(ox, oy));
+                }
                 if (lw.IsClosed && pts.Count > 0) pts.Add(pts[0]);
                 // Bulge (arc segments) approximated as straight chords — canvas task
                 // may tessellate later.
@@ -170,6 +203,7 @@ public static class RenderModelBuilder
 
             case Polyline2D p2:
             {
+                // Vertex2D.Location 为 WCS（3D 多段线约定）——不接 OCS。
                 var pts = new List<(double X, double Y)>(p2.Vertices.Count + 1);
                 foreach (Vertex2D v in p2.Vertices) pts.Add(t.Apply(v.Location.X, v.Location.Y));
                 if (p2.IsClosed && pts.Count > 0) pts.Add(pts[0]);
@@ -178,18 +212,27 @@ public static class RenderModelBuilder
             }
 
             case TextEntity text:
+            {
+                // 插入点为 OCS 坐标；旋转取 OCS 方向向量经映射后的投影角。
+                var (ocs, _) = OcsMapper(text.Normal);
+                (double ox, double oy) = ocs.Apply(text.InsertPoint.X, text.InsertPoint.Y);
                 items.Add(new RenderItem(RenderKind.Text,
-                    new[] { t.Apply(text.InsertPoint.X, text.InsertPoint.Y) },
-                    layer, color, text.Value, text.Height * heightScale, NormDeg(ToDeg(text.Rotation) + rotationDeg), handle));
+                    new[] { t.Apply(ox, oy) },
+                    layer, color, text.Value, text.Height * heightScale, NormDeg(OcsRotation(ToDeg(text.Rotation), ocs) + rotationDeg), handle));
                 break;
+            }
 
             case MText mtext:
+            {
                 // PlainText strips inline formatting codes (\P, \f, ...); MText.Rotation
-                // is read-only (derived from the direction vector).
+                // is read-only (derived from the direction vector). OCS 处理同 TextEntity。
+                var (ocs, _) = OcsMapper(mtext.Normal);
+                (double ox, double oy) = ocs.Apply(mtext.InsertPoint.X, mtext.InsertPoint.Y);
                 items.Add(new RenderItem(RenderKind.Text,
-                    new[] { t.Apply(mtext.InsertPoint.X, mtext.InsertPoint.Y) },
-                    layer, color, mtext.PlainText, mtext.Height * heightScale, NormDeg(ToDeg(mtext.Rotation) + rotationDeg), handle));
+                    new[] { t.Apply(ox, oy) },
+                    layer, color, mtext.PlainText, mtext.Height * heightScale, NormDeg(OcsRotation(ToDeg(mtext.Rotation), ocs) + rotationDeg), handle));
                 break;
+            }
 
             case Insert insert:
             {
@@ -198,7 +241,11 @@ public static class RenderModelBuilder
                     skipped++;
                     break;
                 }
-                Affine composed = t.Compose(InsertTransform(insert));
+                // Insert 的 OCS 作用于块内几何：ocs 作为最内层变换复合。
+                // 镜像法向（如 (0,0,-1)）精确；倾斜法向 = XY 投影近似（丢弃 WCS Z）。
+                // identity 时 Compose 为精确恒等，行为保持。
+                var (ocs, _) = OcsMapper(insert.Normal);
+                Affine composed = t.Compose(InsertTransform(insert)).Compose(ocs);
                 double rot = rotationDeg + ToDeg(insert.Rotation);
                 double hs = heightScale * Math.Abs(insert.YScale);
                 int childIndex = 0;
@@ -261,6 +308,62 @@ public static class RenderModelBuilder
     private static double ToDeg(double radians) => radians * 180.0 / Math.PI;
 
     private static double NormDeg(double deg) => ((deg % 360.0) + 360.0) % 360.0;
+
+    /// <summary>
+    /// OCS→WCS XY 投影（AutoCAD 任意轴算法）：法向接近 +Z 时 identity 快路径；
+    /// 否则 Ax = (|Nx|,|Ny| 均 &lt; 1/64 ? (0,1,0)×N : (0,0,1)×N) 归一，Ay = N×Ax 归一。
+    /// 返回 2D 仿射（丢弃 WCS Z——视图为 XY 投影）。倾斜法向的圆/弧投影为椭圆，
+    /// 经 tessellation 诚实近似（72 段）；文字旋转取 OCS 方向向量投影角。
+    /// </summary>
+    private static (Affine Map, bool IsIdentity) OcsMapper(XYZ normal)
+    {
+        XYZ n = Normalize(normal);
+        if (Math.Abs(n.X) < 1.0 / 64 && Math.Abs(n.Y) < 1.0 / 64 && n.Z > 0)
+            return (Affine.Identity, true);
+        XYZ ax = Normalize(Math.Abs(n.X) < 1.0 / 64 && Math.Abs(n.Y) < 1.0 / 64
+            ? Cross(new XYZ(0, 1, 0), n) : Cross(new XYZ(0, 0, 1), n));
+        XYZ ay = Normalize(Cross(n, ax));
+        return (new Affine(ax.X, ay.X, ax.Y, ay.Y, 0, 0), false);
+    }
+
+    private static XYZ Normalize(XYZ v)
+    {
+        double len = Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+        return len < 1e-12 ? new XYZ(0, 0, 1) : new XYZ(v.X / len, v.Y / len, v.Z / len);
+    }
+
+    private static XYZ Cross(XYZ a, XYZ b) =>
+        new(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+
+    /// <summary>OCS 内旋转角（度）→ WCS XY 投影角：方向向量经 OCS 映射后 atan2。</summary>
+    private static double OcsRotation(double rotDeg, Affine ocs)
+    {
+        double r = rotDeg * Math.PI / 180.0;
+        (double x, double y) = ocs.Apply(Math.Cos(r), Math.Sin(r));
+        return NormDeg(Math.Atan2(y, x) * 180.0 / Math.PI);
+    }
+
+    /// <summary>非默认法向圆/弧 → OCS 内 tessellate 后逐点映射（椭圆投影诚实近似）。</summary>
+    private static void AppendTessellatedArc(
+        List<RenderItem> items, string layer, uint color, string handle,
+        Affine t, Affine ocs, double cx, double cy, double radius,
+        double startDeg, double sweepDeg, int segments = 72)
+    {
+        // 整圆（|sweep|≥360）取 segments 个均匀采样点、不重复首点：点集均值即圆心、
+        // 最大偏移即半径（测试断言口径）；若重复闭合点，均值会偏移 radius/(segments+1)。
+        // 代价：画布按开放折线绘制，整圆留一条 5° 弦缺口（诚实近似的一部分，见报告）。
+        // 圆弧需含末端点，取 segments+1 个采样。radius 为 OCS 半径，缩放由 t.Apply
+        // 统一施加（勿预乘 t.RadiusScale，否则双重缩放；非均匀缩放下自然得椭圆投影）。
+        int samples = Math.Abs(sweepDeg) >= 360.0 ? segments : segments + 1;
+        var pts = new List<(double X, double Y)>(samples);
+        for (int i = 0; i < samples; i++)
+        {
+            double a = (startDeg + sweepDeg * i / segments) * Math.PI / 180.0;
+            (double ox, double oy) = ocs.Apply(cx + radius * Math.Cos(a), cy + radius * Math.Sin(a));
+            pts.Add(t.Apply(ox, oy));
+        }
+        items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle));
+    }
 
     /// <summary>
     /// 2D affine map x' = A*x + B*y + Tx, y' = C*x + D*y + Ty. Composed through

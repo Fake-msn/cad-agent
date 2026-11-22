@@ -635,4 +635,103 @@ public class RenderModelTests
         };
         Assert.Equal((8.0, 8.0, 12.0, 12.0), RenderModelBuilder.Bounds(items));
     }
+
+    // ---- 计划4 视图延迟项 Task 1：OCS 任意轴变换（镜像/倾斜法向渲染） ----
+    // 夹具沿用既有 WithSession/DxfFixture 模式：经真实 DXF 写/读往返，
+    // 验证 Normal/Center/顶点/插入点/旋转均能在 DxfWriter/DxfReader 下存活。
+
+    [Fact]
+    public void Circle_MirroredNormal_TessellatesMirroredPolyline()
+    {
+        // Normal=(0,0,-1) → OCS x 轴镜像：圆心 (5,5) 半径 3 → WCS 圆心 (-5,5)
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(0, 0, -1) });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            var item = Assert.Single(items);
+            Assert.Equal(RenderKind.Polyline, item.Kind); // 非默认法向→tessellation（真椭圆投影的诚实近似）
+            Assert.True(item.Points.Count >= 72);
+            double cx = item.Points.Average(p => p.X);
+            double cy = item.Points.Average(p => p.Y);
+            Assert.Equal(-5, cx, 3);
+            Assert.Equal(5, cy, 3);
+            Assert.Equal(3, item.Points.Max(p => Math.Abs(p.X - cx)), 2);
+        });
+    }
+
+    [Fact]
+    public void Circle_DefaultNormal_StillExactCircle()
+    {
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Circle, item.Kind); // 行为保持
+        });
+    }
+
+    [Fact]
+    public void LwPolyline_MirroredNormal_VerticesMirrored()
+    {
+        WithSession(doc =>
+        {
+            var lw = new LwPolyline { Normal = new XYZ(0, 0, -1) };
+            lw.Vertices.Add(new LwPolyline.Vertex(new XY(1, 2)));
+            lw.Vertices.Add(new LwPolyline.Vertex(new XY(3, 4)));
+            doc.Entities.Add(lw);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal((-1.0, 2.0), item.Points[0]);
+            Assert.Equal((-3.0, 4.0), item.Points[1]);
+        });
+    }
+
+    [Fact]
+    public void Text_MirroredNormal_InsertionMirroredRotationProjected()
+    {
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new TextEntity
+            {
+                InsertPoint = new XYZ(2, 3, 0), Value = "镜像", Height = 5,
+                Rotation = Math.PI / 2, Normal = new XYZ(0, 0, -1)
+            });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal((-2.0, 3.0), item.Points[0]);
+            // OCS 内 90° 方向 (0,1) → 镜像后 (0,1) → WCS 角仍 90°
+            Assert.Equal(90, item.RotationDeg, 3);
+        });
+    }
+
+    [Fact]
+    public void Arc_MirroredNormalInsideRotatedInsert_RotationAppliedOnce()
+    {
+        // 块内弧（OCS 0°→90°，镜像法向）+ Insert 旋转 90°：OCS 点 (cosθ,sinθ)
+        // 镜像 → (-cosθ,sinθ)，再经 insert 仿射 R90 → (-sinθ,-cosθ)。
+        // 正确 WCS 端点 (0,-1)→(-1,0)。tessellation 起始角若预加 rotationDeg
+        // 会二次旋转 → (-1,0)→(0,1)，必须不发生（旋转已由 t.Apply 施加）。
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("ARCM");
+            block.Entities.Add(new Arc(new XYZ(0, 0, 0), 1, 0, Math.PI / 2) { Normal = new XYZ(0, 0, -1) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(0, 0, 0), XScale = 1, YScale = 1, ZScale = 1, Rotation = Math.PI / 2 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Polyline, item.Kind);
+            Assert.Equal(73, item.Points.Count); // 弧含末端点：72 段 + 1
+            Assert.Equal(0, item.Points[0].X, 3);
+            Assert.Equal(-1, item.Points[0].Y, 3);
+            Assert.Equal(-1, item.Points[^1].X, 3);
+            Assert.Equal(0, item.Points[^1].Y, 3);
+        });
+    }
 }
