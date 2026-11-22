@@ -1,3 +1,4 @@
+using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -60,6 +61,10 @@ namespace CadAgent.View;
 /// 视图闭环 T5：审计时间线 live-rebuild（RefreshAfterEdit → Audit.Rebuild →
 /// TimelineChanged 刷新列表，编辑/撤销后无需重开窗口）；_diffBusy 硬闸
 /// （diff 加载期间画布点击/工具切换/撤销/删除/改层一律忽略，镜像 _editBusy）。
+/// 视图闭环 T9：编辑 UX 收尾——字高/缩放/旋转°输入框（非法输入 fallback
+/// 3.5/1/0；旋转 UI 度→handler 弧度）；Delete 第二击经 ConfirmDialog 模态确认
+/// （取消保持选中不清状态；headless 测试经 ConfirmDeleteOverride seam 注入，
+/// 真模态走 Task 11 真机协议）。删除仍经 EditViewModel→StepEngine，无审计旁路。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -67,7 +72,8 @@ public sealed class MainWindow : Window
     private static readonly string[] ClassOptions =
         Enum.GetNames<SemanticClass>().Where(n => n != nameof(SemanticClass.Unknown)).ToArray();
 
-    /// <summary>T9 文本工具默认字高（GB 50001 字高系列常用值；高度输入留 T10）。</summary>
+    /// <summary>T9 文本工具默认字高（GB 50001 字高系列常用值；视图闭环 T9 起
+    /// 字高输入框可覆盖，非法/≤0 输入回落此值）。</summary>
     private const double DefaultTextHeight = 3.5;
 
     /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
@@ -422,7 +428,7 @@ public sealed class MainWindow : Window
         }
         Tool("Select", EditTool.Select, "选择：点击选中实体（默认工具）");
         Tool("Line", EditTool.Line, "画线：第一击设起点，第二击提交（经审计管线）");
-        Tool("Text", EditTool.Text, "文字：先在工具栏输入内容，再点击放置（字高 3.5）");
+        Tool("Text", EditTool.Text, "文字：先在工具栏输入内容，再点击放置（字高取输入框，默认 3.5）");
         Tool("Move", EditTool.Move, "移动：点击实体选中，再点击目标点（相对首点位移）");
         // Delete 两段式：首按激活工具 → 画布点击选中 → 再按本按钮确认删除。
         var delete = new Button
@@ -431,7 +437,7 @@ public sealed class MainWindow : Window
             Margin = new Thickness(2, 0),
             [ToolTip.TipProperty] = "选中实体后再次点击确认删除"
         };
-        delete.Click += OnDeleteClick;
+        delete.Click += (_, _) => _ = OnDeleteClickAsync();
         toolbar.Children.Add(delete);
         Tool("ChangeLayer", EditTool.ChangeLayer, "改层：点击实体选中，再从层下拉选择目标层");
         Tool("InsertBlock", EditTool.InsertBlock, "插块：先在工具栏输入块名，再点击放置");
@@ -452,6 +458,16 @@ public sealed class MainWindow : Window
         var blockInput = new TextBox { Watermark = "Block name", Width = 120, Margin = new Thickness(2, 0) };
         EditBlockInput = blockInput;
         toolbar.Children.Add(blockInput);
+        // 视图闭环 T9：字高/缩放/旋转°输入（镜像 textInput/blockInput 装配模式）。
+        var heightInput = new TextBox { Watermark = "字高", Width = 60, Margin = new Thickness(2, 0), Text = "3.5" };
+        TextHeightInput = heightInput;
+        toolbar.Children.Add(heightInput);
+        var scaleInput = new TextBox { Watermark = "缩放", Width = 60, Margin = new Thickness(2, 0), Text = "1" };
+        BlockScaleInput = scaleInput;
+        toolbar.Children.Add(scaleInput);
+        var rotationInput = new TextBox { Watermark = "旋转°", Width = 60, Margin = new Thickness(2, 0), Text = "0" };
+        BlockRotationInput = rotationInput;
+        toolbar.Children.Add(rotationInput);
         var layerSelector = new ComboBox
         {
             ItemsSource = layers.Layers.Select(l => l.Name).ToList(),
@@ -782,6 +798,22 @@ public sealed class MainWindow : Window
 
     /// <summary>块插入工具块名输入框（T9）。</summary>
     public TextBox? EditBlockInput { get; }
+
+    /// <summary>字高输入框（视图闭环 T9：Text 工具字高；非法/≤0 回落 3.5。headless 测试可达）。</summary>
+    internal TextBox? TextHeightInput { get; }
+
+    /// <summary>缩放输入框（视图闭环 T9：InsertBlock 缩放；非法/≤0 回落 1。headless 测试可达）。</summary>
+    internal TextBox? BlockScaleInput { get; }
+
+    /// <summary>旋转输入框（视图闭环 T9：InsertBlock 旋转，UI 度→handler 弧度；非法回落 0。headless 测试可达）。</summary>
+    internal TextBox? BlockRotationInput { get; }
+
+    /// <summary>
+    /// Delete 确认 seam（视图闭环 T9，headless 测试注入）：null → 真模态
+    /// ConfirmDialog.ShowDialog&lt;bool&gt;；非 null → 测试代理确认结果
+    /// （headless 无 owner 消息泵不测 ShowDialog，真模态走 Task 11 真机协议）。
+    /// </summary>
+    internal Func<string, Task<bool>>? ConfirmDeleteOverride;
 
     /// <summary>改层工具目标层下拉（T9：ChangeLayer 激活且选中实体时选择即应用）。</summary>
     public ComboBox? EditLayerSelector { get; }
@@ -1259,12 +1291,24 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。
-    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
-    private void OnDeleteClick(object? sender, RoutedEventArgs e)
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
+    /// 视图闭环 T9：第二击先经模态确认（ConfirmDialog.ShowDialog&lt;bool&gt;；headless
+    /// 测试经 ConfirmDeleteOverride seam 注入）——取消保持选中不清状态；确认后才走
+    /// 既有删除执行逻辑（EditViewModel→StepEngine，无审计旁路）。</summary>
+    private async Task OnDeleteClickAsync()
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
-            _ = RunEditAsync(() => Edit.DeleteAsync(handle));
+        {
+            string msg = $"确认删除选中实体（句柄 {handle}）？删除经审计管线，可 Undo 撤回。";
+            bool confirmed = ConfirmDeleteOverride is not null
+                ? await ConfirmDeleteOverride(msg)
+                : await new ConfirmDialog(msg).ShowDialog<bool>(this);
+            if (!confirmed) return; // 取消：保持选中，不清状态
+            // 确认等待期间编辑/diff 抢跑 → 硬闸兜底（模态阻塞 owner 时理论不可达，seam 路径防御）。
+            if (_editBusy || _diffBusy) return;
+            await RunEditAsync(() => Edit.DeleteAsync(handle));
+        }
         else
             SetActiveTool(EditTool.Delete);
     }
@@ -1322,7 +1366,9 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入文本内容（工具栏 Text content 框）");
                     return true;
                 }
-                _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, DefaultTextHeight));
+                // 视图闭环 T9：字高取输入框（InvariantCulture；非法/≤0 → 默认 3.5，不崩）。
+                double height = double.TryParse(TextHeightInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && h > 0 ? h : DefaultTextHeight;
+                _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, height));
                 return true;
 
             case EditTool.InsertBlock:
@@ -1332,7 +1378,10 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入块名（工具栏 Block name 框）");
                     return true;
                 }
-                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy));
+                // 视图闭环 T9：缩放非法/≤0 → 1；旋转 UI 度 → handler 弧度（非法 → 0）。
+                double scale = double.TryParse(BlockScaleInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && s > 0 ? s : 1;
+                double rotation = double.TryParse(BlockRotationInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double deg) ? deg * Math.PI / 180.0 : 0;
+                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy, scale, rotation));
                 return true;
 
             case EditTool.Move:

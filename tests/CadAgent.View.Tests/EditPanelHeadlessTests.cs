@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using Avalonia;
@@ -11,6 +12,7 @@ using Avalonia.VisualTree;
 using CadAgent.Core;
 using CadAgent.Data.Tests;
 using CadAgent.View.Controls;
+using CadAgent.View.Rendering;
 using CadAgent.View.ViewModels;
 using CSMath;
 using Point = Avalonia.Point; // ACadSharp.Entities.Point 冲突
@@ -27,6 +29,9 @@ namespace CadAgent.View.Tests;
 /// Undo button restores the drawing + rollback audit. Delete tool: click
 /// selects, second toolbar press confirms. Text tool: toolbar input + click.
 /// Fixture: one WALL line (0,0)-(100,0); identity FixedIdentity Draw.
+/// 视图闭环 T9：字高/缩放/旋转输入框（非法输入 fallback 3.5/1/0，UI 度→handler
+/// 弧度）+ Delete 模态确认——headless 经 ConfirmDeleteOverride seam 注入
+/// （ShowDialog 无 owner 消息泵不测，真模态走 Task 11 真机协议）。
 /// </summary>
 public class EditPanelHeadlessTests
 {
@@ -37,7 +42,8 @@ public class EditPanelHeadlessTests
         public string AgentDir => Path.Combine(ProjectDir, ".cadagent");
         public string AuditDbPath => Path.Combine(AgentDir, "audit.db");
 
-        public Fixture()
+        /// <summary>withLumBlock=true 追加块定义 LUM（插块测试用；块内实体不进模型空间，既有计数断言不变）。</summary>
+        public Fixture(bool withLumBlock = false)
         {
             ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-ui-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(AgentDir);
@@ -46,6 +52,7 @@ public class EditPanelHeadlessTests
                 var wall = new Layer("WALL");
                 doc.Layers.Add(wall);
                 doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0), Layer = wall });
+                if (withLumBlock) DxfFixture.AddLumBlock(doc);
             });
         }
 
@@ -63,9 +70,9 @@ public class EditPanelHeadlessTests
         public OperatorIdentity Current { get; }
     }
 
-    private static (MainWindow Window, Fixture F) ShowWindow()
+    private static (MainWindow Window, Fixture F) ShowWindow(bool withLumBlock = false)
     {
-        var f = new Fixture();
+        var f = new Fixture(withLumBlock);
         var vm = new MainViewModel(f.DxfPath, f.ProjectDir);
         Assert.Null(vm.ErrorMessage);
         var window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
@@ -123,6 +130,14 @@ public class EditPanelHeadlessTests
             Assert.False(window.UndoButton!.IsEnabled); // no transaction yet
             Assert.NotNull(window.EditTextInput);
             Assert.NotNull(window.EditBlockInput);
+            // 视图闭环 T9：字高/缩放/旋转输入框装配 + 默认值。
+            Assert.NotNull(window.TextHeightInput);
+            Assert.Equal("3.5", window.TextHeightInput!.Text);
+            Assert.NotNull(window.BlockScaleInput);
+            Assert.Equal("1", window.BlockScaleInput!.Text);
+            Assert.NotNull(window.BlockRotationInput);
+            Assert.Equal("0", window.BlockRotationInput!.Text);
+            Assert.Null(window.ConfirmDeleteOverride); // 默认走真模态（seam 未注入）
             Assert.NotNull(window.EditLayerSelector);
             Assert.False(window.EditError!.IsVisible);
             Assert.False(File.Exists(f.AuditDbPath)); // opening the window creates nothing (T6/T8)
@@ -221,6 +236,9 @@ public class EditPanelHeadlessTests
         (MainWindow window, Fixture f) = ShowWindow();
         try
         {
+            // 视图闭环 T9（sanctioned）：模态引入后第二击不再无条件删除——
+            // headless 经 seam 注入确认 true（等价模态 Close(true)）。
+            window.ConfirmDeleteOverride = _ => Task.FromResult(true);
             ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
             Assert.Equal(EditTool.Delete, window.Edit!.ActiveTool);
@@ -268,6 +286,146 @@ public class EditPanelHeadlessTests
             using var audit = new SqliteAuditStore(f.AuditDbPath);
             AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
             Assert.Contains("add-text", step.Entry.ParamsJson);
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    // ---- 视图闭环 T9：字高/缩放/旋转输入 + Delete 模态确认（seam 注入） ----
+
+    [AvaloniaFact]
+    public async Task TextTool_CustomHeight_UsedInEdit()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "注记";
+            window.TextHeightInput!.Text = "7";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            // 渲染图元字高 = 输入值（不再固定 3.5）。
+            RenderItem text = Assert.Single(window.Canvas!.Items, i => i.Kind == RenderKind.Text);
+            Assert.Equal(7, text.TextHeight, 3);
+            // 审计 view-edit args.height 同值（VM→StepEngine 契约无旁路）。
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord req = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "view-edit");
+            JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
+            Assert.Equal(7, args.GetProperty("height").GetDouble(), 3);
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task TextTool_InvalidHeight_FallsBackDefault()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "注记";
+            window.TextHeightInput!.Text = "abc"; // 非法输入 → fallback 3.5，不崩
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            RenderItem text = Assert.Single(window.Canvas!.Items, i => i.Kind == RenderKind.Text);
+            Assert.Equal(3.5, text.TextHeight, 3);
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord req = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "view-edit");
+            JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
+            Assert.Equal(3.5, args.GetProperty("height").GetDouble(), 3);
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task InsertBlockTool_ScaleRotation_UsedInEdit()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withLumBlock: true);
+        try
+        {
+            ToolButton(window, "InsertBlock").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditBlockInput!.Text = "LUM";
+            window.BlockScaleInput!.Text = "2";
+            window.BlockRotationInput!.Text = "90"; // UI 度 → handler 弧度契约
+            // 点击须落在画布视口内（夹具为水平线，y 过大映射到画布外；镜像 Text 测试 y=10）。
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 50, 10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Equal(2, window.Canvas!.Items.Count); // WALL 线 + LUM 块内对角线展开
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            AuditRecord req = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "view-edit");
+            JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
+            Assert.Equal(2, args.GetProperty("scale").GetDouble(), 3);
+            Assert.Equal(Math.PI / 2, args.GetProperty("rotation").GetDouble(), 6); // 90° → π/2
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task Delete_ConfirmOverrideFalse_NoTx()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            // seam 注入取消：模态逻辑等价 Close(false)（headless 无 owner 消息泵）。
+            string? message = null;
+            var asked = new TaskCompletionSource();
+            window.ConfirmDeleteOverride = m =>
+            {
+                message = m;
+                asked.TrySetResult();
+                return Task.FromResult(false);
+            };
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 50, 0); // 选中夹具线
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await asked.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Dispatcher.UIThread.RunJobs();
+
+            // 取消：保持选中不清状态，实体仍在，无 delete-entity tx（连审计库都不创建）。
+            Assert.Contains("确认删除", message);
+            Assert.NotNull(window.Canvas.SelectedHandle);
+            Assert.Single(window.Canvas.Items);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            Assert.False(File.Exists(f.AuditDbPath));
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task Delete_ConfirmOverrideTrue_TxCommitted()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            window.ConfirmDeleteOverride = _ => Task.FromResult(true); // 等价 Close(true)
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 50, 0);
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+
+            await ActAndWaitForEditAsync(window, () =>
+                ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Empty(window.Canvas.Items); // 实体消失
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            List<AuditRecord> records = audit.ReadAll().ToList();
+            Assert.Single(records, r => r.Entry.Kind == "tx-start");
+            Assert.Single(records, r => r.Entry.Kind == "tx-commit");
+            AuditRecord step = Assert.Single(records, r => r.Entry.Kind == "step");
+            Assert.Contains("delete-entity", step.Entry.ParamsJson);
             Assert.True(audit.VerifyChain(out string error), error);
         }
         finally { Cleanup(window, f); }
