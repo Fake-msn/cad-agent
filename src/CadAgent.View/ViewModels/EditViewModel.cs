@@ -2,14 +2,17 @@ using System.Text.Json;
 using CadAgent.Core;
 using CadAgent.Data;
 using CadAgent.Data.Handlers;
+using CadAgent.Data.Rules;
 using CadAgent.Data.Semantic;
+using CadAgent.View.Services;
 
 namespace CadAgent.View.ViewModels;
 
 /// <summary>手动编辑工具（计划4 T9）。Select 为默认选择工具，不产生编辑。</summary>
 public enum EditTool { Select, Line, Text, Move, Delete, ChangeLayer, InsertBlock }
 
-/// <summary>编辑结果：Ok/TxId/Error（请求被拒于执行之前时 TxId 为空）；Warning 为 Yellow 闸口放行警示（非阻塞）。</summary>
+/// <summary>编辑结果：Ok/TxId/Error（请求被拒于执行之前时 TxId 为空）；Warning 为 Yellow 闸口放行警示
+/// 与编辑后回归警告（视图闭环 T7，镜像 CLI run-regression，观察性非阻塞）——两者可叠加（换行分隔）。</summary>
 public sealed record EditResult(bool Ok, string TxId, string Error, string Warning = "");
 
 /// <summary>
@@ -208,7 +211,73 @@ public sealed class EditViewModel
         var engine = new StepEngine(_audit, _snapshots, _identity, _roles, HandlerRegistry.All(), semanticGate);
         var plan = new StepPlan(planId, new[] { new StepSpec(kind, args) });
         TxResult tx = engine.Run(plan, _session, _sessionId);
+        // 视图闭环 T7：tx 成功后回归检查（镜像 CLI run 的 RunRegressionCheck，观察性）——
+        // 警告追加在 Yellow 闸口警示之后（不覆盖）；ApplyCore 整体在 _gate 临界区内，
+        // ComputeHash 自然持闸（Task 6 哈希口径教训），无需额外加闸。
+        if (tx.Ok)
+        {
+            string regressionWarning = RunRegressionCheck();
+            if (regressionWarning.Length > 0)
+                gateWarning = gateWarning.Length > 0 ? gateWarning + "\n" + regressionWarning : regressionWarning;
+        }
         return tx.Ok ? new EditResult(true, tx.TxId, "", gateWarning) : new EditResult(false, tx.TxId, tx.Error);
+    }
+
+    /// <summary>
+    /// 编辑后回归检查（镜像 CLI RunRegressionCheck，spec §9 观察性）：builtin-only 评估，
+    /// mandatory 违规→警告不自动回滚（决策权归人）；无论有无违规均审计 check-run；
+    /// 自身故障也入审计（嵌套守卫：审计再失败仅降级提示，绝不重抛影响已提交 tx）。
+    /// </summary>
+    private string RunRegressionCheck()
+    {
+        bool overlayPresent = false;
+        try
+        {
+            string agentDir = Path.Combine(_projectDir, ".cadagent");
+            string overlayPath = Path.Combine(agentDir, "semantic.json");
+            var overlay = File.Exists(overlayPath) ? SemanticOverlay.Load(overlayPath) : new SemanticOverlay();
+            overlayPresent = overlay.Annotations.Count > 0;
+            var adjudications = AdjudicationSet.Load(Path.Combine(agentDir, "adjudications.json"));
+            var ruleSet = SkillSet.Compose(BuiltinRules.Load(), Array.Empty<SkillPackage>());
+            CheckSummary summary = ViewRuleEngine.Create().Evaluate(ruleSet.AllRules, _session, overlay, adjudications);
+            int mandatoryViolations = summary.Issues.Count(i => i.Force == RuleForce.Mandatory);
+            string hash = _session.ComputeHash();
+            var op = _identity.Current;
+            _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                _sessionId, "view-regression", "check-run", _session.SourcePath,
+                JsonSerializer.Serialize(new
+                {
+                    rulesRun = summary.RulesRun,
+                    rulesSkipped = summary.RulesSkipped,
+                    issueCount = summary.Issues.Count,
+                    mandatoryViolations,
+                    skippedReasons = summary.StructuredSkips?.Select(s => new { category = s.Category, ruleId = s.RuleId, message = s.Message }).ToArray() ?? Array.Empty<object>(),
+                    overlayPresent,
+                    adjudicationHash = adjudications.Fingerprint(),
+                    rulePackVersion = ruleSet.RulePackVersion
+                }),
+                hash, hash, "", ""));
+            if (mandatoryViolations > 0)
+            {
+                string ruleIds = string.Join(", ", summary.Issues
+                    .Where(i => i.Force == RuleForce.Mandatory).Select(i => i.RuleId).Distinct());
+                return $"警告: 编辑后图纸存在 {mandatoryViolations} 项强制(mandatory)规范违规（规则: {ruleIds}）。事务已提交，不自动回滚——决策权归人，请在问题清单复核并人工裁定或修正。";
+            }
+            return "";
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                var op = _identity.Current;
+                _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    _sessionId, "view-regression", "check-run", _session.SourcePath,
+                    JsonSerializer.Serialize(new { Error = ex.Message, overlayPresent }),
+                    "", "", "", ""));
+            }
+            catch { /* 嵌套守卫：审计再失败不重抛（镜像 CLI 最终审查裁定） */ }
+            return $"回归检查未完成: {ex.Message}（事务已提交，不受影响）";
+        }
     }
 
     /// <summary>镜像 CLI Rollback：快照必须属于当前图纸，防止跨图纸覆盖。</summary>

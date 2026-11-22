@@ -87,6 +87,10 @@ public sealed class MainWindow : Window
     /// </summary>
     private bool _editBusy;
 
+    /// <summary>视图闭环 T7：最近一次编辑的非空 Warning（Yellow 闸口警示 / run-regression
+    /// 回归警告）——拼入状态栏尾部；新编辑/撤销/切换工具时清除，避免陈旧警示误导。</summary>
+    private string _editWarning = "";
+
     /// <summary>
     /// Diff 加载重入闸（视图闭环 T5，镜像 _editBusy 结构性保证）：ApplyDiffAsync
     /// 置位、完成复位；Diff 加载期间画布点击/工具切换/撤销/删除/改层一律忽略——
@@ -949,6 +953,8 @@ public sealed class MainWindow : Window
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
             if (_diffSummary.Length > 0) status += $" | {_diffSummary}";
+            // T7：编辑警示（Yellow 闸口 / run-regression 回归警告）入状态栏尾部。
+            if (_editWarning.Length > 0) status += $" | {_editWarning}";
             Status.Text = status;
         }
         if (LayerList is not null)
@@ -1248,6 +1254,7 @@ public sealed class MainWindow : Window
         Canvas.SetPendingPoint(null);
         _moveBase = null;
         SetEditError(null);
+        SetEditWarning(""); // T7：切换工具清掉上一次编辑的警示（与错误通道同口径）
     }
 
     /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。
@@ -1353,12 +1360,38 @@ public sealed class MainWindow : Window
         }
     }
 
-    /// <summary>T9：编辑/撤销评估期间禁用工具栏 + Diff 切换（防重入 + diff/编辑互斥）。</summary>
+    /// <summary>T9：编辑/撤销评估期间禁用工具栏 + Diff 切换（防重入 + diff/编辑互斥）。
+    /// 视图闭环 T7：撤销无 EditResult——清掉上一次编辑的回归/闸口警示（图纸已变，旧警告失效）。</summary>
     private async Task RunEditAsync(Func<Task> apply)
     {
         SetEditBusy(true);
-        try { await apply(); }
+        try { SetEditWarning(""); await apply(); }
         finally { SetEditBusy(false); }
+    }
+
+    /// <summary>
+    /// 视图闭环 T7：带结果的编辑入口——任何非空 EditResult.Warning（Yellow 闸口警示 /
+    /// 编辑后 run-regression 回归警告）均入状态栏（此前 RunEditAsync 丢弃结果，Warning
+    /// 完全不可见）。新编辑开始先清旧警示；与 EditError 错误通道分离，互不覆盖。
+    /// 重载决议：Task&lt;EditResult&gt; 比 Task 更特化，编辑调用点自动命中本重载。
+    /// </summary>
+    private async Task RunEditAsync(Func<Task<EditResult>> apply)
+    {
+        SetEditBusy(true);
+        try
+        {
+            SetEditWarning("");
+            EditResult result = await apply();
+            SetEditWarning(result.Warning);
+        }
+        finally { SetEditBusy(false); }
+    }
+
+    /// <summary>T7：编辑警示入状态栏（OnCanvasInvalidated 拼接待显警告；空串=清除）。</summary>
+    private void SetEditWarning(string warning)
+    {
+        _editWarning = warning;
+        Canvas?.Invalidate(); // 状态栏重建（EditCompleted 先于结果返回，须再刷一次）
     }
 
     private void SetEditBusy(bool busy)
