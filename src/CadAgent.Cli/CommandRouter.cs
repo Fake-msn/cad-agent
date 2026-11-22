@@ -84,6 +84,8 @@ public static partial class CommandRouter
     /// <summary>
     /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent/repl/export 消费点共用。
     /// persisted=Store.Load → DrawingSession.Load(path, persisted) → census 非空回写（原子写）。
+    /// R9：persisted Empty/缺 + 源 .dwg 在 → Load 从源通知重建 census（此处回写 sidecar）；
+    /// 源缺失 → Load 抛 InvalidOperationException（各消费点既有 catch/LoadOrReject 留痕拒绝）。
     /// agentDir 约定 = project/.cadagent（Run 唯一装配点），sidecar 以 projectDir 键控。
     /// 已知限制（T1 单文件多源互斥）：第二源 Save 覆盖第一源，Load 靠 SourcePath 匹配诚实
     /// Empty——多源场景 census 仅最近源有效（见 UnparsedCensusStore 注释）。
@@ -353,16 +355,20 @@ public static partial class CommandRouter
     private static int Rollback(string txId, string drawingPath, string agentDir,
         string session, TextWriter stdout, TextWriter stderr)
     {
-        var drawing = DrawingSession.Load(drawingPath);
+        // R9 补留痕：此前 Load 在 try/catch 外——异常经 Run 兜底 exit 1 但无审计（spec §9 缺口）。
+        // LoadOrReject 复用 intake-rejected 模式（Source="rollback"，与 semantic/check 同一守卫）。
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
+            session, audit, op, stderr, source: "rollback");
+        if (drawing == null) return 1;
         // 快照必须属于当前图纸：防止把别的图纸的快照覆盖到本图纸上
         string snapshotFile = new SnapshotStore(Path.Combine(agentDir, "snapshots")).Find(txId);
         if (!string.Equals(Path.GetFileName(snapshotFile), Path.GetFileName(drawing.SourcePath),
                 StringComparison.OrdinalIgnoreCase))
         {
             // 拒绝也必须入审计（spec §9）：谁、撤哪个事务、期望/实际图纸各是什么。
-            using var rejectedAudit = OpenAudit(agentDir);
-            var op = Identity(agentDir).Current;
-            rejectedAudit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "rollback", "rollback-rejected", txId,
                 JsonSerializer.Serialize(new
                 {
@@ -373,7 +379,6 @@ public static partial class CommandRouter
             stderr.WriteLine($"事务 {txId} 的快照不属于图纸 {drawing.SourcePath}，已拒绝撤回");
             return 1;
         }
-        using var audit = OpenAudit(agentDir);
         Engine(agentDir, audit).Rollback(txId, drawing, session);
         stdout.WriteLine($"已撤回事务 {txId}");
         return 0;

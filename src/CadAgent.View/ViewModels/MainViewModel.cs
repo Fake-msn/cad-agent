@@ -27,6 +27,8 @@ public sealed class MainViewModel
         }
         catch (Exception ex)
         {
+            // R9：working 副本无源图且无 census → Load 抛 InvalidOperationException，
+            // 经本通道优雅降级（MainWindow 先行短路展示 ErrorMessage，不进入渲染/编辑）。
             ErrorMessage = ex.Message;
         }
     }

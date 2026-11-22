@@ -70,7 +70,10 @@ public sealed class DrawingSession : IDrawingSession
 
     /// <summary>
     /// 加载图纸。.dwg 首载经 DWG 通知通道重建 census；working 分支内存 DXF 无 TCH 通知，
-    /// census 由调用方经 <paramref name="persisted"/> 传入（sidecar UnparsedCensusStore.Load），缺省 Empty。
+    /// census 优先用 <paramref name="persisted"/>（sidecar UnparsedCensusStore.Load）。
+    /// R9（陈旧 working 假 Green 旁路闭合）：persisted Empty/缺 + 源 .dwg 存在 → 从源 DWG
+    /// 通知一次性重建 census（只取 census，doc 丢弃，working 不重写）；源缺失 → 拒绝
+    /// （InvalidOperationException，无法核验完整性，不得假 Green 放行）。
     /// T3：persisted 对 .dxf 源同样生效（sidecar 注入/恢复 census；null→Empty，无 census 行为逐字不变）。
     /// </summary>
     public static DrawingSession Load(string path, UnparsedCensus? persisted = null)
@@ -83,8 +86,19 @@ public sealed class DrawingSession : IDrawingSession
             {
                 // The working copy is durable editable state: committed edits live there.
                 // Load it as-is; re-deriving from the pristine .dwg would wipe them.
-                // working DXF 已丢失 TCH 对象→census 只能靠 sidecar 持久化值（persisted）恢复。
-                return new DrawingSession(workingPath, LoadDxf(workingPath), persisted ?? UnparsedCensus.Empty);
+                // working DXF 已丢失 TCH 对象→census 优先靠 sidecar 持久化值（persisted）恢复。
+                CadDocument workingDoc = LoadDxf(workingPath);
+                if (persisted is { TotalCount: > 0 })
+                    return new DrawingSession(workingPath, workingDoc, persisted);
+                // R9：persisted Empty/缺（切片前物化的陈旧 working + 新项目无 sidecar）——
+                // 此前直接 Empty 放行 = 假 Green 旁路（intake exit 0 + run tx-commit）。
+                if (!File.Exists(path))
+                    throw new InvalidOperationException(
+                        "working 副本无源图且无 census，无法核验完整性：请提供源图或删除 working 副本重新导入");
+                // 源存在 → 从源 DWG 通知一次性重建 census（只取 census，doc 丢弃——
+                // working 仍是持久编辑态，绝不重物化）；调用方 LoadWithCensus 既有逻辑回写 sidecar。
+                var (_, rebuilt) = LoadDwg(path);
+                return new DrawingSession(workingPath, workingDoc, rebuilt);
             }
             // First load only: materialize the working DXF from the read-only original.
             var (dwgDoc, census) = LoadDwg(path);

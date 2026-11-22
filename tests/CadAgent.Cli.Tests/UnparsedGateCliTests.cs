@@ -1,4 +1,6 @@
 using System.Text.Json;
+using ACadSharp;
+using ACadSharp.IO;
 using CadAgent.Core;
 using CadAgent.Data;
 using CadAgent.Data.Tests;
@@ -317,6 +319,147 @@ public class UnparsedGateCliTests : IDisposable
         }
         Assert.DoesNotContain(records, r => r.Entry.Kind == "export-committed");
         Assert.DoesNotContain(records, r => r.Entry.Kind == "export-degraded");
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    // ===== R9：陈旧 working 假 Green 旁路闭合（pre-review Fix Round 1）=====
+    // 复现：切片前物化的 working（无 TCH 对象）+ 新项目 intake（无 sidecar）→
+    // 修复前 persisted=null→census Empty→假 Green（intake exit 0 + run tx-commit）。
+    // 修复：persisted Empty/缺 + 源存在→从源 DWG 通知重建 census；源缺失→拒绝留痕。
+
+    /// <summary>在指定路径写一份无 TCH 对象的 working DXF（模拟切片前物化的陈旧副本）。</summary>
+    private static void WriteStaleWorking(string workingPath)
+    {
+        var doc = new CadDocument();
+        DxfFixture.AddSampleLine(doc);
+        using var fs = File.Create(workingPath);
+        DxfWriter.Write(fs, doc);
+    }
+
+    [SkippableFact]
+    public void RealNativeTArch_StaleWorkingNoSidecar_IntakeRebuildsCensus_RunRefused()
+    {
+        // 电施标本：旧 working（无 TCH）+ 无 sidecar → census 必须从源重建（5985/TCH_WALL 1592），
+        // intake Yellow exit 2（修复前 exit 0 假 Green）；run 拒绝（修复前 tx-commit）；
+        // sidecar 回写（LoadWithCensus 既有逻辑）；working/源字节不变（重建只取 census，doc 丢弃）。
+        string specimen = CopySpecimen("outputs/tarch-native/电施（强电）-2#厂房电力+普通照明平面图.dwg");
+        string working = DrawingSession.WorkingPathFor(specimen);
+        WriteStaleWorking(working);
+        byte[] workingBefore = File.ReadAllBytes(working);
+        byte[] sourceBefore = File.ReadAllBytes(specimen);
+
+        var (code, stdout, _) = Run("intake", specimen);
+
+        Assert.Equal(2, code); // Yellow（修复前：exit 0 假 Green——R9 复现）
+        using (var doc = JsonDocument.Parse(stdout))
+        {
+            Assert.Equal("Yellow", doc.RootElement.GetProperty("level").GetString());
+            int total = 0, wall = 0;
+            foreach (var c in doc.RootElement.GetProperty("unparsed").EnumerateArray())
+            {
+                int n = c.GetProperty("Count").GetInt32();
+                total += n;
+                if (c.GetProperty("CppClassName").GetString() == "TCH_WALL") wall = n;
+            }
+            Assert.Equal(5985, total); // census == 源首载普查（通知重建，非 Empty）
+            Assert.Equal(1592, wall);
+        }
+        // sidecar 回写：二次加载走 persisted（不再重读源）。
+        Assert.Equal(5985, UnparsedCensusStore.Load(_project, specimen).TotalCount);
+        Assert.Equal(workingBefore, File.ReadAllBytes(working)); // working 未被重写
+        Assert.Equal(sourceBefore, File.ReadAllBytes(specimen)); // 源只读
+
+        // 修改拒绝（修复前此路径 tx-commit）：run-rejected Yellow + 无 tx。
+        string planPath = WritePlan();
+        var (runCode, runOut, runErr) = Run("run", planPath, "--drawing", specimen);
+        Assert.Equal(1, runCode);
+        Assert.Contains("只读审查", runErr);
+        Assert.DoesNotContain("\"ok\"", runOut);
+        var records = AuditRecords();
+        var rejected = Assert.Single(records, r => r.Entry.Kind == "run-rejected");
+        using (var p = JsonDocument.Parse(rejected.Entry.ParamsJson))
+        {
+            Assert.Equal("Yellow", p.RootElement.GetProperty("level").GetString());
+            Assert.Equal(5985, p.RootElement.GetProperty("unparsedCount").GetInt32());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
+        Assert.Equal(workingBefore, File.ReadAllBytes(working));
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Intake_WorkingOnlySourceMissing_RejectedExit1_AuditTrail()
+    {
+        // working-only 无源且无 census → Load 抛 InvalidOperationException →
+        // intake 既有 catch 留痕 intake-rejected + exit 1（不得假 Green exit 0）。
+        string dwg = Path.Combine(_project, "ghost.dwg"); // 源不存在
+        WriteStaleWorking(DrawingSession.WorkingPathFor(dwg));
+
+        var (code, stdout, stderr) = Run("intake", dwg);
+
+        Assert.Equal(1, code);
+        Assert.Contains("无法核验完整性", stderr);
+        Assert.Empty(stdout);
+        var records = AuditRecords();
+        var rejected = Assert.Single(records, r => r.Entry.Kind == "intake-rejected");
+        Assert.Equal("intake", rejected.Entry.Source);
+        using (var p = JsonDocument.Parse(rejected.Entry.ParamsJson))
+            Assert.Contains("无法核验完整性", p.RootElement.GetProperty("Error").GetString());
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Run_WorkingOnlySourceMissing_RejectedExit1_NoTx()
+    {
+        // run 消费点：Load 抛 → 既有 catch 留痕 run-rejected（level=LoadFailed）+ exit 1，
+        // 不执行任何步骤（修复前：假 Green → tx-commit）。
+        string dwg = Path.Combine(_project, "ghost.dwg");
+        string working = DrawingSession.WorkingPathFor(dwg);
+        WriteStaleWorking(working);
+        byte[] workingBefore = File.ReadAllBytes(working);
+        string planPath = WritePlan();
+
+        var (code, stdout, stderr) = Run("run", planPath, "--drawing", dwg);
+
+        Assert.Equal(1, code);
+        Assert.Contains("无法核验完整性", stderr);
+        Assert.DoesNotContain("\"ok\"", stdout);
+        Assert.Equal(workingBefore, File.ReadAllBytes(working));
+        var records = AuditRecords();
+        var rejected = Assert.Single(records, r => r.Entry.Kind == "run-rejected");
+        Assert.Equal("run", rejected.Entry.Source);
+        using (var p = JsonDocument.Parse(rejected.Entry.ParamsJson))
+        {
+            Assert.Equal("LoadFailed", p.RootElement.GetProperty("level").GetString());
+            Assert.Contains("无法核验完整性", p.RootElement.GetProperty("error").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void Rollback_WorkingOnlySourceMissing_RejectedExit1_AuditTrail()
+    {
+        // rollback 消费点（R9 补留痕）：此前 Load 在 try/catch 外——异常经 Run 兜底
+        // exit 1 但无审计（spec §9 缺口）。修复后 LoadOrReject 留痕 intake-rejected。
+        string dwg = Path.Combine(_project, "ghost.dwg");
+        WriteStaleWorking(DrawingSession.WorkingPathFor(dwg));
+
+        var (code, _, stderr) = Run("rollback", "tx-none", "--drawing", dwg);
+
+        Assert.Equal(1, code);
+        Assert.Contains("无法核验完整性", stderr);
+        var records = AuditRecords();
+        var rejected = Assert.Single(records, r => r.Entry.Kind == "intake-rejected");
+        Assert.Equal("rollback", rejected.Entry.Source);
+        using (var p = JsonDocument.Parse(rejected.Entry.ParamsJson))
+            Assert.Contains("无法核验完整性", p.RootElement.GetProperty("Error").GetString());
         using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
         Assert.True(audit.VerifyChain(out _));
     }

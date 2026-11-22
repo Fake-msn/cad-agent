@@ -1,4 +1,6 @@
+using ACadSharp;
 using ACadSharp.Entities;
+using ACadSharp.IO;
 using CSMath;
 
 namespace CadAgent.Data.Tests;
@@ -131,6 +133,102 @@ public class DrawingSessionTests : IDisposable
         finally
         {
             File.Delete(dwg);
+            if (File.Exists(working)) File.Delete(working);
+        }
+    }
+
+    // ===== R9：陈旧 working 假 Green 旁路闭合（切片前物化的 working 无 TCH 对象 + 无 sidecar）=====
+
+    /// <summary>在指定路径写一份无 TCH 对象的 working DXF（模拟切片前物化的陈旧副本）。</summary>
+    private static void WriteStaleWorking(string workingPath)
+    {
+        var doc = new CadDocument();
+        DxfFixture.AddSampleLine(doc);
+        using var fs = File.Create(workingPath);
+        DxfWriter.Write(fs, doc);
+    }
+
+    [Fact]
+    public void Load_Dwg_StaleWorking_SourceMissing_ThrowsInvalidOperation()
+    {
+        // working-only 无源且无 census → 无法核验完整性，必须拒绝（不得假 Green 放行）。
+        string dir = Directory.CreateTempSubdirectory("cadagent-r9-").FullName;
+        try
+        {
+            string dwg = Path.Combine(dir, "ghost.dwg"); // 源不存在
+            WriteStaleWorking(DrawingSession.WorkingPathFor(dwg));
+            var ex = Assert.Throws<InvalidOperationException>(() => DrawingSession.Load(dwg));
+            Assert.Contains("无法核验完整性", ex.Message);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void Load_Dwg_StaleWorking_NoPersisted_RereadsSourceForCensus()
+    {
+        // persisted Empty/缺 + 源存在 → 必须从源 DWG 通知重建 census（一次性，doc 丢弃）。
+        // 合成源无 TCH → census 恒 Empty，无法直接断言非空（真实标本 skip-gated 测试钉住）；
+        // 此处以"源损坏→Load 抛"证明源重读确实发生（修复前 working 直载成功 = 假 Green 旁路）。
+        string dwg = DxfFixture.CreateTempDwg(DxfFixture.AddSampleLine);
+        string working = DrawingSession.WorkingPathFor(dwg);
+        try
+        {
+            DrawingSession.Load(dwg); // 首载物化 working
+            File.WriteAllBytes(dwg, new byte[] { 0x00, 0x01, 0x02, 0x03 }); // 源损坏（不可读）
+            Assert.ThrowsAny<Exception>(() => DrawingSession.Load(dwg));
+        }
+        finally
+        {
+            File.Delete(dwg);
+            if (File.Exists(working)) File.Delete(working);
+        }
+    }
+
+    [Fact]
+    public void Load_Dwg_WorkingWithPersistedCensus_DoesNotRereadSource()
+    {
+        // persisted 非 Empty → 用之，不重读源（性能/行为保持）：源损坏也不影响加载。
+        string dwg = DxfFixture.CreateTempDwg(DxfFixture.AddSampleLine);
+        string working = DrawingSession.WorkingPathFor(dwg);
+        try
+        {
+            DrawingSession.Load(dwg); // 首载物化 working
+            File.WriteAllBytes(dwg, new byte[] { 0x00, 0x01, 0x02, 0x03 }); // 源损坏
+            var persisted = new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) });
+            var session = DrawingSession.Load(dwg, persisted);
+            Assert.Equal(2, session.Unparsed.TotalCount); // Yellow 证据保持
+            Assert.Equal(working, session.SourcePath);
+            Assert.Single(session.Summarize().Entities); // working 仍是持久编辑态
+        }
+        finally
+        {
+            File.Delete(dwg);
+            if (File.Exists(working)) File.Delete(working);
+        }
+    }
+
+    [Fact]
+    public void Load_Dwg_WorkingWithPersistedCensus_SourceDeleted_KeepsCensus()
+    {
+        // sidecar census 非空 + 源删除 → Load 层面仍用 persisted（Yellow 保持，不拒绝也不假 Green）。
+        // （CLI 层 sidecar 源哈希核验归 UnparsedCensusStore——源缺失时 Store 诚实 Empty→拒绝，另测。）
+        string dwg = DxfFixture.CreateTempDwg(DxfFixture.AddSampleLine);
+        string working = DrawingSession.WorkingPathFor(dwg);
+        try
+        {
+            DrawingSession.Load(dwg); // 首载物化 working
+            File.Delete(dwg); // 源删除
+            var persisted = new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) });
+            var session = DrawingSession.Load(dwg, persisted);
+            Assert.Equal(2, session.Unparsed.TotalCount);
+            Assert.Equal(working, session.SourcePath);
+        }
+        finally
+        {
+            if (File.Exists(dwg)) File.Delete(dwg);
             if (File.Exists(working)) File.Delete(working);
         }
     }
