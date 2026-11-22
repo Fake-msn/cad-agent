@@ -488,7 +488,8 @@ public static partial class CommandRouter
 
     /// <summary>
     /// semantic scan：Load→Scan(既有 overlay, skill 别名)→Save→审计 semantic-scan→stdout
-    /// {version, annotations, ambiguous}。Load 失败复用计划 1 intake-rejected
+    /// {version, annotations, ambiguous, sheets}（sheets=T7 加性幅面摘要 {sheetId,name,number}）。
+    /// Load 失败复用计划 1 intake-rejected
     /// 模式（错误入审计、哈希不可得→空串）+ exit 1。
     /// --skill 接线（2b-ii-a T7）：与 check/adjudicate 同一 LoadRuleSet 加载路径，
     /// MergedAliases→Scan overload（别名命中层不再不明确）；包非法/Id 冲突→用法错误
@@ -539,7 +540,11 @@ public static partial class CommandRouter
         {
             version = result.Overlay.Version,
             annotations = result.Overlay.Annotations,
-            ambiguous = result.Ambiguous
+            ambiguous = result.Ambiguous,
+            // T7 加性：幅面摘要数组（sheetId=图框 Insert 句柄/布局 "L"+视口句柄；
+            // 无图框 legacy 图纸=单默认幅面 S0）。agent 计划 params.sheetId 的取值依据；
+            // 既有 version/annotations/ambiguous 契约不变。
+            sheets = drawing.Sheets.Select(s => new { sheetId = s.SheetId, name = s.Name, number = s.Number })
         }, SemanticJsonOpts));
         return 0;
     }

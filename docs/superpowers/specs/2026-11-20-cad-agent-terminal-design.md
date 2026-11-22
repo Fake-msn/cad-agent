@@ -492,6 +492,17 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 修复后全套件 **566 测试连绿两次含 5 真机**（首跑单败为瞬态文件锁竞争，复跑稳定）。
 - **ZWCAD"套件损坏"弹窗核查（用户报告）**：崩溃重启机制为计划内（spec §9 Restart+重试），弹窗本身非预期——根因 Dispose/Restart 带开文档 Quit 致 ZWCAD 判异常终止；已修先 Close(false) 再 Quit（dc031fa→acb99f6）。
 
+**幅面感知读图切片完成（sheet-aware T1-T7，2026-11-22 记录；全套件 950 测试连绿两次含 13 Zwcad 真机）**：
+- **T1 Sheet 登记簿**：图框块引用检测（块名含 图框/图签/BORD 或携带 图号 属性）→ FrameBounds（块几何经插入变换展开，嵌套递归+深度守卫）+ 标题栏属性 + 框内/近邻幅面名文字关联；无图框→单默认幅面 S0（legacy 兼容）；SheetIdForPoint 实体归属（框外=null 远端残元不混入）。真实标本 9 幅面名/日期/版本号实跑钉住。
+- **T2 层名归一+块遍历**：BlockWalker 单次遍历（bound xref 嵌套实体世界坐标+后缀句柄路径+归一层名 x$0$WALL→WALL）供全部检测器共用；插入变换数学 consolidation 于 Core.Cad.Affine（View RenderModel/T1 FrameBounds 同源，R1）；底图墙对经块遍历可达（真实底图在 bound xref 内）。
+- **T3 属性 NativeObject 种子**：BlockAttributeSeeder 块属性→语义（A=深照型灯→Lighting 等），Provenance.NativeObject 0.95 确定性原生数据优先于图层推断；Upsert 键=handle+provenance 与 HumanConfirmed 共存；R7 陈旧种子每 pass 清理。真实标本 Lighting==1364/Equipment 147 实跑钉住。
+- **T4 幅面闸口**：ISemanticContextGate 三参 CheckContext(required, targetHandle, sheetId)（DIM 默认委托两参，fake 不破坏）；标注 SheetId stamp（检测器/推断/种子/人工映射派生全链）；plan params.sheetId 契约（StepEngine 提取→三参校验）——A 幅面确认不得放行 B 幅面操作，跨幅拒绝 semantic-gate-refused 审计含 sheetId；无 sheetId=legacy 全局行为保持。
+- **T5 布局视口+幅面 UI**：布局视口幅面登记（SheetId="L"+视口句柄，ViewTarget/ViewHeight 纸面变换 ViewportTransform）；视图幅面选择器+BuildViewport 裁剪（默认首幅面，sanctioned 行为变更 R4）；**布局幅面只读硬闸**（纸面编辑非本期语义，编辑工具硬禁+在途编辑切幅守卫 R8）；空布局/纸边界视口不登记（诚实）。
+- **T6 视觉交叉管道**：SheetTiler 幅面字高中位数反算瓦片（1 overview+≤6 tiles）；IRenderSnapshot seam（Data 不引用 View 无环）；VisionCrossChecker 声称仅以本幅面矢量 GT 佐证才种子（LlmInference 0.9，跨幅跑偏拒绝=幻觉拦截）；短值（<3 字符）包含匹配守卫+命中优先级+多幅面已种子 claim 假歧义抑制（R9）；VisionAmbiguous 入 ScanResult 不静默。
+- **T7 agent 联动 E2E + 收尾**：SheetAwareAgentE2ETests 双幅面合成夹具 fake LLM 全链——sheetId=S2 跑偏→tx failed+拒绝审计含 sheetId+Escalated 零落图；sheetId=S1→Executed+tx-commit+agent-verify 绿+验链；legacy 无 sheetId 全局放行；semantic scan stdout 加性 sheets 摘要 {sheetId,name,number}（agent 计划幅面取值依据）。InsertBlockTests CS0184 死分支警告清理（反射判定保意图）。
+- **验证协议**：docs/verification/sheet-aware-protocol.md（真实图纸复核步骤：9 幅面名/属性计数 1364/底图墙对经块遍历/跨幅拒绝/空布局诚实注记/视觉管道 harness 含 IRenderSnapshot 注入示例+证据归档要求）。门禁日志 outputs/sheet-aware/final-gate1.log / final-gate2.log（950=Core 207+Data 265+Cli 173+View 262+Llm 30+Zwcad 13，0 跳过——真实标本 skip-gated 3 测试本机实跑；前后 tasklist 核查无 ZWCAD 残留）。
+- **剩余边界（明示不假装）**：①代理 🔴 路径无真实标本——两份标本（原生 DWG+工作 DXF）准入均 Green 代理实体 0，🔴 拒绝仅合成 ProxyEntity 夹具覆盖；②空布局视口无内容标本——视口真实内容 E2E 缺口（合成 Viewport 夹具钉住登记/裁剪/纸面映射）；③视觉管道真实模型 E2E 留 harness——IRenderSnapshot 实现+VL reader 未接生产 CLI（fake seam 测试为自动化闸口）；④纸面编辑 deferred（布局幅面只读硬闸，不做纸面→模型逆映射）；⑤TwistAngle 与非矩形视口裁剪 deferred（视口数学仅平移+缩放）；⑥图框块内部几何编辑在 Sheets 指纹外（块定义内容变化需 Reload 失效）；⑦signoff.RollbackTx 不经布局只读闸——快照回滚作用于模型 tx 与视图当前幅面无关，与"布局只读"预期轻微张力（回滚是审计事实源操作非纸面编辑，注记在案）；⑧属性表硬编码（AttributeSemantics skill 覆写留后续切片）；⑨瓦片零重叠骑缝文字可能截半（~10% 重叠边距留后续）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
