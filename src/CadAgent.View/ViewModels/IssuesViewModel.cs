@@ -144,7 +144,9 @@ public sealed class IssuesViewModel
                 {
                     try
                     {
-                        string hash = _session.ComputeHash(); // 只读检查前后哈希一致（镜像 CLI check）
+                        // 只读检查前后哈希一致（镜像 CLI check）；哈希取自 eval.Hash——
+                        // 已在 Evaluate 的 sessionGate 临界区内计算（修复轮1），此处不再释闸后重读 session。
+                        string hash = eval.Hash;
                         var op = _identity.Current;
                         // sessionId 用 "view" 常量——IssuesVM 无 CLI session 注入（口径注记）。
                         // paramsJson 字段逐字镜像 CLI check（skippedReasons 字段名同
@@ -196,8 +198,10 @@ public sealed class IssuesViewModel
     }
 
     /// <summary>评估结果 + 复现证据（视图闭环 T6）：审计 paramsJson 所需的
-    /// rulePackVersion/adjudicationHash/overlayPresent 随汇总一并带回。</summary>
-    private sealed record EvalResult(CheckSummary Summary, string RulePackVersion, string AdjudicationHash, bool OverlayPresent);
+    /// rulePackVersion/adjudicationHash/overlayPresent 随汇总一并带回。
+    /// Hash（修复轮1）：在 Evaluate 的 sessionGate 临界区内取哈希带回——审计哈希
+    /// 必须等于被评估的图纸状态，不得在释闸后重读（刷新与编辑可并发）。</summary>
+    private sealed record EvalResult(CheckSummary Summary, string RulePackVersion, string AdjudicationHash, bool OverlayPresent, string Hash);
 
     private EvalResult Evaluate()
     {
@@ -215,7 +219,11 @@ public sealed class IssuesViewModel
         try
         {
             CheckSummary summary = ViewRuleEngine.Create().Evaluate(ruleSet.AllRules, _session, overlay, adjudications);
-            return new EvalResult(summary, ruleSet.RulePackVersion, adjudications.Fingerprint(), overlay.Annotations.Count > 0);
+            // 哈希与 Evaluate 同闸段（修复轮1）：_refreshGate 只挡刷新自身，刷新与编辑可并发——
+            // 若在释闸后取哈希，审计哈希会反映评估后被并发编辑改动的状态（复现证据失真），
+            // 并发枚举还可能抛集合修改异常。临界区内取哈希保证 hash == 被评估的图纸状态。
+            string hash = _session.ComputeHash();
+            return new EvalResult(summary, ruleSet.RulePackVersion, adjudications.Fingerprint(), overlay.Annotations.Count > 0, hash);
         }
         finally { _sessionGate?.Release(); }
     }

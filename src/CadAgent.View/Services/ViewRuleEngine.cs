@@ -11,8 +11,8 @@ public static class ViewRuleEngine
 {
     /// <summary>
     /// 规范引擎装配——逐字镜像 CLI CommandRouter.StandardsEngine 的注册列表
-    /// （builtin 5 类 + 电气/模型 5 类）与重复 CheckType 装配守卫，
-    /// 防止 RuleEngine 字典 last-wins 静默丢失检查器。
+    /// （builtin 5 类 + 电气/模型 5 类 + 室内房名 1 类，共 11 类，注册序逐字对齐）
+    /// 与重复 CheckType 装配守卫，防止 RuleEngine 字典 last-wins 静默丢失检查器。
     /// </summary>
     public static RuleEngine Create()
     {
@@ -21,7 +21,8 @@ public static class ViewRuleEngine
             new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
             new ElevationChecker(), new LayerNameChecker(),
             new TextHeightMinChecker(), new CableFormatChecker(), new SlotCodeChecker(),
-            new LuminaireFormatChecker(), new FileNamingChecker()
+            new LuminaireFormatChecker(), new FileNamingChecker(),
+            new RoomNameChecker()
         };
         var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
             .FirstOrDefault(g => g.Count() > 1);

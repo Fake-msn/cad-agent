@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
@@ -503,5 +504,163 @@ public class IssuesViewModelTests
         Assert.Equal(2, vm.Issues.Count);
         // 无审计注入 → 不建库、不留痕，评估照常。
         Assert.False(File.Exists(Path.Combine(f.AgentDir, "audit.db")));
+    }
+
+    // ---- 修复轮1：哈希临界区 + RoomNameChecker parity ----
+
+    /// <summary>
+    /// 手动泵送同步上下文（修复轮1）：把 Post 的续延入队而非立即执行，使测试能确定性
+    /// 控制 RefreshAsync 中 await Task.Run(Evaluate) 续延的恢复时机——在评估释闸后、
+    /// 审计分支执行前落地一次"并发编辑"，钉住审计哈希必须来自评估临界区（eval.Hash），
+    /// 而非释闸后重读 session（旧实现会读到编辑后的状态，复现证据失真）。
+    /// </summary>
+    private sealed class ManualPumpContext : SynchronizationContext, IDisposable
+    {
+        private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> _queue = new();
+        private readonly ManualResetEventSlim _posted = new(false);
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            _queue.Enqueue((d, state));
+            _posted.Set();
+        }
+
+        public override void Send(SendOrPostCallback d, object? state) => d(state);
+        public override SynchronizationContext CreateCopy() => this;
+
+        /// <summary>等待至少一个续延入队（评估完成的确定性边界）。</summary>
+        public bool WaitPost(TimeSpan timeout) => _posted.Wait(timeout);
+
+        /// <summary>在调用线程同步执行已入队的续延。</summary>
+        public void Pump()
+        {
+            while (_queue.TryDequeue(out var item)) item.Callback(item.State);
+        }
+
+        public void Dispose() => _posted.Dispose();
+    }
+
+    [Fact]
+    public async Task RefreshAsync_HashComputedInsideSessionGate_ReflectsEvaluatedState()
+    {
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.AgentDir);
+        var audit = new SqliteAuditStore(Path.Combine(f.AgentDir, "audit.db"));
+        var gate = new SemaphoreSlim(1, 1);
+        SynchronizationContext? original = SynchronizationContext.Current;
+        using var pump = new ManualPumpContext();
+        try
+        {
+            var vm = new IssuesViewModel(f.Session, f.ProjectDir, Array.Empty<string>(),
+                sessionGate: gate, audit: audit,
+                identity: new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+
+            // 持闸：refresh 的 Evaluate 确定性阻塞在 sessionGate（镜像既有并发测试持闸先例）。
+            await gate.WaitAsync();
+            Task refresh;
+            SynchronizationContext.SetSynchronizationContext(pump);
+            try
+            {
+                // await Task.Run(Evaluate) 的续延被 pump 入队，不立即执行。
+                refresh = vm.RefreshAsync();
+            }
+            finally
+            {
+                SynchronizationContext.SetSynchronizationContext(original);
+            }
+
+            // 编辑 E1 在持闸期间落地（评估之前）：被评估状态含 E1。
+            f.Session.Doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            string hashAtEval = f.Session.ComputeHash();
+            gate.Release(); // Evaluate 取闸→评估(含 E1)→同闸段取哈希→释闸→续延入队
+
+            // 等待 Evaluate 完成且续延入队（确定性边界，非竞态）。
+            Assert.True(pump.WaitPost(TimeSpan.FromSeconds(15)), "Evaluate 续延未在 15s 内入队");
+
+            // 编辑 E2 在评估释闸后、审计分支执行前落地（模拟并发编辑）：
+            // 审计哈希必须仍为被评估状态 hashAtEval，而非 E2 之后的状态。
+            f.Session.Doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(2, 0, 0) });
+            string hashAfterEdit = f.Session.ComputeHash();
+            Assert.NotEqual(hashAtEval, hashAfterEdit);
+
+            pump.Pump(); // 恢复 RefreshAsync 续延 → 审计写入
+            await refresh.WaitAsync(TimeSpan.FromSeconds(15));
+
+            Assert.Null(vm.ErrorMessage);
+            AuditRecord rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "check-run");
+            // 前后哈希一致且等于被评估状态（修复轮1：hash 在 sessionGate 临界区内计算）。
+            Assert.Equal(hashAtEval, rec.Entry.BeforeHash);
+            Assert.Equal(hashAtEval, rec.Entry.AfterHash);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(original);
+            audit.Dispose();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    /// <summary>仅含 room-name 规则的最小 skill 包（check spec 镜像 interior-244 R-244-5.2.5）。</summary>
+    private static string MakeRoomNameSkillDir()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cadagent-skill-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(dir, "rules"));
+        File.WriteAllText(Path.Combine(dir, "skill.yaml"),
+            "name: room-name-skill\nversion: \"1.0.0\"\ndiscipline: architecture\ndrawingType: any\n");
+        File.WriteAllText(Path.Combine(dir, "rules", "r1.yaml"), """
+            id: R-244-5.2.5
+            source: { standard: "JGJ/T 244-2011", clause: "5.2.5", excerpt: "平面图中应注写房间的名称或编号", verification: source-text }
+            modal: "应"
+            force: recommended
+            severity: medium
+            scope: { discipline: any, drawingType: any }
+            check: { type: room-name, params: {} }
+            suggestion: "注写房间名称或编号"
+            """);
+        return dir;
+    }
+
+    [Fact]
+    public async Task Refresh_RoomNameRule_Evaluated_ParityWithCli()
+    {
+        // 修复轮1：ViewRuleEngine 须注册 RoomNameChecker（逐字镜像 CLI StandardsEngine 注册序）——
+        // 含/不含房名标注夹具镜像 Cli.Tests Interior244PackageTests 与 Data.Tests RoomNameCheckerTests。
+        // 缺 RoomNameChecker 时 room-name 规则被 NoChecker 跳过、无 issue（RED）。
+        string skillDir = MakeRoomNameSkillDir();
+        string noRoom = DxfFixture.CreateTempDxf(doc =>
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) }));
+        string withRoom = DxfFixture.CreateTempDxf(doc =>
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(100, 100, 0), Value = "客厅", Height = 5 }));
+        string projNo = Path.Combine(Path.GetTempPath(), "cadagent-room-no-" + Guid.NewGuid().ToString("N"));
+        string projWith = Path.Combine(Path.GetTempPath(), "cadagent-room-with-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(projNo);
+        Directory.CreateDirectory(projWith);
+        try
+        {
+            // 不含房名标注 → R-244-5.2.5 recommended issue（镜像 CLI Check_NoRoom）。
+            var vmNo = new IssuesViewModel(DrawingSession.Load(noRoom), projNo, new[] { skillDir });
+            await vmNo.RefreshAsync();
+            Assert.Null(vmNo.ErrorMessage);
+            IssueEntry room = Assert.Single(vmNo.Issues, i => i.RuleId == "R-244-5.2.5");
+            Assert.Equal(RuleForce.Recommended, room.Force);
+            Assert.Equal("5.2.5", room.Clause);
+            Assert.Contains("房间的名称或编号", room.Message);
+            Assert.DoesNotContain(vmNo.SkippedReasons,
+                s => s.RuleId == "R-244-5.2.5" && s.Category == SkipCategories.NoChecker);
+
+            // 含房名标注（"客厅"）→ 无房名 issue（镜像 CLI Check_WithRoom_NoRoomNameIssue）。
+            var vmWith = new IssuesViewModel(DrawingSession.Load(withRoom), projWith, new[] { skillDir });
+            await vmWith.RefreshAsync();
+            Assert.Null(vmWith.ErrorMessage);
+            Assert.DoesNotContain(vmWith.Issues, i => i.RuleId == "R-244-5.2.5");
+        }
+        finally
+        {
+            Directory.Delete(projNo, true);
+            Directory.Delete(projWith, true);
+            Directory.Delete(skillDir, true);
+            File.Delete(noRoom);
+            File.Delete(withRoom);
+        }
     }
 }
