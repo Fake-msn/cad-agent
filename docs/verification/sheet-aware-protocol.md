@@ -129,6 +129,8 @@ var result = SemanticScanner.Scan(session, existingOverlay, skillAliases, vision
 1. **代理 🔴 路径无真实标本**：两份标本（原生 DWG 与其工作 DXF）准入均 Green、代理实体 0
    （`outputs/tarch-native/intake.json` unsupported=[]）——🔴 代理拒绝路径仅合成 ProxyEntity
    夹具覆盖（DxfWriter/DxfReader 往返实证），真实天正代理实体标本待补。
+   **⚠️ 本节 Green 判定已被防假 Green 切片推翻（见第 5 节）**：census 通知通道实证四份
+   原生标本均 Yellow（图内 Unknowns=0 是 ACadSharp 对象图盲区，非全解析证据）。
 2. **空布局视口无内容标本**：视口真实 E2E 缺口（见 2.5）。
 3. **视觉管道真实模型 E2E 留 harness**：IRenderSnapshot 实现 + VL reader 未接生产 CLI（见 2.6）。
 4. **纸面编辑 deferred**：布局幅面只读硬闸（编辑工具硬禁；不做纸面→模型逆映射）。
@@ -153,3 +155,104 @@ var result = SemanticScanner.Scan(session, existingOverlay, skillAliases, vision
 - 缺标本/缺模型步骤：显式记录 Skipped/harness-only 及原因，不得以合成结果冒充真实复核。
 - 门禁口径：`dotnet test CadAgent.sln` 顺序两跑连绿（含真机条件测试），
   日志 `outputs/sheet-aware/final-gate1.log` / `final-gate2.log`。
+
+## 5. 天正闸口实战节（防假 Green 切片 T4，2026-11-23 复核）
+
+census（OnNotification）→ 闸口三分 → 六修改消费点拒绝留痕（T1-T3）落地后，用四份**真实原生
+天正标本** + 法院标本实战重跑。证据目录 `outputs/tarch-gate-recombat/`（UTF-8 日志 + audit
+params 摘录 + 哈希前后对照）。**标本只读硬约束**：.dwg 一律复制到证据目录/临时项目再 intake
+（working 副本/sidecar 全落副本侧）；法院目录零副作用（仅读复制，源哈希前后一致
+`61214068…cae277`，目录文件清单不变；其既有 `.working.dxf` 为 2026-11-22 旧会话遗留，
+删除裁定仍归用户，本次不触碰）。
+
+### 5.1 四标本 intake 期望表（skip-gated 测试钉住，本机实跑）
+
+| 标本（outputs 副本） | level/exit | Entities | census 类数 | census 总数 | TCH_WALL | TCH_PIPE | 版本 |
+|---|---|---|---|---|---|---|---|
+| tarch-native/电施（强电）-2#厂房电力+普通照明平面图.dwg | Yellow / 2 | 3792 | 32 | **5985** | **1592** | 30 | AC1027 |
+| tarch-native2/1#配套用房0928.dwg | Yellow / 2 | 3636 | 30 | **3257** | **968** | 4 | AC1018 |
+| tarch-native3/2号厂房1021_t9.dwg | Yellow / 2 | 4464 | 30 | **5707** | **1594** | 30 | AC1018 |
+| tarch-native4/S-1#配套用房_t8.dwg | Yellow / 2 | 1501 | 28 | **3806** | 401 | **994** | AC1018 |
+
+- 四份均图内 Unknowns=0（对象图盲区实证）+ Entities>0 + census 非空 → **Yellow**（非 Red 非假 Green）。
+  无 Entities=0 标本 → 真实 Red 路径仍仅合成夹具覆盖（诚实缺口，待补标本）。
+- 计数与 `outputs/api-probe/tarch-probe-out.txt` 探针交叉一致（s4 TCH_PIPE 994/PIPEFITTING 597/
+  EQUIPMENT 514/WALL 401 逐项吻合）；s3 与 T1 报告 5707/30 类一致。
+  **更正**：切片任务书所记"电施 census 5707/30 类"实为 s3 数字——电施实证 5985/32 类
+  （TCH_WALL 1592 吻合），以本表为准（`census-summary.txt`）。
+- 自动化钉住：`tests/CadAgent.Cli.Tests/UnparsedGateCliTests.cs`
+  `RealNativeTArch_IntakeYellow_CensusMatchesProbe`（SkippableTheory×4）+
+  `RealNativeTArch_RunRefused_ReadOnlyAudit` + `RealNativeTArch_ExportRefused_NoDerivedOutput`
+  （共 7 用例；缺标本显式 Skipped）。TDD 红相以变异核查实证：s3 TCH_WALL 期望临时 1594→1593
+  → FAIL（Expected 1593/Actual 1594，`t4-red-mutation.log`），还原 → 7/7 绿 0 跳过
+  （`t4-green-filtered.log`）。
+
+### 5.2 拒绝留痕核对步骤（电施副本，五消费点实战）
+
+```
+dotnet <cli> intake <dwg副本> --project <p>          # exit 2 Yellow + census stdout
+dotnet <cli> run plan-addline.json --drawing <dwg副本> --project <p>   # exit 1
+dotnet <cli> llm add/use（dummy profile，闸先于 LLM，不触网）
+dotnet <cli> agent --drawing <dwg副本> --intent 画一条线 --yes --project <p>  # exit 1
+printf '画一条线\n:status\n:quit\n' | dotnet <cli> repl --drawing <dwg副本> --yes --project <p>
+dotnet <cli> export --drawing <dwg副本> --out derived.dwg --project <p>  # exit 1，无衍生产物
+dotnet <cli> skill run examples/skills/sample-institute --template lay-line ...  # exit 1
+dotnet <cli> audit verify --project <p>              # 链绿
+```
+
+核对结果（`audit-p1-refusal-params.txt`，audit.db params_json 直读）：
+
+- run/agent/repl/skill 各 1 条 `run-rejected`（Source 分别为 run/agent/repl/skill）+ export 1 条
+  `export-rejected`；params 均 **level=Yellow、unparsedCount=5985**、guidance 含
+  **"图形导出"/"T3"/"只读审查"**（T3 指引文案核对通过）；before_hash==after_hash（拒绝零变更）。
+- **tx-start/tx-commit=0、llm-call=0**（agent/repl 闸先于 LLM；dummy profile 未触网）。
+- repl 拒绝后会话存活：`:status` 正常输出 entities=3792 undo=0（只读命令不受闸）。
+- working 副本与源 .dwg 副本 SHA-256 前后逐字节一致（`refusal-hashes-{before,after}.txt` diff 空）。
+- 四项目 + 法院项目 `audit verify` 全绿（p1=11 条、p2/p3/p4=1 条、p-court=2 条）。
+
+### 5.3 法院标本分类（决定性更正）
+
+`outputs/tarch-court/电气总平面图.dwg`（复制自法院归档目录，只读）intake → **Yellow / exit 2**：
+Entities=3860（全原生对象图）+ **census 1836 对象 / 13 类**（TCH_DIMENSION2 550、TCH_TEXT 523、
+TCH_WALL 482、TCH_OPENING 117、TCH_COLUMN 64、TCH_MULTILEADER 40、TCH_SPACE 31、
+TCH_AXIS_LABEL 12、TCH_DRAWINGNAME 8、TCH_RECTSTAIR 3、TCH_EQUIPMENT 3、TCH_SHEET 2、
+TCH_BLOCK_INSERT 1），AC1027（`intake-court.json` / `court-classification.txt`）。
+
+- **2026-11-22 "法院标本=T3 导出态/Green" 判定作废**：该判定基于对象图（代理 0/3860 全原生），
+  正是 census 切片所修的盲区——通知通道实证文件仍含 1836 个未解析 TCH 原生对象
+  （类表残留之外**确有对象级 UnknownEntity 读取**）。法院标本为**部分解析混合态**，非纯 T3。
+- 拒绝实证：法院副本 run add-line → exit 1 + `run-rejected level=Yellow unparsedCount=1836`
+  + 哈希不变 + 验链绿（`run-court-refused-err.txt` / `audit-court-refusal-params.txt`）。
+
+### 5.4 🟢 闭环重取裁定
+
+**裁定：真实 🟢 重取不可得（法院标本 Yellow）。** 依据 = 5.3 census 1836 未解析对象 →
+闸口全图级拦截修改，🟢 闭环（scan→map→run→verify 的修改链）在法院标本上不可达。
+诚实注记：
+
+- 当前 🟢 证据 = **合成 E2E**（SheetAwareAgentE2ETests 双幅面 fake LLM + LightingBenchmark/
+  LabelE2E 等）；2026-11-22 电施"🟢 闭环"为 census-blind 盲子集证据，已作废（spec §12 在案）。
+- **真实 🟢 需用户 T3 转换动作**：在天正中【文件布图→图形导出】保存 T3 后重新 intake
+  （期望 census 空 → Green），再走 scan→人工 map 确认→幅面闸口操作→verify。
+  本次**未执行 map、未伪造任何人工确认**（Yellow 标本上 map 无意义且修改被闸）。
+- 四份原生标本均 Yellow → 同样不可作真实 🟢 载体；🟢 真实重取统一待用户 T3 导出件。
+
+### 5.5 残余缺口 R9（实战新发现，留 T5/用户裁定，本切片不修）
+
+**陈旧 working 副本 + 新项目 = 假 Green 旁路**：census sidecar 以项目键控，working DXF 以源
+键控且丢失 TCH 通知——防假 Green 切片**之前**物化的 working（无 sidecar）在新项目 intake
+时走 load-if-exists 分支，census 不可恢复 → Green 放行修改。复现（`bypass-demo/`，全程副本）：
+电施 .dwg + 其旧 working 复制到演示目录 → 新项目 intake **exit 0 Green**（unparsed 字段省略）
+→ run add-line **exit 0 tx-commit**（本应 Yellow 拒绝）。对照：同一 .dwg 无 working 首载 →
+Yellow 5985。影响面：outputs/tarch-native、tarch-native2 与法院目录的既有旧 working 均属此态
+（法院目录旧 working 删除裁定归用户）。候选修复方向：sidecar 随 working 源旁持久化
+（源哈希键控）或 sidecar 缺失时强制 DWG 通知重读——留 T5 裁定，不在 T4 范围。
+
+### 5.6 证据清单（outputs/tarch-gate-recombat/）
+
+`build-cli.log`；`intake-s{1..4}.json` + `census-summary.txt`；`t4-red-mutation.log` /
+`t4-green-filtered.log`；`plan-addline.json`；`{run,agent,repl,export,skill}-refused*.{json,txt}`；
+`refusal-hashes-{before,after}.txt`；`audit-p1-refusal-params.txt`；`verify-p{1..4}.json`；
+`intake-court.json` / `court-classification.txt` / `run-court-refused*` /
+`audit-court-refusal-params.txt` / `verify-court.json`；`bypass-demo/`（R9 复现）。
+法院副本与项目：`outputs/tarch-court/`。
