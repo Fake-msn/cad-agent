@@ -492,6 +492,8 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - 修复后全套件 **566 测试连绿两次含 5 真机**（首跑单败为瞬态文件锁竞争，复跑稳定）。
 - **ZWCAD"套件损坏"弹窗核查（用户报告）**：崩溃重启机制为计划内（spec §9 Restart+重试），弹窗本身非预期——根因 Dispose/Restart 带开文档 Quit 致 ZWCAD 判异常终止；已修先 Close(false) 再 Quit（dc031fa→acb99f6）。
 
+- **AutoCAD 适配器切片交付（2026-11-22，feat/cad-agent-autocad-adapter）**：AcadRuntime 全接口 dynamic COM 实现（CompatibleUnverified——开发机孤儿 ProgID 注册无 LocalServer32，真机验证 deferred 至工作环境，协议 docs/verification/autocad-adapter-protocol.md）。PR#17 CUIX 守卫机制参数化为 Core.Cad.VendorGuard+VendorProfile（厂商无关，ZwcadRuntime 行为保持重构）；CuixLocator 双厂商 CUIX 定位。CLI CADAGENT_RUNTIME 选择运行时（默认 zwcad；未知值硬错误不静默降级）。Blocks.Add 签名序经 VendorProfile.BlocksAddNameFirst 参数化（AutoCAD 文档序 Name 先，待真机探针核定——ZWCAD 实测序相反的前车之鉴）。GetInfo 守卫超时→Available=false→DXF 降级（安全侧，忙≠不可用语义细化 deferred）。accoreconsole 真无头路径 deferred（暴露面更小，守卫机制可复用）。矩阵 Verified 升级须工作环境真机证据（spec §11 硬约束）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
