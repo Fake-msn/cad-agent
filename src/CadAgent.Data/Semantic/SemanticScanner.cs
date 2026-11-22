@@ -11,10 +11,11 @@ public sealed record ScanResult(SemanticOverlay Overlay, IReadOnlyList<Ambiguous
 
 /// <summary>
 /// Single entry point composing all deterministic reading signals:
-/// LayerInference (human mapping first) → WallPair → Axis → DoorArc, then the
-/// ambiguous-layer list. Passing an existing overlay preserves human mappings
-/// and prior annotations for living entities; detectors never downgrade
-/// higher-confidence entries. Annotations whose target handle no longer exists
+/// BlockAttributeSeeder (T3 NativeObject) → LayerInference (human mapping first)
+/// → WallPair → Axis → DoorArc, then the ambiguous-layer list. Passing an
+/// existing overlay preserves human mappings and prior annotations for living
+/// entities; detectors never downgrade higher-confidence entries. Annotations
+/// whose target handle no longer exists
 /// in the document are pruned (stale semantics must not satisfy the gate).
 /// </summary>
 public static class SemanticScanner
@@ -32,6 +33,9 @@ public static class SemanticScanner
 
         // T2：单次块遍历供全部信号共用（含 bound xref 嵌套实体；世界坐标+后缀句柄+归一层名）
         var walked = BlockWalker.Walk(session.Doc, session.Sheets).ToList();
+        // T3：块属性种子先于图层推断（NativeObject 0.95 确定性原生数据优先；
+        // Upsert 键=handle+provenance，与 LayerInference 0.8 共存，闸口 Any(conf≥min) 取高置信）
+        BlockAttributeSeeder.SeedWalked(walked, overlay);
         LayerInference.AnnotateWalked(walked, overlay, skillAliases);
         WallPairDetector.DetectWalked(walked, overlay);
         AxisDetector.DetectWalked(walked, overlay);

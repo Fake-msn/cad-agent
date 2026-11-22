@@ -109,7 +109,9 @@ public static class LayerInference
             {
                 // Mirror Task 1 ApplyMappingToAnnotations: a human mapping override
                 // clears any stale inference annotation for this handle first.
-                overlay.Annotations.RemoveAll(x => x.TargetHandle == handle);
+                // T3：NativeObject（块属性原生数据）除外——不得被图层推断覆盖删除，
+                // 与 HumanConfirmed 共存（闸口 Any(conf≥min) 取高置信，共存无害）。
+                overlay.Annotations.RemoveAll(x => x.TargetHandle == handle && x.Provenance != Provenance.NativeObject);
                 overlay.UpsertAnnotation(new SemanticAnnotation(
                     handle, mapping.Class, Provenance.HumanConfirmed, 1.0, $"人工确认图层映射: {layer}"));
                 continue;

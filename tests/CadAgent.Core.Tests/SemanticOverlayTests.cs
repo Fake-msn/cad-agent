@@ -65,6 +65,40 @@ public class SemanticOverlayTests : IDisposable
     }
 
     [Fact]
+    public void Load_LegacyJson_WithoutSheetId_NullSheetId()
+    {
+        // R6（T4 前移）：旧 overlay JSON 无 SheetId 字段 → 加载=null（legacy 无幅面归属），不抛
+        File.WriteAllText(_path, """
+        {
+          "Annotations": [
+            { "TargetHandle": "h1", "Class": "Wall", "Provenance": "LayerInference", "Confidence": 0.8, "Evidence": "图层约定: WALL" }
+          ],
+          "Mappings": [
+            { "LayerName": "W-新墙", "Class": "Wall", "ConfirmedBy": "u", "Ts": "2026-01-01T00:00:00+00:00" }
+          ],
+          "Version": 3
+        }
+        """);
+        var o = SemanticOverlay.Load(_path);
+        Assert.Equal(3, o.Version);
+        Assert.Null(o.Annotations.Single().SheetId);
+        Assert.Null(o.Mappings.Single().SheetId);
+    }
+
+    [Fact]
+    public void Save_RoundTrips_SheetId()
+    {
+        // R6：新标注/映射携带 SheetId → 落盘读回保持
+        var o = new SemanticOverlay();
+        o.UpsertAnnotation(new SemanticAnnotation("h1", SemanticClass.Lighting, Provenance.NativeObject, 0.95, "块属性 A=深照型灯 (块 E)", "S1"));
+        o.ConfirmMapping(new LayerMapping("WALL", SemanticClass.Wall, "u", DateTimeOffset.UnixEpoch, "S2"));
+        o.Save(_path);
+        var loaded = SemanticOverlay.Load(_path);
+        Assert.Equal("S1", loaded.Annotations.Single().SheetId);
+        Assert.Equal("S2", loaded.Mappings.Single().SheetId);
+    }
+
+    [Fact]
     public void Save_Atomic_NoTmpLeftAfterSuccess_AndRoundTrips()
     {
         var o = new SemanticOverlay();
