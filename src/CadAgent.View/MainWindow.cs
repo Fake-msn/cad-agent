@@ -207,7 +207,10 @@ public sealed class MainWindow : Window
         IAuditStore auditStore;
         if (!File.Exists(auditDbPath))
         {
-            auditStore = new EmptyAuditStore();
+            // Fix Round 1：创建前 ReadAll 空库语义等价 EmptyAuditStore；与 writeAudit
+            // 同实例 → 首写后 live-rebuild 可见（首 tx 无需重开窗口）。打开窗口不建库
+            // 约定不变——Ensure 仅首 Append 触发。
+            auditStore = new LazyWriteAuditStore(auditDbPath);
         }
         else
         {
@@ -374,7 +377,9 @@ public sealed class MainWindow : Window
 
         // T8：写审计存储——audit.db 存在 → 复用 T6 存储；缺失 → 惰性建库占位
         // （首次 Append 才创建 .cadagent/audit.db；打开窗口不建库，沿用 T6 约定）。
-        IAuditStore writeAudit = auditStore is SqliteAuditStore
+        // Fix Round 1：无库分支 auditStore 已是 LazyWriteAuditStore → 复用同实例
+        // （读/写同源，首 tx 后 Audit.Rebuild 即可见）；损坏降级分支仍另建惰性占位。
+        IAuditStore writeAudit = auditStore is SqliteAuditStore or LazyWriteAuditStore
             ? auditStore
             : new LazyWriteAuditStore(auditDbPath);
 

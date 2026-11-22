@@ -414,4 +414,59 @@ public class MainWindowHeadlessTests
             f.Dispose();
         }
     }
+
+    [AvaloniaFact]
+    public async Task NoAuditDb_FirstEdit_AuditTimeline_LiveRebuilds()
+    {
+        // Fix Round 1 钉住（controller 核实缺口）：无 audit.db 临时项目开窗 →
+        // 读/写审计必须共享同一 LazyWriteAuditStore 实例——首 tx 写入后 Rebuild
+        // 立即可见（live），无需重开窗口。夹具镜像 EditPanelHeadlessTests.Fixture
+        // （.cadagent 目录存在但无 audit.db；开窗不建库约定不变）。
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-t5fix-ui-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(projectDir, ".cadagent"));
+        string dxfPath = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+        });
+        string auditDbPath = Path.Combine(projectDir, ".cadagent", "audit.db");
+        MainWindow? window = null;
+        try
+        {
+            var vm = new MainViewModel(dxfPath, projectDir);
+            Assert.Null(vm.ErrorMessage);
+            window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+            window.Show();
+            Dispatcher.UIThread.RunJobs();
+            Assert.False(File.Exists(auditDbPath)); // 打开窗口不建库（Ensure 仅首 Append 触发）
+            Assert.Equal(0, window.AuditList!.ItemCount); // 创建前空库语义（等价 EmptyAuditStore）
+
+            var tcs = new TaskCompletionSource();
+            void Handler() => tcs.TrySetResult();
+            window.Edit!.EditCompleted += Handler;
+            EditResult result;
+            try
+            {
+                result = await window.Edit.DrawLineAsync(0, 80, 100, 80);
+                await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally { window.Edit.EditCompleted -= Handler; }
+            Assert.True(result.Ok);
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.True(File.Exists(auditDbPath)); // 首 Append 惰性建库
+
+            // 首 tx live：Rebuild 重读同一实例 → 时间线含新 tx（无需重开窗口）。
+            Assert.Equal(1, window.AuditList.ItemCount);
+            Assert.Same(window.Audit!.Transactions, window.AuditList.ItemsSource);
+            Assert.Contains(window.Audit.Transactions, g => g.TxId == result.TxId);
+        }
+        finally
+        {
+            window?.Close();
+            // Microsoft.Data.Sqlite 连接池在 Dispose 后仍持有文件句柄，Windows 下须先清池才能删库
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(dxfPath);
+            if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
+        }
+    }
 }
