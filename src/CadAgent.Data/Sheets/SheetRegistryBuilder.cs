@@ -33,7 +33,9 @@ public static class SheetRegistryBuilder
         foreach (var f in frames.OrderBy(f => f.InsertPoint.Y).ThenBy(f => f.InsertPoint.X))
         {
             var bounds = FrameBounds(f);
-            var attrs = f.Attributes.ToDictionary(a => a.Tag, a => a.Value);
+            // 同 Tag 多属性（真实图纸不罕见）→ 后值覆盖，诚实降级而非抛 ArgumentException
+            var attrs = new Dictionary<string, string>();
+            foreach (var a in f.Attributes) attrs[a.Tag] = a.Value;
             // 幅面名：框内文字优先，其次框上缘近邻（y 距框顶 <5% 框高、x 在框内）
             string? name = nameTexts.Where(t => Inside(bounds, t.InsertPoint.X, t.InsertPoint.Y))
                 .Select(t => t.Value).FirstOrDefault()

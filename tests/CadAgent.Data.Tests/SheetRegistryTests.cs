@@ -67,6 +67,32 @@ public class SheetRegistryTests
     }
 
     [Fact]
+    public void Build_DuplicateAttributeTag_DoesNotThrow_LastValueWins()
+    {
+        // 真实图纸同 Tag 多属性不罕见：Build 须诚实降级（后值覆盖）而非抛 ArgumentException
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        var ins = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        ins.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+        ins.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01b" });
+        ins.Attributes.Add(new AttributeEntity { Tag = "比例", Value = "1:100" });
+        doc.Entities.Add(ins);
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 30, Layer = new Layer("图框") });
+
+        var sheets = SheetRegistryBuilder.Build(doc); // 不抛
+        Assert.Single(sheets);
+        Assert.Equal("Z-E01b", sheets[0].Number); // 后值覆盖
+        Assert.Equal("Z-E01b", sheets[0].TitleAttributes["图号"]);
+        Assert.Equal("1:100", sheets[0].Scale);
+        Assert.Equal("一层电力平面图", sheets[0].Name);
+    }
+
+    [Fact]
     public void Session_Sheets_InvalidatedOnRestoreState()
     {
         // 自审补强：Sheets 懒加载缓存须在 RestoreState 整体替换文档后失效重建（undo 场景）
