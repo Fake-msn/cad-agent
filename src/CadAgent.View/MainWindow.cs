@@ -155,11 +155,8 @@ public sealed class MainWindow : Window
         panel.Children.Add(showAll);
         panel.Children.Add(layerList); // LastChildFill：列表占满面板其余区域
 
-        // T5：右栏问题清单（in-process check；T10：--skill 目录经 MainViewModel 接线）。
-        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, _skillDirs, Canvas, sessionGate);
-        Issues = issues;
-        issues.IssuesChanged += UpdateIssuesPanel;
-
+        // T5：右栏问题清单 UI（VM 构造移至 writeAudit/signoffIdentity 声明之后——
+        // 视图闭环 T6：Issues 刷新留 check-run 审计需要两者）。
         var issuesHeader = new TextBlock
         {
             Text = "Issues",
@@ -382,6 +379,14 @@ public sealed class MainWindow : Window
         IAuditStore writeAudit = auditStore is SqliteAuditStore or LazyWriteAuditStore
             ? auditStore
             : new LazyWriteAuditStore(auditDbPath);
+
+        // T5：右栏问题清单 VM（in-process check；T10：--skill 目录经 MainViewModel 接线）。
+        // 视图闭环 T6：刷新留 check-run 审计（parity CLI check）——写审计复用 T8 存储，
+        // 身份与签认同源；构造位于 writeAudit/signoffIdentity 声明之后。
+        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, _skillDirs, Canvas, sessionGate,
+            audit: writeAudit, identity: signoffIdentity);
+        Issues = issues;
+        issues.IssuesChanged += UpdateIssuesPanel;
 
         // T9：手动编辑视图模型——所有编辑经 StepEngine（无旁路）；写审计复用 T8
         // 存储；身份/角色与签认同源；语义闸口由 VM 按 overlay 存在性注入（镜像 CLI）。

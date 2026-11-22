@@ -1,7 +1,8 @@
+using System.Text.Json;
 using CadAgent.Core;
 using CadAgent.Data;
-using CadAgent.Data.Checks;
 using CadAgent.Data.Rules;
+using CadAgent.View.Services;
 
 namespace CadAgent.View.ViewModels;
 
@@ -65,6 +66,8 @@ public sealed class IssueEntry
 /// SemanticOverlay.Load(.cadagent/semantic.json，存在时) → RuleEngine.Evaluate
 /// （checkers 全注册，镜像 CLI StandardsEngine，含重复 CheckType 装配守卫）。
 /// 只读不改图纸；加载/评估异常一律降级为 ErrorMessage（不崩 UI）。
+/// 视图闭环 T6：注入 audit+identity 时成功评估留 check-run 审计（parity CLI check，
+/// Source="view-check"，前后哈希一致）；审计写入失败=检查失败（spec §9 无审计旁路）。
 /// RefreshAsync 后台评估、回到调用方上下文发布结果并触发 <see cref="IssuesChanged"/>。
 /// 定位：LocateIssue → canvas SelectHandles(Targets) 高亮 + CenterOn(Targets) 居中；
 /// 未接 canvas 或句柄无命中图元（如图层句柄）→ 视图不动。
@@ -76,15 +79,23 @@ public sealed class IssuesViewModel
     private readonly IReadOnlyList<string> _skillDirs;
     private readonly CanvasViewModel? _canvas;
     private readonly SemaphoreSlim? _sessionGate;
+    private readonly IAuditStore? _audit;
+    private readonly IIdentityProvider? _identity;
+
+    /// <summary>in-flight 硬闸（视图闭环 T6）：并发刷新第二次立即返回——结构性守卫，不依赖按钮 IsEnabled UI 态。</summary>
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     public IssuesViewModel(DrawingSession session, string projectDir,
-        IReadOnlyList<string> skillDirs, CanvasViewModel? canvas = null, SemaphoreSlim? sessionGate = null)
+        IReadOnlyList<string> skillDirs, CanvasViewModel? canvas = null, SemaphoreSlim? sessionGate = null,
+        IAuditStore? audit = null, IIdentityProvider? identity = null)
     {
         _session = session;
         _projectDir = projectDir;
         _skillDirs = skillDirs;
         _canvas = canvas;
         _sessionGate = sessionGate;
+        _audit = audit;
+        _identity = identity;
     }
 
     /// <summary>最近一次评估的问题列表（初始为空；失败时清空）。</summary>
@@ -109,27 +120,71 @@ public sealed class IssuesViewModel
     /// 重新评估：后台执行加载+评估（不阻塞 UI 线程），结果回到调用方上下文发布。
     /// 任何异常（包非法/Id 冲突/裁定或 overlay 损坏/图纸访问失败）→ ErrorMessage，
     /// 列表清空；下次成功刷新清除错误。
+    /// in-flight 硬闸（视图闭环 T6）：并发刷新第二次 WaitAsync(0) 失败立即返回。
+    /// 注入 audit+identity 时成功评估后留 check-run 审计（parity CLI check）；
+    /// 审计写入失败=检查失败（spec §9 无审计旁路，镜像 CLI check exit 1 语义）。
     /// </summary>
     public async Task RefreshAsync()
     {
+        // in-flight 硬闸（结构性，不依赖按钮 IsEnabled UI 态）：并发刷新第二次立即返回。
+        if (!await _refreshGate.WaitAsync(0)) return;
         try
         {
-            CheckSummary summary = await Task.Run(Evaluate);
-            Issues = summary.Issues.Select(i => new IssueEntry(i)).ToList();
-            MandatoryCount = Issues.Count(i => i.Force == RuleForce.Mandatory);
-            RulesSkipped = summary.RulesSkipped;
-            SkippedReasons = summary.StructuredSkips ?? Array.Empty<SkipReason>();
-            ErrorMessage = null;
+            try
+            {
+                EvalResult eval = await Task.Run(Evaluate);
+                CheckSummary summary = eval.Summary;
+                Issues = summary.Issues.Select(i => new IssueEntry(i)).ToList();
+                MandatoryCount = Issues.Count(i => i.Force == RuleForce.Mandatory);
+                RulesSkipped = summary.RulesSkipped;
+                SkippedReasons = summary.StructuredSkips ?? Array.Empty<SkipReason>();
+                ErrorMessage = null;
+
+                if (_audit is not null && _identity is not null)
+                {
+                    try
+                    {
+                        string hash = _session.ComputeHash(); // 只读检查前后哈希一致（镜像 CLI check）
+                        var op = _identity.Current;
+                        // sessionId 用 "view" 常量——IssuesVM 无 CLI session 注入（口径注记）。
+                        // paramsJson 字段逐字镜像 CLI check（skippedReasons 字段名同
+                        // CommandRouter.StructuredSkipAuditArray：[{category, ruleId, message}]）。
+                        _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                            "view", "view-check", "check-run", _session.SourcePath,
+                            JsonSerializer.Serialize(new
+                            {
+                                rulesRun = eval.Summary.RulesRun,
+                                rulesSkipped = eval.Summary.RulesSkipped,
+                                issueCount = eval.Summary.Issues.Count,
+                                mandatoryViolations = MandatoryCount,
+                                skippedReasons = eval.Summary.StructuredSkips?.Select(s => new { category = s.Category, ruleId = s.RuleId, message = s.Message }).ToArray() ?? Array.Empty<object>(),
+                                overlayPresent = eval.OverlayPresent,
+                                adjudicationHash = eval.AdjudicationHash,
+                                rulePackVersion = eval.RulePackVersion
+                            }),
+                            hash, hash, "", ""));
+                    }
+                    catch (Exception ex)
+                    {
+                        // 审计先行（spec §9）：检查审计写入失败=检查失败（镜像 CLI check exit 1 语义），
+                        // 清空列表+ErrorMessage；不崩 UI。
+                        Issues = Array.Empty<IssueEntry>();
+                        MandatoryCount = 0;
+                        ErrorMessage = $"检查审计写入失败: {ex.Message}";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Issues = Array.Empty<IssueEntry>();
+                MandatoryCount = 0;
+                RulesSkipped = 0;
+                SkippedReasons = Array.Empty<SkipReason>();
+                ErrorMessage = ex.Message;
+            }
+            IssuesChanged?.Invoke();
         }
-        catch (Exception ex)
-        {
-            Issues = Array.Empty<IssueEntry>();
-            MandatoryCount = 0;
-            RulesSkipped = 0;
-            SkippedReasons = Array.Empty<SkipReason>();
-            ErrorMessage = ex.Message;
-        }
-        IssuesChanged?.Invoke();
+        finally { _refreshGate.Release(); }
     }
 
     /// <summary>点击问题 → 画布高亮 Targets 句柄并居中（保持缩放）。未接 canvas → 无操作。</summary>
@@ -140,7 +195,11 @@ public sealed class IssuesViewModel
         _canvas.CenterOn(issue.Targets);
     }
 
-    private CheckSummary Evaluate()
+    /// <summary>评估结果 + 复现证据（视图闭环 T6）：审计 paramsJson 所需的
+    /// rulePackVersion/adjudicationHash/overlayPresent 随汇总一并带回。</summary>
+    private sealed record EvalResult(CheckSummary Summary, string RulePackVersion, string AdjudicationHash, bool OverlayPresent);
+
+    private EvalResult Evaluate()
     {
         // 与 CLI LoadRuleSet 同一路径：包加载 + builtin 合成（Id 冲突抛 InvalidSkillException）。
         var packages = _skillDirs.Select(SkillLoader.LoadDirectory).ToList();
@@ -153,28 +212,11 @@ public sealed class IssuesViewModel
 
         // 会话闸（T9，T5/T6 承接）：评估读 session 与 EditViewModel 编辑/撤销互斥。
         _sessionGate?.Wait();
-        try { return CreateEngine().Evaluate(ruleSet.AllRules, _session, overlay, adjudications); }
-        finally { _sessionGate?.Release(); }
-    }
-
-    /// <summary>
-    /// 规范引擎装配——逐字镜像 CLI CommandRouter.StandardsEngine 的注册列表
-    /// （builtin 5 类 + 电气/模型 5 类）与重复 CheckType 装配守卫，
-    /// 防止 RuleEngine 字典 last-wins 静默丢失检查器。
-    /// </summary>
-    private static RuleEngine CreateEngine()
-    {
-        IRuleChecker[] checkers =
+        try
         {
-            new TextHeightChecker(), new LineweightChecker(), new AxisLetterChecker(),
-            new ElevationChecker(), new LayerNameChecker(),
-            new TextHeightMinChecker(), new CableFormatChecker(), new SlotCodeChecker(),
-            new LuminaireFormatChecker(), new FileNamingChecker()
-        };
-        var duplicate = checkers.GroupBy(c => c.CheckType, StringComparer.Ordinal)
-            .FirstOrDefault(g => g.Count() > 1);
-        if (duplicate is not null)
-            throw new InvalidOperationException($"重复注册检查器 CheckType: {duplicate.Key}");
-        return new RuleEngine(checkers);
+            CheckSummary summary = ViewRuleEngine.Create().Evaluate(ruleSet.AllRules, _session, overlay, adjudications);
+            return new EvalResult(summary, ruleSet.RulePackVersion, adjudications.Fingerprint(), overlay.Annotations.Count > 0);
+        }
+        finally { _sessionGate?.Release(); }
     }
 }

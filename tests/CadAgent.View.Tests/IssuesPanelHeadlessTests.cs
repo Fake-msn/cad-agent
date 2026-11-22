@@ -67,6 +67,9 @@ public class IssuesPanelHeadlessTests
     private static void Cleanup(MainWindow window, Fixture f)
     {
         window.Close();
+        // 视图闭环 T6：刷新留 check-run 审计 → 可能已惰性创建 audit.db；
+        // Microsoft.Data.Sqlite 连接池持有文件句柄，Windows 下删临时目录前须清池。
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         f.Dispose();
     }
 

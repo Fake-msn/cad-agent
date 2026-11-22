@@ -1,7 +1,9 @@
+using System.Text.Json;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using CadAgent.Core;
 using CadAgent.Data;
+using CadAgent.Data.Rules;
 using CadAgent.Data.Tests;
 using CadAgent.View.Rendering;
 using CadAgent.View.ViewModels;
@@ -353,5 +355,153 @@ public class IssuesViewModelTests
         IssuesViewModel vm = f.MakeVm();
         await vm.RefreshAsync();
         vm.LocateIssue(vm.Issues[0]); // no canvas wired — must not throw
+    }
+
+    // ---- 视图闭环 T6：check-run 审计 parity + in-flight 硬闸 + 审计失败降级 ----
+
+    private sealed class FixedIdentity : IIdentityProvider
+    {
+        public FixedIdentity(OperatorIdentity id) => Current = id;
+        public OperatorIdentity Current { get; }
+    }
+
+    /// <summary>审计写入必抛的 fake（模拟 audit.db 损坏/磁盘故障）。</summary>
+    private sealed class ThrowingAuditStore : IAuditStore
+    {
+        public AuditRecord Append(AuditEntry e) => throw new InvalidOperationException("模拟审计库写入失败");
+        public IReadOnlyList<AuditRecord> ReadAll() => Array.Empty<AuditRecord>();
+        public bool VerifyChain(out string error) { error = ""; return true; }
+    }
+
+    [Fact]
+    public async Task RefreshAsync_WritesCheckRunAudit_MirroringCliShape()
+    {
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.AgentDir);
+        var audit = new SqliteAuditStore(Path.Combine(f.AgentDir, "audit.db"));
+        try
+        {
+            var vm = new IssuesViewModel(f.Session, f.ProjectDir, Array.Empty<string>(),
+                audit: audit, identity: new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+            await vm.RefreshAsync();
+            Assert.Null(vm.ErrorMessage);
+            Assert.Equal(2, vm.Issues.Count);
+
+            // 审计形状逐字镜像 CLI check（CommandRouter）：Source/Kind/target/params 字段。
+            AuditRecord rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "check-run");
+            AuditEntry e = rec.Entry;
+            Assert.Equal("view-check", e.Source);
+            Assert.Equal("view", e.Session); // IssuesVM 无 CLI session 注入 → "view" 常量口径
+            Assert.Equal("tester", e.Operator);
+            Assert.Equal("Draw", e.Role);
+            Assert.Equal(f.Session.SourcePath, e.Target);
+            // 只读检查前后哈希一致（镜像 CLI check）。
+            Assert.Equal(e.BeforeHash, e.AfterHash);
+            Assert.Equal(f.Session.ComputeHash(), e.AfterHash);
+            Assert.Equal("", e.SnapshotRef);
+            Assert.Equal("", e.PlanRef);
+
+            using var doc = JsonDocument.Parse(e.ParamsJson);
+            JsonElement p = doc.RootElement;
+            Assert.True(p.GetProperty("rulesRun").GetInt32() > 0);
+            Assert.Equal(3, p.GetProperty("rulesSkipped").GetInt32());
+            Assert.Equal(2, p.GetProperty("issueCount").GetInt32());
+            Assert.Equal(0, p.GetProperty("mandatoryViolations").GetInt32());
+            Assert.False(p.GetProperty("overlayPresent").GetBoolean());
+            // skippedReasons 字段名逐字镜像 CLI StructuredSkipAuditArray：[{category, ruleId, message}]。
+            JsonElement skips = p.GetProperty("skippedReasons");
+            Assert.Equal(3, skips.GetArrayLength());
+            Assert.All(skips.EnumerateArray(), s =>
+            {
+                Assert.Equal(SkipCategories.NotEvaluable, s.GetProperty("category").GetString());
+                Assert.False(string.IsNullOrEmpty(s.GetProperty("ruleId").GetString()));
+                Assert.False(string.IsNullOrEmpty(s.GetProperty("message").GetString()));
+            });
+            // 复现证据字段与 CLI 同口径：裁定集 Fingerprint + SkillSet.RulePackVersion。
+            var expectedAdj = AdjudicationSet.Load(Path.Combine(f.AgentDir, "adjudications.json"));
+            Assert.Equal(expectedAdj.Fingerprint(), p.GetProperty("adjudicationHash").GetString());
+            var expectedRuleSet = SkillSet.Compose(BuiltinRules.Load(), Array.Empty<SkillPackage>());
+            Assert.Equal(expectedRuleSet.RulePackVersion, p.GetProperty("rulePackVersion").GetString());
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            audit.Dispose();
+            // Microsoft.Data.Sqlite 连接池持有文件句柄，Windows 下删临时目录前须清池。
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    [Fact]
+    public async Task RefreshAsync_ConcurrentCalls_SecondReturnsImmediately()
+    {
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.AgentDir);
+        var audit = new SqliteAuditStore(Path.Combine(f.AgentDir, "audit.db"));
+        var gate = new SemaphoreSlim(1, 1);
+        try
+        {
+            var vm = new IssuesViewModel(f.Session, f.ProjectDir, Array.Empty<string>(),
+                sessionGate: gate, audit: audit,
+                identity: new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+            int raised = 0;
+            vm.IssuesChanged += () => raised++;
+
+            // 注入会话闸并持闸（镜像 MainWindowHeadlessTests 持闸先例）：
+            // refresh1 确定性阻塞在 Evaluate 的 sessionGate 上。
+            await gate.WaitAsync();
+            Task refresh1 = vm.RefreshAsync();
+            Task refresh2 = Task.CompletedTask;
+            try
+            {
+                refresh2 = vm.RefreshAsync();
+                // in-flight 硬闸结构性（WaitAsync(0)）：第二次立即返回，不依赖按钮 IsEnabled。
+                await refresh2.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.False(refresh1.IsCompleted);
+                Assert.Equal(0, raised); // 第二次未评估、未发布
+            }
+            finally
+            {
+                gate.Release();
+                await Task.WhenAll(refresh1, refresh2).WaitAsync(TimeSpan.FromSeconds(15));
+            }
+
+            Assert.Null(vm.ErrorMessage);
+            Assert.Equal(1, raised);
+            // 审计 check-run 恰 1 条（第二次未评估）。
+            Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "check-run");
+        }
+        finally
+        {
+            audit.Dispose();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    [Fact]
+    public async Task RefreshAsync_AuditWriteFails_ErrorMessageNoCrash()
+    {
+        using var f = new Fixture();
+        var vm = new IssuesViewModel(f.Session, f.ProjectDir, Array.Empty<string>(),
+            audit: new ThrowingAuditStore(),
+            identity: new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+        await vm.RefreshAsync(); // 不抛（不崩 UI）
+        // 审计先行（spec §9）：检查审计写入失败=检查失败（镜像 CLI check exit 1 语义）。
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.Contains("审计", vm.ErrorMessage);
+        Assert.Empty(vm.Issues);
+        Assert.Equal(0, vm.MandatoryCount);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_NoAuditInjected_BehaviorUnchanged()
+    {
+        using var f = new Fixture();
+        IssuesViewModel vm = f.MakeVm(); // 不传 audit（既有测试口径）
+        await vm.RefreshAsync();
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(2, vm.Issues.Count);
+        // 无审计注入 → 不建库、不留痕，评估照常。
+        Assert.False(File.Exists(Path.Combine(f.AgentDir, "audit.db")));
     }
 }
