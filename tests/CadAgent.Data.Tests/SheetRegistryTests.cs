@@ -1,5 +1,6 @@
 using ACadSharp;
 using ACadSharp.Entities;
+using ACadSharp.Objects;
 using ACadSharp.Tables;
 using CadAgent.Core;
 using CadAgent.Data;
@@ -249,5 +250,166 @@ public class SheetRegistryTests
         Assert.Contains(sheets, s => s.Name == "四层普通照明平面图");
         Assert.All(sheets, s => Assert.Equal("2026.09", s.Date));
         Assert.All(sheets, s => Assert.Equal("01", s.TitleAttributes["版本号"]));
+    }
+
+    // ===== T5：布局视口幅面登记 =====
+
+    /// <summary>模型线 + 纸空间布局（withViewport=true 挂真实视口；false 仅空布局）。
+    /// 探针核定：new Layout(name) 自动建关联纸空间块；AddViewport 自动附加纸边界视口
+    /// （Id=1 RepresentsPaper=true ViewHeight=0）+ 真实视口（Id=2 RepresentsPaper=false）。</summary>
+    private static CadDocument LayoutDoc(bool withViewport)
+    {
+        var doc = new CadDocument();
+        doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        var layout = new Layout("布局1");
+        doc.Layouts.Add(layout);
+        if (withViewport)
+        {
+            layout.AddViewport(new Viewport
+            {
+                Center = new XYZ(500, 350, 0),
+                Width = 1000,
+                Height = 700,
+                ViewTarget = new XYZ(0, 0, 0),
+                ViewHeight = 200,
+            });
+        }
+        return doc;
+    }
+
+    [Fact]
+    public void Build_PaperLayoutWithViewport_RegistersLayoutSheet()
+    {
+        var doc = LayoutDoc(withViewport: true);
+        var sheets = SheetRegistryBuilder.Build(doc);
+        // 模型幅面在前（无图框→S0），布局幅面在后；纸边界视口（RepresentsPaper）不登记
+        Assert.Equal(2, sheets.Count);
+        Assert.Equal("S0", sheets[0].SheetId);
+        Assert.Null(sheets[0].LayoutName);
+        var layoutSheet = sheets[1];
+        Assert.Equal("布局1", layoutSheet.LayoutName);
+        Assert.Equal("布局1", layoutSheet.Name);
+        Assert.StartsWith("L", layoutSheet.SheetId);
+        // FrameBounds=视口纸面 bounds：Center(500,350) ± Width/2(500), Height/2(350)
+        Assert.Equal(0, layoutSheet.FrameBounds.MinX, 6);
+        Assert.Equal(0, layoutSheet.FrameBounds.MinY, 6);
+        Assert.Equal(1000, layoutSheet.FrameBounds.MaxX, 6);
+        Assert.Equal(700, layoutSheet.FrameBounds.MaxY, 6);
+        // 模型区域记录于 TitleAttributes
+        Assert.Equal("0,0", layoutSheet.TitleAttributes["viewTarget"]);
+        Assert.Equal("200", layoutSheet.TitleAttributes["viewHeight"]);
+        var vp = doc.Layouts.First(l => l.Name == "布局1").AssociatedBlock!.Entities
+            .OfType<Viewport>().First(v => !v.RepresentsPaper);
+        Assert.Equal(vp.Handle.ToString(), layoutSheet.TitleAttributes["viewportHandle"]);
+    }
+
+    [Fact]
+    public void Build_EmptyPaperLayout_NotRegistered_Honest()
+    {
+        // 空布局（无真实视口）不登记——诚实注记证据缺口；默认 Layout1 仅纸边界视口亦不登记
+        var sheets = SheetRegistryBuilder.Build(LayoutDoc(withViewport: false));
+        Assert.Single(sheets);
+        Assert.Equal("S0", sheets[0].SheetId);
+        Assert.All(sheets, s => Assert.Null(s.LayoutName));
+    }
+
+    [Fact]
+    public void Build_PaperBoundaryViewport_OnlyRealViewportRegistered()
+    {
+        // AddViewport 自动附加纸边界视口（RepresentsPaper=true）——仅真实视口登记一个布局幅面
+        var doc = LayoutDoc(withViewport: true);
+        var layout = doc.Layouts.First(l => l.Name == "布局1");
+        Assert.Equal(2, layout.AssociatedBlock!.Entities.OfType<Viewport>().Count()); // 纸边界 + 真实
+        var layoutSheets = SheetRegistryBuilder.Build(doc).Where(s => s.LayoutName is not null).ToList();
+        Assert.Single(layoutSheets);
+    }
+
+    [Fact]
+    public void Build_LayoutSheetRoundtripsDxf()
+    {
+        // 布局幅面经 DXF write/load roundtrip 仍登记（视口属性 survives）
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+            var layout = new Layout("布局1");
+            doc.Layouts.Add(layout);
+            layout.AddViewport(new Viewport
+            {
+                Center = new XYZ(500, 350, 0),
+                Width = 1000,
+                Height = 700,
+                ViewTarget = new XYZ(0, 0, 0),
+                ViewHeight = 200,
+            });
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            var layoutSheet = Assert.Single(session.Sheets, s => s.LayoutName == "布局1");
+            Assert.Equal("200", layoutSheet.TitleAttributes["viewHeight"]);
+            Assert.Equal(1000, layoutSheet.FrameBounds.MaxX, 6);
+        }
+        finally { File.Delete(path); }
+    }
+
+    // ===== T5：T4 minor 收口（指纹边界）=====
+
+    [Fact]
+    public void Session_Sheets_RebuiltAfterNoFrameMove()
+    {
+        // 无框路径：就地移动实体（句柄集/计数不变）→ 指纹含几何极值 → ModelBounds 跟随更新
+        string path = DxfFixture.CreateTempDxf(doc =>
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 10, 0) }));
+        try
+        {
+            var session = DrawingSession.Load(path);
+            Assert.Equal(10, session.Sheets[0].FrameBounds.MaxX, 6);
+            Assert.Same(session.Sheets, session.Sheets); // 几何未变→缓存命中
+            var line = session.Doc.Entities.OfType<Line>().First();
+            line.EndPoint = new XYZ(50, 50, 0);
+            Assert.Equal(50, session.Sheets[0].FrameBounds.MaxX, 6); // 极值入指纹→重建
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Session_Sheets_NameTextLayerChange_UpdatesName()
+    {
+        // 幅面名文字改层（图框→0，脱离名称层过滤）→ 指纹含文字图层 → 名称重算（回退默认）
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var frame = new BlockRecord("院标准图框_A0");
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+            doc.BlockRecords.Add(frame);
+            var ins = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+            ins.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+            doc.Entities.Add(ins);
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 30, Layer = new Layer("图框") });
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            Assert.Equal("一层电力平面图", session.Sheets[0].Name);
+            var text = session.Doc.Entities.OfType<TextEntity>().First();
+            text.Layer = new Layer("0"); // 脱离名称层过滤
+            Assert.Equal("幅面1", session.Sheets[0].Name); // 指纹含文字图层→重建→名称回退
+        }
+        finally { File.Delete(path); }
+    }
+
+    [SkippableFact]
+    public void RealDrawing_LayoutsRegistered_EmptyLayoutHonest()
+    {
+        // 真实图：Layouts=2（Model+布局1 空）→ 布局幅面 0 个（空布局不登记）；模型幅面 9
+        string path = @"E:\随机任务 ·Qoder·\outputs\tarch-native\电施（强电）-2#厂房电力+普通照明平面图.dwg";
+        Skip.If(!File.Exists(path), "真实图纸不在本机（仓库不携带），跳过");
+        using var fs = File.OpenRead(path);
+        var doc = new ACadSharp.IO.DwgReader(fs).Read();
+        var sheets = SheetRegistryBuilder.Build(doc);
+        Assert.Equal(9, sheets.Count);
+        Assert.All(sheets, s => Assert.Null(s.LayoutName));
     }
 }

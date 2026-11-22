@@ -80,6 +80,70 @@ public static class RenderModelBuilder
     }
 
     /// <summary>
+    /// 布局视口读图（幅面感知 T5）：模型空间实体经视口模型区域裁剪 + 映射到纸面坐标。
+    /// 视口模型区域 = ViewTarget ± (ViewHeight/2 × aspect, ViewHeight/2)，aspect=纸面视口宽高比
+    /// (Width/Height)；锚点（实体首点，与 SheetIdForPoint/BlockWalker 同口径）落在区域内者入视口。
+    /// 映射仿射 = 缩放 s(paperHeight/ViewHeight) + 平移(ViewTarget→Center)，与 Core
+    /// ViewportTransform.ModelToPaper 同一数学；复用既有 Append 管线（字高/半径随 s 缩放，
+    /// Insert 经 InsertAffine 复合展开，句柄口径不变）。TwistAngle/非矩形裁剪暂不参与（文档化局限）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> BuildViewport(CadDocument doc, Viewport vp)
+    {
+        var items = new List<RenderItem>();
+        int skipped = 0;
+        double viewHeight = vp.ViewHeight;
+        double paperHeight = vp.Height;
+        double s = viewHeight > 1e-12 ? paperHeight / viewHeight : 1;
+        double aspect = paperHeight > 1e-12 ? vp.Width / paperHeight : 1;
+        double halfH = viewHeight / 2;
+        double halfW = halfH * aspect;
+        double tx = vp.ViewTarget.X, ty = vp.ViewTarget.Y;
+        double minX = tx - halfW, maxX = tx + halfW, minY = ty - halfH, maxY = ty + halfH;
+        // 模型→纸面：p' = s·(p - ViewTarget) + Center（缩放+平移复合 Core Affine）
+        var t = new Affine(s, 0, 0, s, vp.Center.X - tx * s, vp.Center.Y - ty * s);
+        foreach (Entity e in doc.Entities)
+        {
+            (double ax, double ay) = AnchorOf(e);
+            if (ax < minX || ax > maxX || ay < minY || ay > maxY) continue; // 锚点区域外→不入视口
+            Append(e, items, ref skipped, t, rotationDeg: 0, heightScale: s, byBlockColor: null, depth: 0);
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// 模型幅面裁剪（幅面感知 T5）：保留锚点（Points[0]）落在图框 bounds 内的图元，
+    /// 与 SheetIdForPoint/BlockWalker 锚点归属同口径。无图框单幅面 bounds=ModelBounds →
+    /// 全部锚点在内 → 全保留（legacy 单幅面行为无感，R4）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> CropToFrame(
+        IReadOnlyList<RenderItem> items, (double MinX, double MinY, double MaxX, double MaxY) bounds)
+    {
+        var result = new List<RenderItem>();
+        foreach (RenderItem item in items)
+        {
+            if (item.Points.Count == 0) continue;
+            (double x, double y) = item.Points[0];
+            if (x >= bounds.MinX && x <= bounds.MaxX && y >= bounds.MinY && y <= bounds.MaxY)
+                result.Add(item);
+        }
+        return result;
+    }
+
+    /// <summary>实体锚点（模型空间首点）：Line=起点，Polyline=首顶点，Text/MText=插入点，
+    /// Circle/Arc=圆心，Insert=插入点（与 BlockWalker.AnchorOf 同口径）。</summary>
+    private static (double X, double Y) AnchorOf(Entity e) => e switch
+    {
+        Line l => (l.StartPoint.X, l.StartPoint.Y),
+        LwPolyline lw when lw.Vertices.Count > 0 => (lw.Vertices[0].Location.X, lw.Vertices[0].Location.Y),
+        Polyline2D p2 when p2.Vertices.Count > 0 => (p2.Vertices[0].Location.X, p2.Vertices[0].Location.Y),
+        TextEntity t => (t.InsertPoint.X, t.InsertPoint.Y),
+        MText mt => (mt.InsertPoint.X, mt.InsertPoint.Y),
+        Circle c => (c.Center.X, c.Center.Y), // Arc : Circle，同取圆心
+        Insert ins => (ins.InsertPoint.X, ins.InsertPoint.Y),
+        _ => (0, 0)
+    };
+
+    /// <summary>
     /// Axis-aligned bounds over the render list. Circle/Arc extents use center +/-
     /// radius (arc box is conservative: full circle, exact arc-extent math deferred
     /// to the canvas task); Text contributes its insertion point only (glyph metrics

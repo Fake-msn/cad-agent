@@ -87,6 +87,23 @@ public sealed class MainWindow : Window
     /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
     private (double X, double Y)? _moveBase;
 
+    // ===== 幅面感知 T5：视图幅面选择 =====
+    /// <summary>图纸文档（布局视口查找用）。</summary>
+    private ACadSharp.CadDocument _doc = null!;
+    /// <summary>全模型渲染图元（模型幅面按 FrameBounds 锚点裁剪自此）。</summary>
+    private IReadOnlyList<RenderItem> _fullModelItems = Array.Empty<RenderItem>();
+    /// <summary>幅面登记簿（模型幅面在前，布局幅面在后）。</summary>
+    private IReadOnlyList<SheetRecord> _sheets = Array.Empty<SheetRecord>();
+    /// <summary>当前选中幅面 Id/名（编辑重建后按 Id 保持选择；状态栏幅面名）。</summary>
+    private string? _currentSheetId;
+    private string _currentSheetName = "";
+    /// <summary>画布控件引用（切换幅面后按新内容 bounds 重新 Fit）。</summary>
+    private DrawingCanvas? _canvasControl;
+    /// <summary>程序性刷新幅面下拉时抑制 SelectionChanged（避免编辑重建二次刷新/重 Fit）。</summary>
+    private bool _suppressSheetSelection;
+    /// <summary>窗口标题图纸名（状态栏 _baseStatus 重建用）。</summary>
+    private string _title = "";
+
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null)
     {
         DataContext = vm;
@@ -106,7 +123,16 @@ public sealed class MainWindow : Window
             return;
         }
 
-        IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
+        // T5：全模型渲染 + 幅面登记簿；默认首幅面（R4 sanctioned：模型幅面按框内锚点裁剪，
+        // 布局幅面经 BuildViewport 纸面映射）。单幅面/无布局图纸 bounds=ModelBounds → 全保留（legacy 无感）。
+        _title = vm.Title;
+        _doc = vm.Session.Doc;
+        _fullModelItems = RenderModelBuilder.Build(vm.Session);
+        _sheets = vm.Session.Sheets;
+        SheetRecord firstSheet = _sheets[0];
+        _currentSheetId = firstSheet.SheetId;
+        _currentSheetName = firstSheet.Name;
+        IReadOnlyList<RenderItem> items = ItemsForSheet(firstSheet);
         Canvas = new CanvasViewModel(items);
         var layers = new LayersViewModel(items, Canvas);
         Layers = layers;
@@ -117,7 +143,7 @@ public sealed class MainWindow : Window
         sessionGate ??= new SemaphoreSlim(1, 1);
 
         _baseStatus = $"{vm.Title} — {items.Count} render items";
-        var status = new TextBlock { Margin = new Thickness(8, 4), Text = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x" };
+        var status = new TextBlock { Margin = new Thickness(8, 4), Text = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}" };
         Status = status;
 
         var showAll = new Button { Content = "Show all", Margin = new Thickness(4, 2) };
@@ -382,6 +408,23 @@ public sealed class MainWindow : Window
 
         var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(4, 2) };
         EditToolbar = toolbar;
+        // T5：幅面选择下拉（入工具栏顶栏，不动主 DockPanel 子序——LastChildFill 教训）。
+        // items=幅面名+SheetId；默认首幅面（初始 items 已按首幅面构建，SelectedIndex 先于事件接线）。
+        var sheetSelector = new ComboBox
+        {
+            ItemsSource = _sheets,
+            Width = 220,
+            Margin = new Thickness(2, 0),
+            [ToolTip.TipProperty] = "选择幅面：模型幅面按图框裁剪，布局幅面按视口纸面映射",
+            ItemTemplate = new FuncDataTemplate<SheetRecord>((s, _) => s is null ? new Control() : new TextBlock
+            {
+                Text = $"{s.Name} · {s.SheetId}"
+            })
+        };
+        sheetSelector.SelectedIndex = 0;
+        sheetSelector.SelectionChanged += OnSheetSelected;
+        SheetSelector = sheetSelector;
+        toolbar.Children.Add(sheetSelector);
         Button Tool(string label, EditTool tool, string tip)
         {
             var b = new Button { Content = label, Margin = new Thickness(2, 0), [ToolTip.TipProperty] = tip };
@@ -616,7 +659,8 @@ public sealed class MainWindow : Window
             DockPanel.SetDock(note, Dock.Bottom);
             dock.Children.Add(note);
         }
-        dock.Children.Add(new DrawingCanvas(Canvas)); // LastChildFill：画布必须是最后一个子控件，占满其余区域
+        _canvasControl = new DrawingCanvas(Canvas);
+        dock.Children.Add(_canvasControl); // LastChildFill：画布必须是最后一个子控件，占满其余区域
         Content = dock;
 
         Canvas.RenderInvalidated += OnCanvasInvalidated;
@@ -742,6 +786,9 @@ public sealed class MainWindow : Window
 
     /// <summary>编辑工具栏（T9：七工具 + Undo + 文本/块名输入 + 目标层下拉 + 错误文本）。</summary>
     public StackPanel? EditToolbar { get; }
+
+    /// <summary>幅面选择下拉（T5，internal 测试可达；加载成功时非 null）。items=幅面名+SheetId，默认首幅面。</summary>
+    internal ComboBox? SheetSelector { get; }
 
     /// <summary>撤销按钮（T9：撤销最近事务；无事务时禁用）。</summary>
     public Button? UndoButton { get; }
@@ -918,7 +965,8 @@ public sealed class MainWindow : Window
         {
             RenderItem? selected = Canvas!.SelectedItem;
             // T10 状态栏收尾：图纸名/实体计数（_baseStatus）+ 缩放 + 选择 + 审计摘要。
-            string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x";
+            // T5：幅面名（当前选中幅面）。
+            string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}";
             if (selected is not null)
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
@@ -1333,25 +1381,79 @@ public sealed class MainWindow : Window
         if (DiffToggle is not null) DiffToggle.IsEnabled = !busy;
     }
 
-    /// <summary>
-    /// T9：编辑/撤销完成（成功或失败）→ 重建渲染模型 → Canvas.Refresh +
-    /// Layers.Refresh（T4 承接）+ 图层列表/层下拉/状态栏计数/错误/Undo 可用性。
-    /// </summary>
-    private void RefreshAfterEdit(MainViewModel vm)
+    /// <summary>T5：幅面下拉选择 → 刷新画布为该幅面图元（用户交互触发，重新 Fit 到新内容）。</summary>
+    private void OnSheetSelected(object? sender, SelectionChangedEventArgs e)
     {
-        if (Canvas is null || Layers is null || Edit is null) return;
-        IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
+        if (_suppressSheetSelection) return;
+        if (SheetSelector?.SelectedItem is SheetRecord sheet) ApplySheet(sheet, refit: true);
+    }
+
+    /// <summary>
+    /// T5：应用幅面——模型幅面（LayoutName=null）按 FrameBounds 锚点裁剪全模型图元；
+    /// 布局幅面经 viewportHandle 查找视口 → BuildViewport 纸面映射。刷新 Canvas/Layers/
+    /// 层下拉/状态栏计数；refit=true（用户切换）按新内容 bounds 重新 Fit，false（编辑重建）保持视图。
+    /// </summary>
+    private void ApplySheet(SheetRecord sheet, bool refit)
+    {
+        if (Canvas is null || Layers is null) return;
+        IReadOnlyList<RenderItem> items = ItemsForSheet(sheet);
         Canvas.Refresh(items);
         Layers.Refresh(items);
         if (LayerList is not null) LayerList.ItemsSource = Layers.Layers;
         if (EditLayerSelector is not null)
             EditLayerSelector.ItemsSource = Layers.Layers.Select(l => l.Name).ToList();
-        _baseStatus = $"{vm.Title} — {items.Count} render items";
+        _currentSheetId = sheet.SheetId;
+        _currentSheetName = sheet.Name;
+        _baseStatus = $"{_title} — {items.Count} render items";
+        if (refit && _canvasControl is { Bounds.Width: > 0, Bounds.Height: > 0 })
+            Canvas.Fit(RenderModelBuilder.Bounds(items), _canvasControl.Bounds.Width, _canvasControl.Bounds.Height);
+        Canvas.Invalidate();
+    }
+
+    /// <summary>T5：幅面图元——模型幅面框内锚点裁剪；布局幅面 BuildViewport（视口缺失→空，诚实）。</summary>
+    private IReadOnlyList<RenderItem> ItemsForSheet(SheetRecord sheet)
+    {
+        if (sheet.LayoutName is null)
+            return RenderModelBuilder.CropToFrame(_fullModelItems, sheet.FrameBounds);
+        ACadSharp.Entities.Viewport? vp = FindViewport(_doc, sheet.TitleAttributes.GetValueOrDefault("viewportHandle"));
+        return vp is null ? Array.Empty<RenderItem>() : RenderModelBuilder.BuildViewport(_doc, vp);
+    }
+
+    /// <summary>T5：按句柄在纸空间布局关联块中查找视口实体。</summary>
+    private static ACadSharp.Entities.Viewport? FindViewport(ACadSharp.CadDocument doc, string? handle)
+    {
+        if (handle is null || doc.Layouts is null) return null;
+        foreach (var layout in doc.Layouts)
+            foreach (var vp in layout.AssociatedBlock?.Entities.OfType<ACadSharp.Entities.Viewport>() ?? Enumerable.Empty<ACadSharp.Entities.Viewport>())
+                if (vp.Handle.ToString() == handle) return vp;
+        return null;
+    }
+
+    /// <summary>
+    /// T9：编辑/撤销完成（成功或失败）→ 重建渲染模型 → Canvas.Refresh +
+    /// Layers.Refresh（T4 承接）+ 图层列表/层下拉/状态栏计数/错误/Undo 可用性。
+    /// T5：重建全模型图元 + 幅面登记簿，按当前幅面 Id 保持选择（幅面消失→回退首幅面），
+    /// 经 ApplySheet 刷新该幅面图元（保持视图，不重 Fit——legacy 编辑行为）。
+    /// </summary>
+    private void RefreshAfterEdit(MainViewModel vm)
+    {
+        if (Canvas is null || Layers is null || Edit is null) return;
+        _fullModelItems = RenderModelBuilder.Build(vm.Session);
+        _sheets = vm.Session.Sheets;
+        SheetRecord sheet = _sheets.FirstOrDefault(s => s.SheetId == _currentSheetId) ?? _sheets[0];
+        // 程序性刷新下拉（抑制 SelectionChanged，避免与 ApplySheet 二次刷新/重 Fit）
+        _suppressSheetSelection = true;
+        if (SheetSelector is not null)
+        {
+            SheetSelector.ItemsSource = _sheets;
+            SheetSelector.SelectedItem = sheet;
+        }
+        _suppressSheetSelection = false;
+        ApplySheet(sheet, refit: false);
         _moveBase = null;
         // 编辑使旧对比失效：Diff 切换回退（关分支幂等清叠加/摘要），避免残留勾选态。
         if (DiffToggle is { IsChecked: true }) DiffToggle.IsChecked = false;
         _diffSummary = "";
-        Canvas.Invalidate(); // 状态栏计数刷新
         SetEditError(Edit.ErrorMessage);
         if (UndoButton is not null) UndoButton.IsEnabled = Edit.RecentTxIds.Count > 0;
     }
