@@ -7,6 +7,7 @@ using Avalonia.Interactivity;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CadAgent.Core;
 using CadAgent.View.Controls;
@@ -65,6 +66,11 @@ namespace CadAgent.View;
 /// 3.5/1/0；旋转 UI 度→handler 弧度）；Delete 第二击经 ConfirmDialog 模态确认
 /// （取消保持选中不清状态；headless 测试经 ConfirmDeleteOverride seam 注入，
 /// 真模态走 Task 11 真机协议）。删除仍经 EditViewModel→StepEngine，无审计旁路。
+/// 视图闭环 T10：④纠偏计划预览面板（左栏"计划"tab，spec §4.1④）——意图→
+/// AgentOrchestrator（Core 零改动，confirmPlan/confirmCloudEgress 回调即预览钩子）
+/// →人工确认→StepEngine 执行（无审计旁路）；首次云端出境同意提示；执行成功→
+/// 全视图刷新 + 问题清单重评 + 审计 live-rebuild。编排期间会话闸粗粒度持有
+/// （编辑/问题刷新在闸上阻塞——计划明示）。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -107,7 +113,8 @@ public sealed class MainWindow : Window
     /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
     private (double X, double Y)? _moveBase;
 
-    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null)
+    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null,
+        PlanPreviewViewModel? planPreview = null)
     {
         DataContext = vm;
         _skillDirs = vm.SkillDirs;
@@ -625,11 +632,128 @@ public sealed class MainWindow : Window
         adjudicationPanel.Children.Add(adjudicationError);
         adjudicationPanel.Children.Add(adjudicationList); // LastChildFill：当前裁定列表
 
+        // 视图闭环 T10：④纠偏计划预览面板（spec §4.1④）。生产装配复用
+        // writeAudit/signoffIdentity/sessionGate（与编辑/签认同源，无审计旁路）；
+        // headless 测试经 planPreview 可选参注入 fake client VM。
+        PlanPreview = planPreview ?? new PlanPreviewViewModel(vm.Session, vm.ProjectDir,
+            writeAudit, signoffIdentity, new RoleChecker(), sessionGate);
+
+        var planHeader = new TextBlock
+        {
+            Text = "纠偏计划",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4)
+        };
+        var intentInput = new TextBox
+        {
+            Watermark = "纠偏意图（可先从问题清单填充）",
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            Height = 64,
+            Margin = new Thickness(4, 2)
+        };
+        PlanIntentInput = intentInput;
+        var fillIntent = new Button { Content = "从问题填充", Margin = new Thickness(4, 2) };
+        fillIntent.Click += OnFillIntentFromIssues;
+        FillIntentButton = fillIntent;
+        var generate = new Button { Content = "生成计划", Margin = new Thickness(4, 2) };
+        generate.Click += OnGeneratePlanClick;
+        GeneratePlanButton = generate;
+        var planButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        planButtons.Children.Add(fillIntent);
+        planButtons.Children.Add(generate);
+
+        var planError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        PlanError = planError;
+
+        // 出境同意提示（首次云端出境；ConfirmEgress(true/false) 应答编排回调）。
+        var egressPrompt = new TextBlock { Margin = new Thickness(6, 2), TextWrapping = TextWrapping.Wrap };
+        EgressPromptText = egressPrompt;
+        var egressConfirm = new Button { Content = "确认发送", Margin = new Thickness(4, 2) };
+        egressConfirm.Click += (_, _) => { PlanPreview?.ConfirmEgress(true); UpdatePlanPanel(); };
+        ConfirmEgressButton = egressConfirm;
+        var egressReject = new Button { Content = "拒绝", Margin = new Thickness(4, 2) };
+        egressReject.Click += (_, _) => { PlanPreview?.ConfirmEgress(false); UpdatePlanPanel(); };
+        RejectEgressButton = egressReject;
+        var egressButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        egressButtons.Children.Add(egressConfirm);
+        egressButtons.Children.Add(egressReject);
+        var egressSection = new StackPanel { Spacing = 2, IsVisible = false };
+        egressSection.Children.Add(egressPrompt);
+        egressSection.Children.Add(egressButtons);
+        EgressConsentSection = egressSection;
+
+        // 预览步骤列表（kind + params JSON 文本）+ 确认执行/拒绝（ConfirmPlan 应答）。
+        var previewList = new ItemsControl
+        {
+            ItemTemplate = new FuncDataTemplate<StepSpec>((s, _) =>
+                s is null ? new Control() : new TextBlock
+                {
+                    Text = $"{s.Kind} {s.Params.GetRawText()}",
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 11,
+                    Margin = new Thickness(4, 2)
+                })
+        };
+        PlanPreviewList = previewList;
+        var confirmPlan = new Button { Content = "确认执行", Margin = new Thickness(4, 2) };
+        confirmPlan.Click += (_, _) => { PlanPreview?.ConfirmPlan(true); UpdatePlanPanel(); };
+        ConfirmPlanButton = confirmPlan;
+        var rejectPlan = new Button { Content = "拒绝", Margin = new Thickness(4, 2) };
+        rejectPlan.Click += (_, _) => { PlanPreview?.ConfirmPlan(false); UpdatePlanPanel(); };
+        RejectPlanButton = rejectPlan;
+        var previewButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        previewButtons.Children.Add(confirmPlan);
+        previewButtons.Children.Add(rejectPlan);
+        var previewSection = new DockPanel { IsVisible = false };
+        DockPanel.SetDock(previewButtons, Dock.Bottom);
+        previewSection.Children.Add(previewButtons);
+        previewSection.Children.Add(new ScrollViewer { Content = previewList }); // LastChildFill
+        PlanPreviewSection = previewSection;
+
+        var planStatus = new TextBlock { Margin = new Thickness(6, 2), TextWrapping = TextWrapping.Wrap };
+        PlanStatusText = planStatus;
+
+        var planPanel = new DockPanel();
+        DockPanel.SetDock(planHeader, Dock.Top);
+        planPanel.Children.Add(planHeader);
+        DockPanel.SetDock(intentInput, Dock.Top);
+        planPanel.Children.Add(intentInput);
+        DockPanel.SetDock(planButtons, Dock.Top);
+        planPanel.Children.Add(planButtons);
+        DockPanel.SetDock(planError, Dock.Top);
+        planPanel.Children.Add(planError);
+        DockPanel.SetDock(egressSection, Dock.Top);
+        planPanel.Children.Add(egressSection);
+        DockPanel.SetDock(planStatus, Dock.Top);
+        planPanel.Children.Add(planStatus);
+        planPanel.Children.Add(previewSection); // LastChildFill：预览步骤占满其余区域
+
+        // 事件 marshal：VM 事件在编排线程触发（Task.Run）→ Dispatcher.Post 回 UI 线程。
+        PlanPreview.PreviewReady += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
+        PlanPreview.RunCompleted += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
+        PlanPreview.EgressConsentRequired += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
+        PlanPreview.PlanExecuted += () => Dispatcher.UIThread.Post(() =>
+        {
+            RefreshAfterEdit(vm);
+            _ = Issues?.RefreshAsync();
+            Audit?.Rebuild();
+        });
+
         // T8：左栏三 tab（图层默认选中，T4 行为不变；未选中 tab 内容不进入视觉树）。
+        // 视图闭环 T10：计划面板加入既有 TabControl（第四 tab）——不动主 DockPanel
+        // 子序（LastChildFill 教训：画布必须保持最后一个子控件）。
         var tabs = new TabControl { Width = 220 };
         tabs.Items.Add(new TabItem { Header = "图层", Content = panel });
         tabs.Items.Add(new TabItem { Header = "纠偏", Content = semanticPanel });
         tabs.Items.Add(new TabItem { Header = "裁定", Content = adjudicationPanel });
+        tabs.Items.Add(new TabItem { Header = "计划", Content = planPanel });
         LeftTabs = tabs;
 
         var dock = new DockPanel();
@@ -670,6 +794,7 @@ public sealed class MainWindow : Window
         UpdateIssuesPanel();
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
+        UpdatePlanPanel();
         if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
     }
 
@@ -820,6 +945,48 @@ public sealed class MainWindow : Window
 
     /// <summary>编辑错误/引导文本（T9，可见时非空）。</summary>
     public TextBlock? EditError { get; }
+
+    /// <summary>纠偏计划预览视图模型（视图闭环 T10，加载成功时非 null；headless 测试可达）。</summary>
+    internal PlanPreviewViewModel? PlanPreview { get; }
+
+    /// <summary>纠偏意图输入框（视图闭环 T10；headless 测试可达）。</summary>
+    internal TextBox? PlanIntentInput { get; }
+
+    /// <summary>从问题填充按钮（视图闭环 T10：mandatory 项 ruleId+建议拼接入意图）。</summary>
+    internal Button? FillIntentButton { get; }
+
+    /// <summary>生成计划按钮（视图闭环 T10；IsBusy 期间禁用 + 硬闸守卫）。</summary>
+    internal Button? GeneratePlanButton { get; }
+
+    /// <summary>预览步骤列表（视图闭环 T10：kind + params JSON 文本）。</summary>
+    internal ItemsControl? PlanPreviewList { get; }
+
+    /// <summary>预览区段（视图闭环 T10：IsPreviewVisible 联动可见性；headless 测试可达）。</summary>
+    internal DockPanel? PlanPreviewSection { get; }
+
+    /// <summary>确认执行按钮（视图闭环 T10：ConfirmPlan(true)）。</summary>
+    internal Button? ConfirmPlanButton { get; }
+
+    /// <summary>拒绝计划按钮（视图闭环 T10：ConfirmPlan(false)）。</summary>
+    internal Button? RejectPlanButton { get; }
+
+    /// <summary>出境同意区段（视图闭环 T10：首次云端出境时可见）。</summary>
+    internal StackPanel? EgressConsentSection { get; }
+
+    /// <summary>出境同意提示文本（视图闭环 T10：EgressPrompt）。</summary>
+    internal TextBlock? EgressPromptText { get; }
+
+    /// <summary>确认发送按钮（视图闭环 T10：ConfirmEgress(true)）。</summary>
+    internal Button? ConfirmEgressButton { get; }
+
+    /// <summary>拒绝出境按钮（视图闭环 T10：ConfirmEgress(false)）。</summary>
+    internal Button? RejectEgressButton { get; }
+
+    /// <summary>计划状态文本（视图闭环 T10：Status + LastTxId 短号）。</summary>
+    internal TextBlock? PlanStatusText { get; }
+
+    /// <summary>计划错误/引导文本（视图闭环 T10：ErrorMessage/填充引导，可见时非空）。</summary>
+    internal TextBlock? PlanError { get; }
 
     /// <summary>
     /// 行模板：复选框（仅勾选框本体，可见性）+ 色样 + 名称（计数）。Click → Toggle。
@@ -1481,6 +1648,64 @@ public sealed class MainWindow : Window
         if (EditError is null) return;
         EditError.Text = message ?? "";
         EditError.IsVisible = message is not null;
+    }
+
+    /// <summary>视图闭环 T10：从问题填充意图——Issues 中 mandatory 项拼接
+    /// ruleId+建议文本入意图框；无 mandatory 项 → 行内引导（先 Refresh 或手动输入）。</summary>
+    private void OnFillIntentFromIssues(object? sender, RoutedEventArgs e)
+    {
+        if (PlanPreview is null || PlanIntentInput is null) return;
+        List<IssueEntry> mandatory = Issues?.Issues
+            .Where(i => i.Force == RuleForce.Mandatory).ToList() ?? new List<IssueEntry>();
+        if (mandatory.Count == 0)
+        {
+            SetPlanError("问题清单无 mandatory 项——先 Refresh 问题清单或手动输入纠偏意图");
+            return;
+        }
+        SetPlanError(null);
+        PlanIntentInput.Text = string.Join("\n", mandatory.Select(i => $"{i.RuleId}: {i.Suggestion}"));
+    }
+
+    /// <summary>视图闭环 T10：生成计划（async void 包装 GenerateAsync）。
+    /// _editBusy/_diffBusy 并列硬闸 + IsBusy 重入闸（IsEnabled 只是视觉提示，
+    /// RaiseEvent 可绕过禁用态，标志位才是结构性保证——镜像 T10 编辑重入闸）。
+    /// 编排经 VM 内 Task.Run 下线程池，confirmPlan 阻塞回调不占 UI 线程。</summary>
+    private async void OnGeneratePlanClick(object? sender, RoutedEventArgs e)
+    {
+        if (PlanPreview is null || _editBusy || _diffBusy || PlanPreview.IsBusy) return;
+        PlanPreview.Intent = PlanIntentInput?.Text ?? "";
+        if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = false;
+        try { await PlanPreview.GenerateAsync(); }
+        finally { if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = true; }
+        UpdatePlanPanel();
+    }
+
+    /// <summary>视图闭环 T10：计划面板刷新——预览/出境同意可见性 + 步骤列表 +
+    /// 状态文本（Status/LastTxId）+ 错误通道（ErrorMessage）。事件经 Dispatcher.Post
+    /// marshal 到 UI 线程后调用；按钮 Click 应答后也同步刷新。</summary>
+    private void UpdatePlanPanel()
+    {
+        if (PlanPreview is null) return;
+        if (PlanPreviewList is not null) PlanPreviewList.ItemsSource = PlanPreview.PreviewSteps;
+        if (PlanPreviewSection is not null) PlanPreviewSection.IsVisible = PlanPreview.IsPreviewVisible;
+        if (EgressConsentSection is not null) EgressConsentSection.IsVisible = PlanPreview.IsEgressConsentVisible;
+        if (EgressPromptText is not null) EgressPromptText.Text = PlanPreview.EgressPrompt;
+        if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = !PlanPreview.IsBusy;
+        if (PlanStatusText is not null)
+        {
+            string text = PlanPreview.Status;
+            if (PlanPreview.LastTxId is string tx)
+                text += (text.Length > 0 ? " | " : "") + $"tx {(tx.Length > 8 ? tx[..8] : tx)}";
+            PlanStatusText.Text = text;
+        }
+        SetPlanError(PlanPreview.ErrorMessage);
+    }
+
+    private void SetPlanError(string? message)
+    {
+        if (PlanError is null) return;
+        PlanError.Text = message ?? "";
+        PlanError.IsVisible = message is not null;
     }
 
     /// <summary>T6：无 audit.db 时的只读空存储占位——视图绝不创建/写入审计库。</summary>

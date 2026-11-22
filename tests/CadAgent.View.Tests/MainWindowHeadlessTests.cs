@@ -471,4 +471,101 @@ public class MainWindowHeadlessTests
             if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
         }
     }
+
+    // ---- 视图闭环 T10：④纠偏计划预览面板（fake client 注入，不触网） ----
+
+    [AvaloniaFact]
+    public async Task PlanPanel_FakeClient_PreviewThenConfirm_ExecutesAndRefreshes()
+    {
+        // 夹具：临时项目 + 预建 audit.db（窗口走 SqliteAuditStore 分支）+ 单线图纸。
+        // 注入 PlanPreviewViewModel（fake client 返回 add-line 计划 + 本地端点 profile）；
+        // 注入 VM 与窗口各持同一 audit.db 的 SqliteAuditStore 实例——Append 在
+        // Serializable 事务内读链头（跨实例安全），Rebuild 经窗口实例读已提交数据。
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-t10-ui-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(projectDir, ".cadagent"));
+        string dxfPath = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+        });
+        string auditDbPath = Path.Combine(projectDir, ".cadagent", "audit.db");
+        using (var seed = new SqliteAuditStore(auditDbPath)) { } // 预建库文件
+        MainWindow? window = null;
+        SqliteAuditStore? planAudit = null;
+        try
+        {
+            var vm = new MainViewModel(dxfPath, projectDir);
+            Assert.Null(vm.ErrorMessage);
+            planAudit = new SqliteAuditStore(auditDbPath);
+            var gate = new SemaphoreSlim(1, 1);
+            var identity = new FixedIdentity(new OperatorIdentity("tester", Role.Draw));
+            var planVm = new PlanPreviewViewModel(vm.Session, projectDir, planAudit, identity,
+                new RoleChecker(), gate,
+                new FakeLlmClient("""{"steps":[{"kind":"add-line","params":{"x1":0,"y1":5,"x2":10,"y2":5}}]}"""),
+                new ProviderProfile("local", "http://localhost:11434/v1", "fake-model",
+                    VisionCapable: false, DataPolicy.LocalOnly, new ProfileLimits()));
+            window = new MainWindow(vm, identity, gate, planVm);
+            window.Show();
+            Dispatcher.UIThread.RunJobs();
+            Assert.Same(planVm, window.PlanPreview);
+            int before = window.Canvas!.Items.Count;
+
+            // 切到"计划"tab（第四 tab）——面板进入视觉树。
+            window.LeftTabs!.SelectedIndex = 3;
+            Dispatcher.UIThread.RunJobs();
+            window.PlanIntentInput!.Text = "在 y=5 加一条线";
+
+            var readyTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var doneTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var issuesTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnReady() => readyTcs.TrySetResult();
+            void OnDone() => doneTcs.TrySetResult();
+            void OnIssues() => issuesTcs.TrySetResult();
+            planVm.PreviewReady += OnReady;
+            planVm.RunCompleted += OnDone;
+            window.Issues!.IssuesChanged += OnIssues;
+            try
+            {
+                window.GeneratePlanButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await readyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+
+                // 预览面板可见步骤文本（kind + params JSON），尚未执行。
+                Assert.True(planVm.IsPreviewVisible);
+                Assert.True(window.PlanPreviewSection!.IsVisible);
+                Assert.Contains(window.GetVisualDescendants().OfType<TextBlock>(),
+                    t => t.Text is not null && t.Text.Contains("add-line"));
+                Assert.Equal(before, window.Canvas.Items.Count); // 预览不改图
+
+                window.ConfirmPlanButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await doneTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+                // PlanExecuted 联动的问题清单重评完成（check-run 审计落盘后再清理夹具）。
+                await issuesTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally
+            {
+                planVm.PreviewReady -= OnReady;
+                planVm.RunCompleted -= OnDone;
+                window.Issues.IssuesChanged -= OnIssues;
+            }
+
+            // 执行成功：状态 Executed + 画布渲染图元 +1 + 审计时间线含新 tx（live-rebuild）。
+            Assert.Equal("Executed", planVm.Status);
+            Assert.False(string.IsNullOrEmpty(planVm.LastTxId));
+            Assert.Equal(before + 1, window.Canvas.Items.Count);
+            Assert.Contains(window.Audit!.Transactions, g => g.TxId == planVm.LastTxId);
+            Assert.False(window.PlanPreviewSection!.IsVisible); // 编排结束预览收起
+            Assert.True(planAudit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            window?.Close();
+            planAudit?.Dispose();
+            // Microsoft.Data.Sqlite 连接池在 Dispose 后仍持有文件句柄，Windows 下须先清池才能删库
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(dxfPath);
+            if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
+        }
+    }
 }
