@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using CadAgent.Data;
 using Xunit.Abstractions;
 
@@ -61,6 +63,75 @@ public class UnparsedCensusTests
         Assert.Empty(s.Unknowns);
         Assert.Equal(2, s.Unparsed!.Count);
         Assert.All(s.Unparsed!, u => Assert.Equal("", u.Handle));
+    }
+
+    [Fact]
+    public void Sidecar_ClassesNull_LoadReturnsEmpty_NoThrow()
+    {
+        // Fix Round 1（R4 闭合）：JSON 合法 + path/hash 匹配但 Classes:null——
+        // 原实现 new UnparsedCensus(null!) → TotalCount NRE；守卫后降级 Empty 不抛。
+        string dir = Path.Combine(Path.GetTempPath(), "census-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            WriteRawSidecar(dir, src, "null");
+            var c = UnparsedCensusStore.Load(dir, src);
+            Assert.Empty(c.Classes);
+            Assert.Equal(0, c.TotalCount);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Sidecar_ClassesMissing_LoadReturnsEmpty_NoThrow()
+    {
+        // Classes 属性整体缺失（反序列化为 null）与显式 null 同口径降级 Empty。
+        string dir = Path.Combine(Path.GetTempPath(), "census-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            WriteRawSidecar(dir, src, classesJson: null);
+            var c = UnparsedCensusStore.Load(dir, src);
+            Assert.Empty(c.Classes);
+            Assert.Equal(0, c.TotalCount);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Sidecar_NegativeCount_LoadReturnsEmpty_NoThrow()
+    {
+        // 负 Count 若漏网：TotalCount 为负且 Summarize 的 Enumerable.Repeat 抛 ArgumentOutOfRangeException。
+        // 守卫后 Load 降级 Empty，合成 session Summarize 也不抛。
+        string dir = Path.Combine(Path.GetTempPath(), "census-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            WriteRawSidecar(dir, src, """[{"CppClassName":"TCH_WALL","Count":-1}]""");
+            var c = UnparsedCensusStore.Load(dir, src);
+            Assert.Empty(c.Classes);
+            Assert.Equal(0, c.TotalCount);
+            var session = new DrawingSession("mem.dxf", new ACadSharp.CadDocument(), c);
+            Assert.Equal(0, session.Summarize().Unparsed?.Count ?? 0);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    /// <summary>手写 sidecar（path/hash 与源匹配，Classes 段可控）：合成损坏/异常 census 载荷。</summary>
+    private static void WriteRawSidecar(string dir, string src, string? classesJson)
+    {
+        string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(src)));
+        string classes = classesJson == null ? "" : $",\"Classes\":{classesJson}";
+        string json = $"{{\"SourcePath\":{JsonSerializer.Serialize(Path.GetFullPath(src))},\"SourceHash\":\"{hash}\"{classes}}}";
+        string p = Path.Combine(dir, ".cadagent", "unparsed.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+        File.WriteAllText(p, json);
     }
 
     [SkippableFact]

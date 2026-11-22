@@ -222,6 +222,9 @@ public sealed class DrawingSession : IDrawingSession
         var unparsed = Unparsed.Classes
             .SelectMany(c => Enumerable.Repeat(new UnknownBrief("", c.CppClassName, c.CppClassName, ""), c.Count))
             .ToList();
-        return new DrawingSummary(SourcePath, Doc.Header.Version.ToString(), layers, entities, unknowns, unparsed);
+        // 空 census → null（Fix Round 1：无 TCH 图纸 summary/intake stdout 逐字不变，
+        // 不得多出 "Unparsed": []；配合 DrawingSummary.Unparsed 的 WhenWritingNull 省略字段）。
+        return new DrawingSummary(SourcePath, Doc.Header.Version.ToString(), layers, entities, unknowns,
+            unparsed.Count == 0 ? null : unparsed);
     }
 }

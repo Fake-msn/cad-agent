@@ -55,7 +55,10 @@ public static class UnparsedCensusStore
         try
         {
             var sc = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(p));
-            if (sc == null || sc.SourcePath != Path.GetFullPath(sourcePath) || sc.SourceHash != HashOf(sourcePath))
+            // Fix Round 1（R4 闭合）：JSON 合法 + path/hash 匹配但 Classes null/缺失 → TotalCount NRE；
+            // 负 Count → Summarize 的 Enumerable.Repeat 抛。两者均视为损坏载荷降级 Empty。
+            if (sc == null || sc.SourcePath != Path.GetFullPath(sourcePath) || sc.SourceHash != HashOf(sourcePath)
+                || sc.Classes == null || sc.Classes.Any(c => c.Count < 0))
                 return UnparsedCensus.Empty;
             return new UnparsedCensus(sc.Classes);
         }
