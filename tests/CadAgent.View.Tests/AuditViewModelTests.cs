@@ -365,4 +365,73 @@ public class AuditViewModelTests
         Assert.Empty(d.RemovedHandles);
         Assert.Empty(d.ChangedHandles);
     }
+
+    // ---- Rebuild（视图闭环 T5：编辑后 live-rebuild，无需重开窗口） ----
+
+    [Fact]
+    public void Rebuild_AfterNewTx_PicksUpNewEntries()
+    {
+        using var f = new Fixture();
+        AuditViewModel vm = f.MakeVm(); // 构造期快照：初始 0 tx
+        Assert.Empty(vm.Transactions);
+        int changed = 0;
+        vm.TimelineChanged += () => changed++;
+        // 经 audit.Append 写入 tx-start/tx-commit 一组（PlanRef 关联，镜像既有夹具写法）。
+        f.Audit.Append(new AuditEntry(DateTimeOffset.UtcNow, "tester", "Draw", "s1", "view",
+            "tx-start", "", "{}", "", "",
+            Path.Combine(f.Dir, "snapshots", "tx-live-1", "drawing.dxf"), "p-live"));
+        f.Audit.Append(new AuditEntry(DateTimeOffset.UtcNow, "tester", "Draw", "s1", "view",
+            "tx-commit", "", "{}", "", "", "", "p-live"));
+
+        vm.Rebuild();
+
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(2, vm.Entries.Count);
+        TxGroup g = Assert.Single(vm.Transactions);
+        Assert.Equal("tx-live-1", g.TxId); // TxId = tx-start 快照目录名
+        Assert.Equal("p-live", g.PlanRef);
+        Assert.True(g.HasCommit);
+        Assert.True(changed >= 1); // TimelineChanged 触发计数 >= 1
+    }
+
+    [Fact]
+    public void Rebuild_SelectedTxStillExists_PreservesSelection()
+    {
+        using var f = new Fixture();
+        TxResult tx1 = f.Engine.Run(Plan("p1",
+            ("add-line", """{"x1":0,"y1":60,"x2":100,"y2":60}""")), f.Session, "s1");
+        AuditViewModel vm = f.MakeVm();
+        vm.SelectTx(tx1.TxId);
+        Assert.Equal(tx1.TxId, vm.SelectedTxId);
+
+        // 追加新 tx → Rebuild → 既有选中 tx 仍存在 → SelectedTxId 不变。
+        TxResult tx2 = f.Engine.Run(Plan("p2",
+            ("add-text", """{"x":1,"y":2,"text":"NEW","height":3.5}""")), f.Session, "s1");
+        vm.Rebuild();
+
+        Assert.Equal(tx1.TxId, vm.SelectedTxId);
+        Assert.Equal(2, vm.Transactions.Count);
+        Assert.Contains(vm.Transactions, g => g.TxId == tx2.TxId);
+    }
+
+    [Fact]
+    public void Rebuild_AuditStoreCorrupt_ErrorMessageNoThrow()
+    {
+        using var f = new Fixture();
+        AuditViewModel vm = f.MakeVm();
+        Assert.Null(vm.ErrorMessage);
+        int changed = 0;
+        vm.TimelineChanged += () => changed++;
+        // 损坏 audit.db（写垃圾字节，镜像 CorruptStateHeadlessTests.CorruptAuditDb）；
+        // 先清连接池释放 Windows 文件句柄，否则覆盖写被共享冲突拒绝。
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        File.WriteAllBytes(Path.Combine(f.Dir, "audit.db"),
+            new byte[] { 0x00, 0x01, 0x02, 0xFF, 0xFE, 0x42, 0x42, 0x42 }); // not a SQLite database
+
+        vm.Rebuild(); // 不抛（镜像构造期降级）
+
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.NotEmpty(vm.ErrorMessage);
+        Assert.True(changed >= 1); // 失败也触发 TimelineChanged（UI 得以刷新错误态）
+    }
 }

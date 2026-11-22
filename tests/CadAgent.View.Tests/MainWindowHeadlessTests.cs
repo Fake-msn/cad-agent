@@ -1,13 +1,18 @@
+using System.Text.Json;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using CadAgent.Core;
+using CadAgent.Data;
+using CadAgent.Data.Handlers;
 using CadAgent.Data.Tests;
 using CadAgent.View.Controls;
 using CadAgent.View.ViewModels;
@@ -192,5 +197,221 @@ public class MainWindowHeadlessTests
             Assert.DoesNotContain("Selected", window.Status.Text);
         }
         finally { Cleanup(window, path); }
+    }
+
+    // ---- 视图闭环 T5：审计 live-rebuild + _diffBusy 硬闸 ----
+
+    /// <summary>T5 夹具（镜像 AuditPanelHeadlessTests/IntegrationHeadlessTests）：
+    /// 临时项目目录 + .cadagent/audit.db（真实 StepEngine 事务一组，含快照）。</summary>
+    private sealed class AuditFixture : IDisposable
+    {
+        public string ProjectDir { get; }
+        public string DxfPath { get; }
+        public SqliteAuditStore Audit { get; }
+        public SnapshotStore Snapshots { get; }
+        public string TxId { get; }
+
+        public AuditFixture()
+        {
+            ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-t5-ui-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(ProjectDir, ".cadagent"));
+            DxfPath = DxfFixture.CreateTempDxf(doc =>
+            {
+                doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+                doc.Entities.Add(new Line { StartPoint = new XYZ(0, 50, 0), EndPoint = new XYZ(100, 50, 0) });
+            });
+            var session = DrawingSession.Load(DxfPath);
+            Audit = new SqliteAuditStore(Path.Combine(ProjectDir, ".cadagent", "audit.db"));
+            Snapshots = new SnapshotStore(Path.Combine(ProjectDir, ".cadagent", "snapshots"));
+            var engine = new StepEngine(Audit, Snapshots,
+                new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+                new RoleChecker(), HandlerRegistry.All());
+            TxId = engine.Run(Plan("p1",
+                ("add-line", """{"x1":0,"y1":60,"x2":100,"y2":60}""")), session, "s1").TxId;
+        }
+
+        public void Dispose()
+        {
+            Audit.Dispose();
+            // Microsoft.Data.Sqlite 连接池在 Dispose 后仍持有文件句柄，Windows 下须先清池才能删库
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(DxfPath);
+            if (Directory.Exists(ProjectDir)) Directory.Delete(ProjectDir, true);
+        }
+    }
+
+    private sealed class FixedIdentity : IIdentityProvider
+    {
+        public FixedIdentity(OperatorIdentity id) => Current = id;
+        public OperatorIdentity Current { get; }
+    }
+
+    private static StepPlan Plan(string planId, params (string Kind, string Json)[] steps)
+    {
+        var specs = new List<StepSpec>();
+        foreach ((string kind, string json) in steps)
+        {
+            using var doc = JsonDocument.Parse(json);
+            specs.Add(new StepSpec(kind, doc.RootElement.Clone()));
+        }
+        return new StepPlan(planId, specs);
+    }
+
+    private static (MainWindow Window, AuditFixture F) ShowAuditWindow(SemaphoreSlim? gate = null)
+    {
+        var f = new AuditFixture();
+        var vm = new MainViewModel(f.DxfPath, f.ProjectDir);
+        Assert.Null(vm.ErrorMessage);
+        var window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)), gate);
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        return (window, f);
+    }
+
+    private static Button ToolButton(MainWindow window, string label) =>
+        window.GetVisualDescendants().OfType<Button>()
+            .First(b => b is not CheckBox && (b.Content as string) == label);
+
+    private static void ClickCanvasAtWorld(MainWindow window, double wx, double wy)
+    {
+        DrawingCanvas canvas = window.GetVisualDescendants().OfType<DrawingCanvas>().Single();
+        (double sx, double sy) = window.Canvas!.WorldToScreen(wx, wy);
+        Point p = canvas.TranslatePoint(new Point(sx, sy), window)!.Value;
+        window.MouseDown(p, MouseButton.Left);
+        window.MouseUp(p, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    /// <summary>真实指针点击 Diff 切换（镜像 AuditPanelHeadlessTests：RaiseEvent(ClickEvent)
+    /// 只触发 Click 订阅，不走 Button.OnClick → ToggleButton.Toggle，勾选态须走指针管线）。</summary>
+    private static void ClickDiff(MainWindow window)
+    {
+        ToggleButton toggle = window.DiffToggle!;
+        Point p = toggle.TranslatePoint(new Point(toggle.Bounds.Width / 2, toggle.Bounds.Height / 2), window)!.Value;
+        window.MouseDown(p, MouseButton.Left);
+        window.MouseUp(p, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    [AvaloniaFact]
+    public async Task DiffLoading_EditClicks_IgnoredByHardGuard()
+    {
+        // 注入会话闸并持闸 → Diff 加载确定性 in-flight（_diffBusy 置位），
+        // 镜像 T10“注入会话闸持闸制造确定性 in-flight 编辑”测试的构造法。
+        var gate = new SemaphoreSlim(1, 1);
+        (MainWindow window, AuditFixture f) = ShowAuditWindow(gate);
+        try
+        {
+            // 先经审计管线完成一次真实编辑（撤销栈非空，Undo 守卫可观察）。
+            var editTcs = new TaskCompletionSource();
+            void EditHandler() => editTcs.TrySetResult();
+            window.Edit!.EditCompleted += EditHandler;
+            try
+            {
+                ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Dispatcher.UIThread.RunJobs();
+                ClickCanvasAtWorld(window, 20, 20); // 锚点
+                ClickCanvasAtWorld(window, 80, 30); // 提交 → 编辑完成
+                await editTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally { window.Edit.EditCompleted -= EditHandler; }
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            int viewEditsBefore = f.Audit.ReadAll().Count(r => r.Entry.Kind == "view-edit");
+            Assert.Equal(1, viewEditsBefore);
+
+            // 选中既有事务 → 持闸 → Diff 加载 in-flight。
+            window.AuditList!.SelectedIndex = 0;
+            Dispatcher.UIThread.RunJobs();
+            var diffTcs = new TaskCompletionSource();
+            void DiffHandler() => diffTcs.TrySetResult();
+            window.Audit!.DiffChanged += DiffHandler;
+            try
+            {
+                await gate.WaitAsync(); // 持闸：BuildDiff 停在会话闸上，diff 无法完成
+                try
+                {
+                    ClickDiff(window);
+                    Assert.False(window.DiffToggle!.IsEnabled); // diff 加载 UI 状态
+                    Assert.False(window.EditToolbar!.IsEnabled);
+
+                    // 画布工具点击一律忽略：不落预览锚点、不产生新 view-edit。
+                    ClickCanvasAtWorld(window, 20, 20);
+                    Assert.Null(window.Canvas!.PendingPoint);
+                    ClickCanvasAtWorld(window, 80, 30);
+                    Assert.Equal(viewEditsBefore, f.Audit.ReadAll().Count(r => r.Entry.Kind == "view-edit"));
+                    // 工具切换/删除确认一律忽略（RaiseEvent 绕过 IsEnabled=false）。
+                    ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Assert.Equal(EditTool.Line, window.Edit.ActiveTool);
+                    ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Assert.Equal(EditTool.Line, window.Edit.ActiveTool);
+                    // 撤销一律忽略（释闸后也不得发生 rollback）。
+                    window.UndoButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Assert.Single(window.Edit.RecentTxIds);
+
+                    gate.Release();
+                    await diffTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    // headless 无 SynchronizationContext：ApplyDiffAsync 的 await 续体
+                    // 在线程池执行（与测试并发）——轮询直至 finally 复位 IsEnabled
+                    // （成功路径此时叠加层已施加），再 RunJobs 刷新调度队列。
+                    for (int i = 0; i < 100 && !window.DiffToggle!.IsEnabled; i++)
+                        await Task.Delay(10);
+                    Dispatcher.UIThread.RunJobs();
+                }
+                finally
+                {
+                    if (gate.CurrentCount == 0) gate.Release();
+                }
+            }
+            finally { window.Audit.DiffChanged -= DiffHandler; }
+
+            // Diff 完成：叠加层施加、禁用态复位；被忽略的编辑/撤销未留任何痕迹。
+            Assert.NotNull(window.Canvas!.DiffOverlay);
+            Assert.True(window.DiffToggle!.IsEnabled);
+            Assert.True(window.EditToolbar!.IsEnabled);
+            Assert.Single(window.Edit.RecentTxIds);
+            Assert.Equal(viewEditsBefore, f.Audit.ReadAll().Count(r => r.Entry.Kind == "view-edit"));
+            Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "rollback");
+        }
+        finally
+        {
+            window.Close();
+            f.Dispose();
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task EditCompleted_AuditTimeline_LiveRebuilds()
+    {
+        (MainWindow window, AuditFixture f) = ShowAuditWindow();
+        try
+        {
+            // 构造期快照：仅既有 tx。
+            Assert.Equal(1, window.AuditList!.ItemCount);
+            var tcs = new TaskCompletionSource();
+            void Handler() => tcs.TrySetResult();
+            window.Edit!.EditCompleted += Handler;
+            EditResult result;
+            try
+            {
+                result = await window.Edit.DrawLineAsync(0, 80, 100, 80);
+                await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally { window.Edit.EditCompleted -= Handler; }
+            Assert.True(result.Ok);
+            Assert.Null(window.Edit.ErrorMessage);
+
+            // RefreshAfterEdit → Audit.Rebuild → TimelineChanged → 列表 live 刷新（无需重开窗口）。
+            Assert.Equal(2, window.AuditList.ItemCount);
+            Assert.Same(window.Audit!.Transactions, window.AuditList.ItemsSource);
+            Assert.Contains(window.Audit.Transactions, g => g.TxId == result.TxId);
+        }
+        finally
+        {
+            window.Close();
+            f.Dispose();
+        }
     }
 }

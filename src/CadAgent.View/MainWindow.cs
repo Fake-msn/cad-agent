@@ -57,6 +57,9 @@ namespace CadAgent.View;
 /// ②驳回签认→快照回滚（RollbackTx→EditViewModel.UndoAsync，仅已提交 tx 可签认）；
 /// ③状态文件损坏优雅降级（audit.db/roles.yaml/signoffs.json → ErrorMessage/
 /// StateNote 提示，窗口照常打开、图纸照常渲染）；SetActiveTool 补 _editBusy 硬闸。
+/// 视图闭环 T5：审计时间线 live-rebuild（RefreshAfterEdit → Audit.Rebuild →
+/// TimelineChanged 刷新列表，编辑/撤销后无需重开窗口）；_diffBusy 硬闸
+/// （diff 加载期间画布点击/工具切换/撤销/删除/改层一律忽略，镜像 _editBusy）。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -83,6 +86,13 @@ public sealed class MainWindow : Window
     /// 视觉提示，RaiseEvent/画布点击可绕过禁用态，标志位才是硬闸。
     /// </summary>
     private bool _editBusy;
+
+    /// <summary>
+    /// Diff 加载重入闸（视图闭环 T5，镜像 _editBusy 结构性保证）：ApplyDiffAsync
+    /// 置位、完成复位；Diff 加载期间画布点击/工具切换/撤销/删除/改层一律忽略——
+    /// IsEnabled 只是视觉提示，RaiseEvent/画布点击可绕过禁用态，标志位才是硬闸。
+    /// </summary>
+    private bool _diffBusy;
 
     /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
     private (double X, double Y)? _moveBase;
@@ -244,6 +254,12 @@ public sealed class MainWindow : Window
         };
         auditList.SelectionChanged += OnTxSelected;
         AuditList = auditList;
+        // 视图闭环 T5：Rebuild 完成（成功或失败）→ live 刷新事务列表（无需重开窗口）。
+        audit.TimelineChanged += () =>
+        {
+            if (AuditList is not null && Audit is not null)
+                AuditList.ItemsSource = Audit.Transactions;
+        };
 
         var auditTopRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         auditTopRow.Children.Add(auditHeader);
@@ -982,10 +998,13 @@ public sealed class MainWindow : Window
     /// <summary>
     /// T6：加载对比并施加叠加层（评估期间禁用切换防重入）。失败 → 行内错误 +
     /// 切换回退；等待期间选择了别的事务 → 丢弃过期结果。
+    /// 视图闭环 T5：_diffBusy 硬闸——加载在途时重入一律忽略（IsEnabled 只是视觉提示）。
     /// </summary>
     private async Task ApplyDiffAsync(string txId)
     {
+        if (_diffBusy) return; // 硬闸：diff 加载在途时重入一律忽略（RaiseEvent 可绕过禁用态）
         if (DiffToggle is null || Canvas is null || Audit is null) return;
+        _diffBusy = true;
         DiffToggle.IsEnabled = false;
         if (EditToolbar is not null) EditToolbar.IsEnabled = false; // T9：diff 加载期间禁止编辑（互斥）
         try
@@ -1009,6 +1028,7 @@ public sealed class MainWindow : Window
         }
         finally
         {
+            _diffBusy = false;
             DiffToggle.IsEnabled = true;
             if (EditToolbar is not null) EditToolbar.IsEnabled = true;
         }
@@ -1209,38 +1229,42 @@ public sealed class MainWindow : Window
 
     /// <summary>T9：激活工具（清预览锚点/Move 基准/旧错误）。Select 恢复默认选择路径。
     /// 最终审查打包小项：_editBusy 硬闸——在途编辑期间工具切换一律忽略
-    /// （RaiseEvent 可绕过工具栏 IsEnabled=false，标志位才是结构性保证）。</summary>
+    /// （RaiseEvent 可绕过工具栏 IsEnabled=false，标志位才是结构性保证）。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间同样忽略。</summary>
     private void SetActiveTool(EditTool tool)
     {
-        if (Edit is null || Canvas is null || _editBusy) return;
+        if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         Edit.ActiveTool = tool;
         Canvas.SetPendingPoint(null);
         _moveBase = null;
         SetEditError(null);
     }
 
-    /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。</summary>
+    /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
     private void OnDeleteClick(object? sender, RoutedEventArgs e)
     {
-        if (Edit is null || Canvas is null || _editBusy) return;
+        if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
             _ = RunEditAsync(() => Edit.DeleteAsync(handle));
         else
             SetActiveTool(EditTool.Delete);
     }
 
-    /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。</summary>
+    /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
     private void OnUndoClick(object? sender, RoutedEventArgs e)
     {
-        if (Edit is null || _editBusy || Edit.RecentTxIds.Count == 0) return;
+        if (Edit is null || _editBusy || _diffBusy || Edit.RecentTxIds.Count == 0) return;
         string txId = Edit.RecentTxIds[^1];
         _ = RunEditAsync(() => Edit.UndoAsync(txId));
     }
 
-    /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。</summary>
+    /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
     private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
     {
-        if (Edit is null || Canvas is null || _editBusy) return;
+        if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.ChangeLayer
             && Canvas.SelectedHandle is string handle
             && EditLayerSelector?.SelectedItem is string layer)
@@ -1257,7 +1281,8 @@ public sealed class MainWindow : Window
     {
         if (Edit is null || Canvas is null) return false;
         // T10 重入闸：编辑在途时忽略画布点击（消费事件，不落预览锚点/不改选择）。
-        if (_editBusy) return true;
+        // 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间同样消费忽略。
+        if (_editBusy || _diffBusy) return true;
         switch (Edit.ActiveTool)
         {
             case EditTool.Line:
@@ -1354,6 +1379,8 @@ public sealed class MainWindow : Window
         Canvas.Invalidate(); // 状态栏计数刷新
         SetEditError(Edit.ErrorMessage);
         if (UndoButton is not null) UndoButton.IsEnabled = Edit.RecentTxIds.Count > 0;
+        // T9 承接闭环：审计时间线 live-rebuild（编辑/撤销/回滚后无需重开窗口）
+        Audit?.Rebuild();
     }
 
     private void SetEditError(string? message)
