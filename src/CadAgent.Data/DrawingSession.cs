@@ -71,6 +71,7 @@ public sealed class DrawingSession : IDrawingSession
     /// <summary>
     /// 加载图纸。.dwg 首载经 DWG 通知通道重建 census；working 分支内存 DXF 无 TCH 通知，
     /// census 由调用方经 <paramref name="persisted"/> 传入（sidecar UnparsedCensusStore.Load），缺省 Empty。
+    /// T3：persisted 对 .dxf 源同样生效（sidecar 注入/恢复 census；null→Empty，无 census 行为逐字不变）。
     /// </summary>
     public static DrawingSession Load(string path, UnparsedCensus? persisted = null)
     {
@@ -96,7 +97,7 @@ public sealed class DrawingSession : IDrawingSession
             ".dxf" => LoadDxf(path),
             _ => throw new NotSupportedException($"不支持的图纸格式: {ext}")
         };
-        return new DrawingSession(WorkingPathFor(path), doc);
+        return new DrawingSession(WorkingPathFor(path), doc, persisted);
     }
 
     private static CadDocument LoadDxf(string path)

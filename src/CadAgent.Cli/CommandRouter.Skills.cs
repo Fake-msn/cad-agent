@@ -52,8 +52,9 @@ public static partial class CommandRouter
     ///    缺参/未知占位符→InvalidSkillException→LoadOrReject audited refusal exit 1；
     /// 4) 请求审计先行（执行前）：Source="skill"、Kind="skill-run"、
     ///    paramsJson={skill,template,args,planId}，PlanRef=planId，哈希不可得→空串；
-    /// 5) 读图+三级闸口（镜像 RunPlan：Load/Inspect 失败→LoadOrReject audited refusal；
-    ///    Red→run-rejected 留痕拒执行；Yellow→警示放行）；overlay 存在→SemanticGate 注入
+    /// 5) 读图+三级闸口（镜像 RunPlan：LoadWithCensus sidecar 接线；Load/Inspect 失败→
+    ///    LoadOrReject audited refusal；Red/Yellow→run-rejected 留痕拒执行——T3 只读审查，
+    ///    Yellow 不再警示放行）；overlay 存在→SemanticGate 注入
     ///    （损坏→LoadOrReject 审计拒绝，不静默降级——与 run 一致）；
     /// 6) StepEngine.Run→stdout TxResult JSON（与 run 同形 {txId,ok,stepsDone,error}）；
     ///    失败事务→drawing.Reload()（镜像 RunPlan）；exit 0/1。
@@ -108,24 +109,29 @@ public static partial class CommandRouter
         // 读图+三级闸口（镜像 RunPlan）：Load/Inspect 失败一并 LoadOrReject 留痕。
         var loaded = LoadOrReject(() =>
         {
-            var d = DrawingSession.Load(drawingPath);
+            var d = LoadWithCensus(drawingPath, agentDir);
             return Tuple.Create(d, GateDetector.Inspect(d.Summarize(), new EmptySupportMatrix()));
         }, drawingPath, session, audit, op, stderr, source: "skill");
         if (loaded is null) return 1;
         var (drawing, report) = loaded;
         if (GateRefusesRun(report))
         {
-            // spec 硬要求6：信息不完整（Red）图纸禁止操作——不执行任何步骤（与 run 一致）。
+            // spec 硬要求6（T3 收紧）：Red/Yellow 图纸禁止修改——不执行任何步骤（与 run 一致；
+            // Yellow=只读审查，未解析对象无句柄/几何，禁触区无法定位，全图级拦截）。
             string hash = drawing.ComputeHash();
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "skill", "run-rejected", drawingPath,
-                JsonSerializer.Serialize(new { level = report.Level.ToString(), unsupportedCount = report.Unsupported.Count }),
+                JsonSerializer.Serialize(new
+                {
+                    level = report.Level.ToString(),
+                    unsupportedCount = report.Unsupported.Count,
+                    unparsedCount = drawing.Unparsed.TotalCount,
+                    guidance = report.Guidance
+                }),
                 hash, hash, "", plan.PlanId));
             stderr.WriteLine(report.Guidance);
             return 1;
         }
-        if (report.Level == GateLevel.Yellow)
-            stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
         // 语义闸口接线（镜像 RunPlan）：overlay 存在→加载注入；不存在→null（几何级流程
         // 不受影响）；存在但损坏→审计拒绝、不执行（不得静默降级为 null 闸口）。
         string overlayPath = SemanticOverlayPath(agentDir);

@@ -14,6 +14,13 @@ public static partial class CommandRouter
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
+    // intake stdout census 加性（T3）：unparsed 字段仅非空 census 输出——WhenWritingNull
+    // 省略 null（无 census 图纸 stdout 逐字不变，T1 Fix Round 1 契约保持；其余字段恒非 null）。
+    private static readonly JsonSerializerOptions IntakeJsonOpts = new(JsonOpts)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
     // semantic 族 stdout 契约（Task 8 E2E 依赖）：camelCase 属性名 + 枚举字符串原样
     // （HumanConfirmed/Wall 等 PascalCase 枚举值不加命名策略）。
     // 放宽转义：中文图层名按字面输出（默认编码器会转成 \uXXXX，破坏 Contains 断言）；
@@ -69,11 +76,27 @@ public static partial class CommandRouter
     }
 
     /// <summary>
-    /// Gate-at-run policy (spec hard-req 6): Red drawings are information-incomplete
-    /// and must not be operated on. Yellow proceeds with a warning (semantic-level
-    /// interception is Plan 2 policy).
+    /// Gate-at-run policy (spec hard-req 6; 防假 Green T3 收紧): Yellow/Red 一律拒绝修改——
+    /// 未解析对象无句柄/几何，禁触区无法定位，全图级拦截（只读审查）。仅 Green 放行。
     /// </summary>
-    internal static bool GateRefusesRun(GateReport report) => report.Level == GateLevel.Red;
+    internal static bool GateRefusesRun(GateReport report) => report.Level != GateLevel.Green;
+
+    /// <summary>
+    /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent 四消费点共用。
+    /// persisted=Store.Load → DrawingSession.Load(path, persisted) → census 非空回写（原子写）。
+    /// agentDir 约定 = project/.cadagent（Run 唯一装配点），sidecar 以 projectDir 键控。
+    /// 已知限制（T1 单文件多源互斥）：第二源 Save 覆盖第一源，Load 靠 SourcePath 匹配诚实
+    /// Empty——多源场景 census 仅最近源有效（见 UnparsedCensusStore 注释）。
+    /// </summary>
+    private static DrawingSession LoadWithCensus(string drawingPath, string agentDir)
+    {
+        string projectDir = Path.GetDirectoryName(Path.GetFullPath(agentDir))!;
+        var persisted = UnparsedCensusStore.Load(projectDir, drawingPath);
+        var session = DrawingSession.Load(drawingPath, persisted);
+        if (session.Unparsed.TotalCount > 0)
+            UnparsedCensusStore.Save(projectDir, drawingPath, session.Unparsed);
+        return session;
+    }
 
     private static string[] StripOptionValues(string[] args)
     {
@@ -111,7 +134,7 @@ public static partial class CommandRouter
         GateReport report;
         try
         {
-            drawing = DrawingSession.Load(file);
+            drawing = LoadWithCensus(file, agentDir);
             summary = drawing.Summarize();
             report = GateDetector.Inspect(summary, new EmptySupportMatrix());
         }
@@ -132,8 +155,11 @@ public static partial class CommandRouter
             level = report.Level.ToString(),
             unsupported = report.Unsupported,
             guidance = report.Guidance,
-            summary
-        }, JsonOpts));
+            summary,
+            // census 数组（类×计数，T3 加性）：通知侧未解析对象普查—— Yellow/Red 判定的证据面；
+            // 空 census → null → WhenWritingNull 省略（legacy stdout 逐字不变）。
+            unparsed = drawing.Unparsed.TotalCount > 0 ? drawing.Unparsed.Classes : null
+        }, IntakeJsonOpts));
         return report.Level switch { GateLevel.Green => 0, GateLevel.Yellow => 2, _ => 3 };
     }
 
@@ -179,7 +205,7 @@ public static partial class CommandRouter
         GateReport report;
         try
         {
-            drawing = DrawingSession.Load(drawingPath);
+            drawing = LoadWithCensus(drawingPath, agentDir);
             report = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
         }
         catch (Exception ex)
@@ -194,19 +220,21 @@ public static partial class CommandRouter
         }
         if (GateRefusesRun(report))
         {
-            // spec 硬要求6：信息不完整（Red）图纸禁止操作——不执行任何步骤。
+            // spec 硬要求6（T3 收紧）：信息不完整（Red）或部分未解析（Yellow）图纸禁止修改——
+            // 不执行任何步骤。Yellow=只读审查（未解析对象无句柄/几何，禁触区无法定位，全图级拦截）。
             string hash = drawing.ComputeHash();
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "run", "run-rejected", drawingPath,
-                JsonSerializer.Serialize(new { level = report.Level.ToString(), unsupportedCount = report.Unsupported.Count }),
+                JsonSerializer.Serialize(new
+                {
+                    level = report.Level.ToString(),
+                    unsupportedCount = report.Unsupported.Count,
+                    unparsedCount = drawing.Unparsed.TotalCount,
+                    guidance = report.Guidance
+                }),
                 hash, hash, "", ""));
             stderr.WriteLine(report.Guidance);
             return 1;
-        }
-        if (report.Level == GateLevel.Yellow)
-        {
-            // Yellow 放行+警示（语义级拦截属计划2的既定策略）。
-            stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
         }
         // 语义闸口接线：overlay 存在→加载注入；不存在→null（几何级流程不受影响，诚实降级）。
         // 存在但损坏→审计拒绝、不执行（最终审查裁定：不得静默降级为 null 闸口）。

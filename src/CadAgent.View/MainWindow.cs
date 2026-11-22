@@ -234,6 +234,10 @@ public sealed class MainWindow : Window
         string agentDir = Path.Combine(vm.ProjectDir, ".cadagent");
         string auditDbPath = Path.Combine(agentDir, "audit.db");
         var stateNotes = new List<string>();
+        // 防假 Green 切片 T3：census 警示——未解析天正对象不进入渲染模型（无句柄/几何），
+        // 显示不完整；修改操作已由 EditViewModel 准入闸全图级拦截（只读审查）。
+        if (vm.Session.Unparsed.TotalCount > 0)
+            stateNotes.Add($"含 {vm.Session.Unparsed.TotalCount} 个未解析天正对象，显示不完整（只读审查）");
         IAuditStore auditStore;
         if (!File.Exists(auditDbPath))
         {
@@ -685,12 +689,13 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// 状态文件损坏降级提示（最终审查修复③；audit.db/roles.yaml/signoffs.json）。
-    /// null=全部状态健康。图纸加载失败走 MainViewModel.ErrorMessage（先行短路）。
+    /// 状态文件损坏降级提示（最终审查修复③；audit.db/roles.yaml/signoffs.json）
+    /// + census 显示不完整警示（T3：含 N 个未解析天正对象，只读审查）。
+    /// null=全部状态健康且无未解析对象。图纸加载失败走 MainViewModel.ErrorMessage（先行短路）。
     /// </summary>
     public string? ErrorMessage { get; private set; }
 
-    /// <summary>降级提示文本块（有降级时可见，位于底部面板区上方）。</summary>
+    /// <summary>降级/警示文本块（有降级或 census 警示时可见，位于底部面板区上方）。</summary>
     public TextBlock? StateNote { get; private set; }
 
     /// <summary>画布视图模型（加载成功时非 null）——图层面板/选择联动入口。</summary>

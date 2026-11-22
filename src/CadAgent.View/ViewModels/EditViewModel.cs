@@ -9,7 +9,7 @@ namespace CadAgent.View.ViewModels;
 /// <summary>手动编辑工具（计划4 T9）。Select 为默认选择工具，不产生编辑。</summary>
 public enum EditTool { Select, Line, Text, Move, Delete, ChangeLayer, InsertBlock }
 
-/// <summary>编辑结果：Ok/TxId/Error（请求被拒于执行之前时 TxId 为空）；Warning 为 Yellow 闸口放行警示（非阻塞）。</summary>
+/// <summary>编辑结果：Ok/TxId/Error（请求被拒于执行之前时 TxId 为空）。Warning 为历史字段（T3 起 Yellow 一律拒绝，恒空；签名兼容保留）。</summary>
 public sealed record EditResult(bool Ok, string TxId, string Error, string Warning = "");
 
 /// <summary>
@@ -19,8 +19,8 @@ public sealed record EditResult(bool Ok, string TxId, string Error, string Warni
 /// 契约）→ 先审计 view-edit 请求（Source="view"，Kind="view-edit"，
 /// params{tool,args,planId}，Target=图纸路径，前后哈希一致——请求本身不改图，
 /// PlanRef=planId 供审计员关联后续 tx）→ 准入闸口（镜像 CLI RunPlan：
-/// GateDetector.Inspect + EmptySupportMatrix，Red→run-rejected 留痕拒绝执行，
-/// Yellow→放行+结果警示）→ StepEngine.Run（语义闸口接线逐字镜像
+/// GateDetector.Inspect + EmptySupportMatrix，Red/Yellow→run-rejected 留痕拒绝执行——
+/// T3 只读审查，Yellow 不再放行）→ StepEngine.Run（语义闸口接线逐字镜像
 /// CLI RunPlan：.cadagent/semantic.json 存在→加载注入，损坏→intake-rejected
 /// 留痕后拒绝执行，绝不静默降级）。成功：StepEngine 已 SaveWorking，session.Doc
 /// 即最新（不 Reload），RecentTxIds 压栈；失败：ErrorMessage + session.Reload
@@ -178,23 +178,25 @@ public sealed class EditViewModel
             hash, hash, "", planId));
 
         // 准入闸口（最终审查修复①，镜像 CLI RunPlan，spec §4.2）：每次 ApplyAsync 都检
-        // （session 已加载，Summarize+Inspect 开销小）。Red（仅代理/未支持对象）→
-        // run-rejected 留痕（Source="view"，params{level,unsupportedCount} 镜像 CLI 字段，
-        // 前后哈希一致——拒绝本身不改图）后拒绝执行，绝不开始 tx。
-        // Yellow → 放行 + 结果携带警示（EmptySupportMatrix 下任何 unknown 均 unsupported，
-        // Yellow 实际不可达——分支为与 CLI 逐字对齐的防御性保留，矩阵点亮后生效）。
+        // （session 已加载，Summarize+Inspect 开销小）。T3 收紧：Red/Yellow 一律拒绝——
+        // 未解析对象无句柄/几何，禁触区无法定位，全图级拦截（Yellow=只读审查）。
+        // run-rejected 留痕（Source="view"，params{level,unsupportedCount,unparsedCount,guidance}
+        // 镜像 CLI 字段，前后哈希一致——拒绝本身不改图）后拒绝执行，绝不开始 tx。
         GateReport gate = GateDetector.Inspect(_session.Summarize(), new EmptySupportMatrix());
-        if (gate.Level == GateLevel.Red)
+        if (gate.Level != GateLevel.Green)
         {
             _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 _sessionId, "view", "run-rejected", _session.SourcePath,
-                JsonSerializer.Serialize(new { level = gate.Level.ToString(), unsupportedCount = gate.Unsupported.Count }),
+                JsonSerializer.Serialize(new
+                {
+                    level = gate.Level.ToString(),
+                    unsupportedCount = gate.Unsupported.Count,
+                    unparsedCount = _session.Unparsed.TotalCount,
+                    guidance = gate.Guidance
+                }),
                 hash, hash, "", planId));
             return new EditResult(false, "", gate.Guidance);
         }
-        string gateWarning = gate.Level == GateLevel.Yellow
-            ? $"警告: 图纸含 {gate.Unsupported.Count} 个未支持对象（Yellow 放行）。{gate.Guidance}"
-            : "";
 
         // 语义闸口接线（镜像 CLI RunPlan）：overlay 存在→加载注入；不存在→null
         // （几何级流程不受影响）；存在但损坏→intake-rejected 留痕后拒绝，不静默降级。
@@ -208,7 +210,7 @@ public sealed class EditViewModel
         var engine = new StepEngine(_audit, _snapshots, _identity, _roles, HandlerRegistry.All(), semanticGate);
         var plan = new StepPlan(planId, new[] { new StepSpec(kind, args) });
         TxResult tx = engine.Run(plan, _session, _sessionId);
-        return tx.Ok ? new EditResult(true, tx.TxId, "", gateWarning) : new EditResult(false, tx.TxId, tx.Error);
+        return tx.Ok ? new EditResult(true, tx.TxId, "") : new EditResult(false, tx.TxId, tx.Error);
     }
 
     /// <summary>镜像 CLI Rollback：快照必须属于当前图纸，防止跨图纸覆盖。</summary>

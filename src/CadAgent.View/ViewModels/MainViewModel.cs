@@ -17,7 +17,13 @@ public sealed class MainViewModel
         SkillDirs = skillDirs ?? Array.Empty<string>();
         try
         {
-            _session = DrawingSession.Load(drawingPath);
+            // census sidecar 接线（防假 Green T3，等价 CLI LoadWithCensus）：working DXF 丢失
+            // TCH 对象后二次加载仍恢复 census（显示不完整警示依据）；首载 DWG 通知 census
+            // 非空→回写 sidecar（原子写）。单文件多源互斥限制见 UnparsedCensusStore 注释。
+            var persisted = UnparsedCensusStore.Load(projectDir, drawingPath);
+            _session = DrawingSession.Load(drawingPath, persisted);
+            if (_session.Unparsed.TotalCount > 0)
+                UnparsedCensusStore.Save(projectDir, drawingPath, _session.Unparsed);
         }
         catch (Exception ex)
         {

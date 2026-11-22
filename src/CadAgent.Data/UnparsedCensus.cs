@@ -34,7 +34,11 @@ public sealed record UnparsedCensus(IReadOnlyList<UnparsedClassBrief> Classes)
     }
 }
 
-/// <summary>census sidecar（.cadagent/unparsed.json）：working copy 丢失 TCH 对象后二次加载仍可见。</summary>
+/// <summary>
+/// census sidecar（.cadagent/unparsed.json）：working copy 丢失 TCH 对象后二次加载仍可见。
+/// 已知限制（单文件多源互斥）：一个项目仅一份 sidecar——第二源 Save 覆盖第一源，
+/// Load 靠 SourcePath+SourceHash 匹配诚实返回 Empty；多源场景 census 仅最近源有效。
+/// </summary>
 public static class UnparsedCensusStore
 {
     private sealed record Sidecar(string SourcePath, string SourceHash, IReadOnlyList<UnparsedClassBrief> Classes);
@@ -70,6 +74,10 @@ public static class UnparsedCensusStore
         string p = SidecarPath(projectDir);
         Directory.CreateDirectory(Path.GetDirectoryName(p)!);
         var sc = new Sidecar(Path.GetFullPath(sourcePath), HashOf(sourcePath), census.Classes);
-        File.WriteAllText(p, JsonSerializer.Serialize(sc));
+        // 原子写（T3 闭合 T1 deferred minor，对齐 SaveWorking 约定）：先写 tmp 再 Move——
+        // 写中途崩溃不损既有 sidecar（census 证据不因半截 JSON 降级 Empty）。
+        string tmp = p + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(sc));
+        File.Move(tmp, p, overwrite: true);
     }
 }
