@@ -149,6 +149,18 @@ public sealed class DrawingCanvas : Control
 
     private void DrawItem(DrawingContext context, RenderItem item, Pen pen)
     {
+        if (item.DashPattern is { Count: > 0 } dp)
+        {
+            // drawing 单位 → 设备像素 → pen 厚度倍数（Avalonia DashStyle 口径）。
+            // 亚像素图案（任一段 < 0.25px）→实线降级防摩尔纹；超长图案总量守卫防性能退化。
+            double[] device = dp.Select(d => d * ViewModel.Scale).ToArray();
+            if (device.All(d => d >= 0.25) && device.Sum() < 1e6)
+                pen = new Pen(pen.Brush, pen.Thickness)
+                {
+                    DashStyle = new DashStyle(device.Select(d => d / pen.Thickness), 0)
+                };
+        }
+
         switch (item.Kind)
         {
             case RenderKind.Line:
@@ -189,7 +201,9 @@ public sealed class DrawingCanvas : Control
                 if (item.Points.Count < 1 || string.IsNullOrEmpty(item.Text)) break;
                 double fontSize = item.TextHeight * ViewModel.Scale;
                 if (fontSize < MinTextFontSize) break; // 亚像素文本不可读，跳过
-                bool isSelected = ReferenceEquals(pen, SelectionPen);
+                // 选中判定按 brush 引用：dash 克隆 pen 保留原 brush（SelectionPen
+                // 用 Brushes.Yellow 单例，普通/对比 pen 均为独立实例），克隆后仍成立。
+                bool isSelected = ReferenceEquals(pen.Brush, SelectionPen.Brush);
                 // pen.Brush：普通 pen 即图元色；选中黄 / T6 对比灰/绿/红随 pen 传递。
                 var text = new FormattedText(
                     item.Text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,

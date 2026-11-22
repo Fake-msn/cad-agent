@@ -958,4 +958,155 @@ public class RenderModelTests
         };
         Assert.Equal((0.0, 0.0, 10.0, 10.0), RenderModelBuilder.Bounds(items));
     }
+
+    // ---- Task 3（线型虚实 dash）：LineType 段 → DashPattern ----
+    // 夹具经真实 DXF 往返（WithSession 先例）。探针核定 3.8.35：往返保留
+    // LineType 名/段长/Shape/Text 标志、Entity.LineTypeScale、Layer.LineType；
+    // 默认实体 LineType 名为 ByLayer（回退图层线型）。HasShapes/IsComplex 只读
+    // （CS0200），且 IsComplex 语义为"含任意段"（纯划空线型亦 true）——复杂线型
+    // 夹具以 IsShape=true 的 Shape 段构造（IsShape 公开可设，往返保留）。
+
+    [Fact]
+    public void Line_DashedLineType_ProducesDashPattern()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASHED");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.NotNull(item.DashPattern);
+            Assert.Equal(new double[] { 5, 2 }, item.DashPattern!.ToArray()); // 绝对值，on/off 交替
+        });
+    }
+
+    [Fact]
+    public void Line_Continuous_NoDash()
+    {
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0) });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Null(item.DashPattern);
+        });
+    }
+
+    [Fact]
+    public void Line_ByLayerLineType_ResolvesLayerDash()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASH2");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 3 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -1 });
+            doc.LineTypes.Add(lt);
+            var layer = new Layer("DASHLAYER") { LineType = lt };
+            doc.Layers.Add(layer);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), Layer = layer });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 3, 1 }, item.DashPattern!.ToArray());
+        });
+    }
+
+    [Fact]
+    public void Line_LineTypeScale_MultipliesPattern()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASH3");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 4 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt, LineTypeScale = 2 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 8, 4 }, item.DashPattern!.ToArray());
+        });
+    }
+
+    [Fact]
+    public void Line_ComplexLineType_SolidFallback()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("FENCELINE1");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2 });
+            // 复杂线型（形/文字）→实线降级（shapes deferred，spec 注记见计划 Task 11）。
+            // HasShapes 只读→以 Shape 段构造（探针核定 IsShape 公开可设且往返保留）。
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 0, IsShape = true, ShapeNumber = 1 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Null(item.DashPattern);
+        });
+    }
+
+    [Fact]
+    public void Line_TextLineType_SolidFallback()
+    {
+        // 文字嵌入线型（如 GAS_LINE）同样诚实降级实线——HasShapes 对纯 Text 段
+        // 为 false（探针核定），须按段 IsText 判定（shapes/text deferred）。
+        WithSession(doc =>
+        {
+            var lt = new LineType("GAS_LINE");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2, IsText = true, Text = "GAS" });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Null(item.DashPattern);
+        });
+    }
+
+    [Fact]
+    public void Line_DashDotLineType_PointApproximated()
+    {
+        // 点段（Length=0）→ 0.1×scale 短划近似（注释说明的口径）；
+        // DASHDOT 4 段 [5,-1,0,-1] → [5,1,0.1,1]。
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASHDOT");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -1 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 0 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -1 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 5, 1, 0.1, 1 }, item.DashPattern!.ToArray());
+        });
+    }
+
+    [Fact]
+    public void Line_OddSegmentCount_PadsLastSegment()
+    {
+        // 奇数段→补末段凑偶（Avalonia DashStyle 要求 on/off 对）：[5] → [5,5]。
+        WithSession(doc =>
+        {
+            var lt = new LineType("ODD");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 5, 5 }, item.DashPattern!.ToArray());
+        });
+    }
 }

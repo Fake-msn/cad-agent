@@ -1,6 +1,7 @@
 using System.Globalization;
 using ACadSharp;
 using ACadSharp.Entities;
+using ACadSharp.Tables;
 using CadAgent.Data;
 using CSMath;
 
@@ -28,8 +29,9 @@ public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 /// Hatch: Points 为各边界路径的顶点序列（GetPoints(16) 弧段插值），**各路径之间以
 /// (NaN,NaN) 分隔**——画布按分隔符拆分 figure 并以 EvenOdd 填充规则跨路径挖岛；
 /// 分隔符不是坐标，Bounds 等消费方必须跳过。
-/// <see cref="DashPattern"/> 为 Task 3（线型虚实）预置：虚线段长序列（世界单位，
-/// 空/null=实线），本任务不消费；<see cref="Fill"/> 仅对 Hatch 有意义：true=实心
+/// <see cref="DashPattern"/> 为线型虚实（Task 3）：虚线段长序列（drawing 单位
+/// on/off 交替，LineTypeScale 已乘入；空/null=实线），画布 DrawItem 入口换算
+/// DashStyle；<see cref="Fill"/> 仅对 Hatch 有意义：true=实心
 /// 填充（IsSolid），false=仅描边界轮廓（图案填充的图案线生成 deferred）。
 /// 可选参置于 Handle 之后（Closed→DashPattern→Fill 顺序追加，位置构造兼容）。
 /// </summary>
@@ -60,6 +62,8 @@ public sealed record RenderItem(
 /// OCS（任意轴算法，计划4 延迟项 Task 1）：非默认法向的 Circle/Arc/LwPolyline/
 /// TextEntity/MText/Insert 经 OcsMapper 投影到 WCS XY；默认法向 (0,0,1) 走原路径。
 /// Hatch 边界顶点同为 OCS 坐标，经同一 OcsMapper 投影（Task 2）。
+/// 线型虚实（Task 3）：LineType 段→DashPattern（ByLayer 回退+LineTypeScale；
+/// 复杂线型实线降级，shapes/text deferred）。
 /// </summary>
 public static class RenderModelBuilder
 {
@@ -154,6 +158,9 @@ public static class RenderModelBuilder
         // Top-level entities use their own DXF handle; insert children receive the
         // parent insert's handle + child-index suffix (computed in the Insert case).
         handle ??= e.Handle.ToString(CultureInfo.InvariantCulture);
+        // 线型虚实（Task 3）：入口统一解析一次，各产出 case 传入；Insert/Dimension
+        // 子图元经递归 Append 各自解析（child 的 LineType/图层独立生效）。
+        IReadOnlyList<double>? dash = ResolveDash(e);
 
         switch (e)
         {
@@ -161,7 +168,7 @@ public static class RenderModelBuilder
                 // Line 端点为 WCS（DXF 约定：LINE 不受 OCS 法向影响）——不接 OCS。
                 items.Add(new RenderItem(RenderKind.Line,
                     new[] { t.Apply(line.StartPoint.X, line.StartPoint.Y), t.Apply(line.EndPoint.X, line.EndPoint.Y) },
-                    layer, color, null, 0, 0, handle));
+                    layer, color, null, 0, 0, handle, DashPattern: dash));
                 break;
 
             // Arc : Circle — must precede the Circle case.
@@ -177,14 +184,14 @@ public static class RenderModelBuilder
                     // 口径不同，见 Arc_MirroredNormalInsideRotatedInsert 测试）。
                     AppendTessellatedArc(items, layer, color, handle, t, ocs,
                         arc.Center.X, arc.Center.Y, arc.Radius,
-                        ToDeg(arc.StartAngle), NormDeg(ToDeg(arc.EndAngle - arc.StartAngle)));
+                        ToDeg(arc.StartAngle), NormDeg(ToDeg(arc.EndAngle - arc.StartAngle)), dash);
                     break;
                 }
                 (double cx, double cy) = t.Apply(arc.Center.X, arc.Center.Y);
                 double r = arc.Radius * t.RadiusScale;
                 items.Add(new RenderItem(RenderKind.Arc,
                     new[] { (cx, cy), (r, NormDeg(ToDeg(arc.StartAngle) + rotationDeg)), (NormDeg(ToDeg(arc.EndAngle) + rotationDeg), 0.0) },
-                    layer, color, null, 0, 0, handle));
+                    layer, color, null, 0, 0, handle, DashPattern: dash));
                 break;
             }
 
@@ -196,14 +203,14 @@ public static class RenderModelBuilder
                     // 非默认法向：整圆 tessellation（startDeg 0 / sweep 360）。
                     AppendTessellatedArc(items, layer, color, handle, t, ocs,
                         circle.Center.X, circle.Center.Y, circle.Radius,
-                        startDeg: 0, sweepDeg: 360);
+                        startDeg: 0, sweepDeg: 360, dash: dash);
                     break;
                 }
                 (double cx, double cy) = t.Apply(circle.Center.X, circle.Center.Y);
                 double r = circle.Radius * t.RadiusScale;
                 items.Add(new RenderItem(RenderKind.Circle,
                     new[] { (cx, cy), (r, 0.0) },
-                    layer, color, null, 0, 0, handle));
+                    layer, color, null, 0, 0, handle, DashPattern: dash));
                 break;
             }
 
@@ -221,7 +228,7 @@ public static class RenderModelBuilder
                 if (lw.IsClosed && pts.Count > 0) pts.Add(pts[0]);
                 // Bulge (arc segments) approximated as straight chords — canvas task
                 // may tessellate later.
-                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle));
+                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle, DashPattern: dash));
                 break;
             }
 
@@ -231,7 +238,7 @@ public static class RenderModelBuilder
                 var pts = new List<(double X, double Y)>(p2.Vertices.Count + 1);
                 foreach (Vertex2D v in p2.Vertices) pts.Add(t.Apply(v.Location.X, v.Location.Y));
                 if (p2.IsClosed && pts.Count > 0) pts.Add(pts[0]);
-                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle));
+                items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle, DashPattern: dash));
                 break;
             }
 
@@ -242,7 +249,7 @@ public static class RenderModelBuilder
                 (double ox, double oy) = ocs.Apply(text.InsertPoint.X, text.InsertPoint.Y);
                 items.Add(new RenderItem(RenderKind.Text,
                     new[] { t.Apply(ox, oy) },
-                    layer, color, text.Value, text.Height * heightScale, NormDeg(OcsRotation(ToDeg(text.Rotation), ocs) + rotationDeg), handle));
+                    layer, color, text.Value, text.Height * heightScale, NormDeg(OcsRotation(ToDeg(text.Rotation), ocs) + rotationDeg), handle, DashPattern: dash));
                 break;
             }
 
@@ -254,7 +261,7 @@ public static class RenderModelBuilder
                 (double ox, double oy) = ocs.Apply(mtext.InsertPoint.X, mtext.InsertPoint.Y);
                 items.Add(new RenderItem(RenderKind.Text,
                     new[] { t.Apply(ox, oy) },
-                    layer, color, mtext.PlainText, mtext.Height * heightScale, NormDeg(OcsRotation(ToDeg(mtext.Rotation), ocs) + rotationDeg), handle));
+                    layer, color, mtext.PlainText, mtext.Height * heightScale, NormDeg(OcsRotation(ToDeg(mtext.Rotation), ocs) + rotationDeg), handle, DashPattern: dash));
                 break;
             }
 
@@ -314,7 +321,7 @@ public static class RenderModelBuilder
                 }
                 if (pts.Count == 0) { skipped++; break; }
                 // 图案填充（非 solid）渲染边界轮廓；图案线生成 deferred（spec 注记，不假装）
-                items.Add(new RenderItem(RenderKind.Hatch, pts, layer, color, null, 0, 0, handle, Fill: hatch.IsSolid));
+                items.Add(new RenderItem(RenderKind.Hatch, pts, layer, color, null, 0, 0, handle, DashPattern: dash, Fill: hatch.IsSolid));
                 break;
             }
 
@@ -407,7 +414,7 @@ public static class RenderModelBuilder
     private static void AppendTessellatedArc(
         List<RenderItem> items, string layer, uint color, string handle,
         Affine t, Affine ocs, double cx, double cy, double radius,
-        double startDeg, double sweepDeg, int segments = 72)
+        double startDeg, double sweepDeg, IReadOnlyList<double>? dash, int segments = 72)
     {
         // 整圆（|sweep|≥360）取 segments 个均匀采样点、不重复首点：点集均值即圆心、
         // 最大偏移即半径（测试断言口径）；若重复闭合点，均值会偏移 radius/(segments+1)。
@@ -424,7 +431,32 @@ public static class RenderModelBuilder
             (double ox, double oy) = ocs.Apply(cx + radius * Math.Cos(a), cy + radius * Math.Sin(a));
             pts.Add(t.Apply(ox, oy));
         }
-        items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle, Closed: fullCircle));
+        items.Add(new RenderItem(RenderKind.Polyline, pts, layer, color, null, 0, 0, handle, Closed: fullCircle, DashPattern: dash));
+    }
+
+    /// <summary>
+    /// 线型图案解析（drawing 单位 on/off 交替）：实体 LineType 优先，ByLayer 回退图层；
+    /// Continuous/ByLayer/ByBlock/空段→null（实线）。段 Length 正=划、负=空、0=点
+    /// （点划近似 0.1×scale）。复杂线型（HasShapes/含 Shape/Text 段）→null 实线
+    /// 降级——形/文字嵌入 deferred（不假装）。LineTypeScale 乘入。
+    /// 奇数段→补末段凑偶（Avalonia DashStyle 要求 on/off 对）。
+    /// 注意：ACadSharp 3.8.35 的 IsComplex 语义为"含任意段"（探针核定：纯划空
+    /// 线型亦为 true），不能作复杂判据——复杂=HasShapes 或含 Shape/Text 段。
+    /// </summary>
+    private static IReadOnlyList<double>? ResolveDash(Entity e)
+    {
+        LineType? lt = e.LineType;
+        if (lt is null || lt.Name == "ByLayer") lt = e.Layer?.LineType;
+        if (lt is null || lt.Name is "Continuous" or "ByLayer" or "ByBlock") return null;
+        if (lt.HasShapes) return null;
+        var segs = lt.Segments.ToList();
+        if (segs.Count == 0 || segs.Any(s => s.IsShape || s.IsText)) return null;
+        double scale = e.LineTypeScale <= 0 ? 1 : e.LineTypeScale;
+        var pattern = new List<double>();
+        foreach (LineType.Segment s in segs)
+            pattern.Add(s.Length == 0 ? 0.1 * scale : Math.Max(Math.Abs(s.Length) * scale, 0.01));
+        if (pattern.Count % 2 == 1) pattern.Add(pattern[^1]);
+        return pattern;
     }
 
     /// <summary>
