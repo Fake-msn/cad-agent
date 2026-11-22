@@ -38,6 +38,29 @@ public sealed class MoveEntityHandler : IStepHandler
             case TextEntity text:
                 text.InsertPoint = new XYZ(text.InsertPoint.X + dx, text.InsertPoint.Y + dy, text.InsertPoint.Z);
                 break;
+            // Arc : Circle（ACadSharp 3.8.35 继承）——Arc 分支必须先于 Circle，否则不可达。
+            case Arc arc:
+                // Z 高程保持（同 Line 先例）：真实图纸带标高，XY 压平会丢高程。
+                arc.Center = new XYZ(arc.Center.X + dx, arc.Center.Y + dy, arc.Center.Z);
+                break;
+            case Circle circle:
+                circle.Center = new XYZ(circle.Center.X + dx, circle.Center.Y + dy, circle.Center.Z);
+                break;
+            case MText mtext:
+                mtext.InsertPoint = new XYZ(mtext.InsertPoint.X + dx, mtext.InsertPoint.Y + dy, mtext.InsertPoint.Z);
+                break;
+            case Insert insert:
+                insert.InsertPoint = new XYZ(insert.InsertPoint.X + dx, insert.InsertPoint.Y + dy, insert.InsertPoint.Z);
+                break;
+            case LwPolyline lw:
+                // 顶点为 XY；Z 高程经 Elevation 承载，平移不动它（保持）。
+                foreach (LwPolyline.Vertex v in lw.Vertices)
+                    v.Location = new XY(v.Location.X + dx, v.Location.Y + dy);
+                break;
+            case Polyline2D p2:
+                foreach (Vertex2D v in p2.Vertices)
+                    v.Location = new XYZ(v.Location.X + dx, v.Location.Y + dy, v.Location.Z);
+                break;
             default:
                 return new StepResult(false, $"move 暂不支持实体类型 {entity.GetType().Name}", "");
         }
