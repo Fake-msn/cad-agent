@@ -8,6 +8,7 @@
     <ProjectReference Include="..\CadAgent.View\CadAgent.View.csproj" />
     <ProjectReference Include="..\CadAgent.Llm\CadAgent.Llm.csproj" />
     <ProjectReference Include="..\CadAgent.Adapters.Zwcad\CadAgent.Adapters.Zwcad.csproj" />
+    <ProjectReference Include="..\CadAgent.Adapters.Acad\CadAgent.Adapters.Acad.csproj" />
   </ItemGroup>
 
   <ItemGroup>

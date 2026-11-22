@@ -11,8 +11,28 @@ namespace CadAgent.Cli;
 /// </summary>
 public static partial class CommandRouter
 {
-    /// <summary>测试注入运行时工厂；null→生产 ZwcadRuntime（Available 检查）。</summary>
+    /// <summary>测试注入运行时工厂；null→生产运行时（CADAGENT_RUNTIME 选择，Available 检查）。</summary>
     internal static Func<ICadRuntime?>? RuntimeFactory;
+
+    /// <summary>运行时选择 seam（默认读 CADAGENT_RUNTIME 环境变量；null/空→zwcad）。</summary>
+    internal static Func<string?> RuntimeSelector =
+        () => Environment.GetEnvironmentVariable("CADAGENT_RUNTIME");
+
+    internal static string ResolveRuntimeName()
+    {
+        var name = (RuntimeSelector() ?? "zwcad").Trim().ToLowerInvariant();
+        if (name is not ("zwcad" or "acad"))
+            throw new CadRuntimeException($"未知 CADAGENT_RUNTIME: {name}（支持: zwcad, acad）");
+        return name;
+    }
+
+    /// <summary>纯工厂（不做可用性检查；构造不激活 COM）。</summary>
+    internal static ICadRuntime CreateRuntimeInstance(string name) => name switch
+    {
+        "zwcad" => new CadAgent.Adapters.Zwcad.ZwcadRuntime(),
+        "acad" => new CadAgent.Adapters.Acad.AcadRuntime(),
+        _ => throw new CadRuntimeException($"未知运行时: {name}")
+    };
 
     private static int Export(string[] args, string agentDir, string session, TextWriter stdout, TextWriter stderr)
     {
@@ -25,7 +45,7 @@ public static partial class CommandRouter
 
         ICadRuntime? runtime = RuntimeFactory != null
             ? RuntimeFactory()
-            : CreateZwcadIfAvailable(stderr);
+            : CreateRuntimeIfAvailable(stderr);
         try
         {
             if (runtime != null)
@@ -48,15 +68,16 @@ public static partial class CommandRouter
         }
     }
 
-    private static ICadRuntime? CreateZwcadIfAvailable(TextWriter stderr)
+    private static ICadRuntime? CreateRuntimeIfAvailable(TextWriter stderr)
     {
+        var name = ResolveRuntimeName(); // 配置错误硬失败（用户显式选择的厂商不得静默降级）
         try
         {
-            var rt = new CadAgent.Adapters.Zwcad.ZwcadRuntime();
+            var rt = CreateRuntimeInstance(name);
             var info = rt.GetInfo();
             if (!info.Available)
             {
-                stderr.WriteLine("警示: 无可用厂商运行时，降级 DXF 交付（保真度未验证）");
+                stderr.WriteLine($"警示: 无可用厂商运行时（{name}），降级 DXF 交付（保真度未验证）");
                 rt.Dispose();
                 return null;
             }

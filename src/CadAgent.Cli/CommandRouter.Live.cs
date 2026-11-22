@@ -41,7 +41,7 @@ public static partial class CommandRouter
             stderr.WriteLine("--live 失败: 事务前快照缺失");
             return (false, null, "事务前快照缺失");
         }
-        ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateZwcadIfAvailable(stderr);
+        ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateRuntimeIfAvailable(stderr);
         if (rt == null)
         {
             Audit("com-replay-failed", plan.PlanId, new { error = "无可用厂商运行时" });
