@@ -8,7 +8,7 @@ namespace CadAgent.Adapters.Acad.Tests;
 
 /// <summary>
 /// AutoCAD 条件真机测试（spec §11：Verified 须真机证据）。
-/// 无 AutoCAD COM 服务器→SkippableFact 显式跳过（不是静默绿）。
+/// 探针不可用→SkippableFact 显式跳过（原因见 AcadProbe.SkipReason 三态，不是静默绿）。
 /// 工作环境执行协议：docs/verification/autocad-adapter-protocol.md。
 /// </summary>
 [Trait("Category", "RequiresAutoCAD")]
@@ -43,7 +43,7 @@ public class AcadLiveTests : IDisposable
     [SkippableFact]
     public void GetInfo_LiveVendorSession_Available()
     {
-        Skip.If(!AcadProbe.Available, "本机无 AutoCAD COM 服务器（孤儿注册），跳过真机测试");
+        Skip.If(!AcadProbe.Available, AcadProbe.SkipReason);
         using var rt = new AcadRuntime();
         var info = rt.GetInfo();
         Assert.True(info.Available);
@@ -54,7 +54,7 @@ public class AcadLiveTests : IDisposable
     [SkippableFact]
     public void DrawingOps_LiveVendorSession_ReadBack()
     {
-        Skip.If(!AcadProbe.Available, "本机无 AutoCAD COM 服务器（孤儿注册），跳过真机测试");
+        Skip.If(!AcadProbe.Available, AcadProbe.SkipReason);
         using var rt = new AcadRuntime();
         rt.Open(_dxf);
         Assert.Equal(1, rt.EntityCount());
@@ -87,7 +87,7 @@ public class AcadLiveTests : IDisposable
     [SkippableFact]
     public void OpenSaveAs_RoundTrip_EntityCountPreserved()
     {
-        Skip.If(!AcadProbe.Available, "本机无 AutoCAD COM 服务器（孤儿注册），跳过真机测试");
+        Skip.If(!AcadProbe.Available, AcadProbe.SkipReason);
         using var rt = new AcadRuntime();
         rt.Open(_dxf);
         rt.SaveAs(_dwg);
