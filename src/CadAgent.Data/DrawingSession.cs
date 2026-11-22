@@ -13,6 +13,10 @@ public sealed class DrawingSession : IDrawingSession
     public CadDocument Doc { get; private set; }
     public string SourcePath { get; }
 
+    private IReadOnlyList<SheetRecord>? _sheets;
+    /// <summary>幅面登记簿（懒加载；图框检测+属性+名称，spec 幅面感知读图）。</summary>
+    public IReadOnlyList<SheetRecord> Sheets => _sheets ??= Data.Sheets.SheetRegistryBuilder.Build(Doc);
+
     private DrawingSession(string path, CadDocument doc)
     {
         SourcePath = path;
@@ -127,7 +131,11 @@ public sealed class DrawingSession : IDrawingSession
         File.Move(tmp, SourcePath, overwrite: true);
     }
 
-    public void Reload() => Doc = LoadDxf(SourcePath);
+    public void Reload()
+    {
+        Doc = LoadDxf(SourcePath);
+        _sheets = null; // 文档整体替换→幅面登记簿缓存失效，下次访问重建
+    }
 
     /// <summary>步级 undo（3b-ii）：内存 DXF 序列化捕获模型状态，不触磁盘文件。</summary>
     public byte[] CaptureState()
@@ -143,6 +151,7 @@ public sealed class DrawingSession : IDrawingSession
         using var ms = new MemoryStream(state);
         using var reader = new DxfReader(ms);
         Doc = reader.Read();
+        _sheets = null; // undo 恢复整体替换文档→幅面登记簿缓存失效
     }
 
     public DrawingSummary Summarize()
