@@ -29,9 +29,11 @@ public static class GateDetector
         var unsupported = all.Where(u => !matrix.IsSupported(u.CppClassName)).ToList();
         if (unsupported.Count == 0)
             return new GateReport(GateLevel.Green, unsupported, "");
-        // 三分判据：原生可解析实体数 = Entities.Count - Unknowns.Count。
+        // 三分判据（R6）：Summarize 口径下 Entities 已排除图内 unknown/proxy（只入 Unknowns），
+        // 故原生可解析实体数 = Entities.Count，不得再减 Unknowns.Count（双重扣减会把
+        // mixed 图纸误判 Red、把 proxy-only 图纸误判 Yellow）。
         // Red 仅当全量未支持且无任何原生实体；有原生实体则 Yellow（只读审查，拒绝语义 T3 落地）。
-        int nativeCount = summary.Entities.Count - summary.Unknowns.Count;
+        int nativeCount = summary.Entities.Count;
         if (unsupported.Count == all.Count && nativeCount == 0)
             return new GateReport(GateLevel.Red, unsupported, T3Guidance);
         return new GateReport(GateLevel.Yellow, unsupported, YellowReadOnlyGuidance);

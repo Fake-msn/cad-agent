@@ -495,14 +495,16 @@ public class EditViewModelTests
     // ---- Admission gate (final review fix 1): mirror CLI RunPlan at the edit boundary ----
 
     /// <summary>
-    /// Red fixture: a proxy-only-unknown drawing. ACadSharp 3.8.35 ProxyEntity has a
-    /// public ctor + settable DxfClass; the DxfWriter/DxfReader roundtrip preserves it
-    /// as a ProxyEntity (verified), so Summarize().Unknowns is non-empty and
-    /// GateDetector.Inspect with EmptySupportMatrix yields Red (all unknowns unsupported).
+    /// Red fixture: a proxy-only drawing with NO native entities (R6). ACadSharp 3.8.35
+    /// ProxyEntity has a public ctor + settable DxfClass; the DxfWriter/DxfReader roundtrip
+    /// preserves it as a ProxyEntity (verified). Summarize() puts the proxy only into
+    /// Unknowns (Entities stays empty), so GateDetector.Inspect with EmptySupportMatrix
+    /// yields Red (all unknowns unsupported AND nativeCount==Entities.Count==0).
+    /// A native Line was removed in the R6 fix round: with a Line present the drawing is
+    /// mixed (nativeCount>0) and correctly classifies Yellow, not Red.
     /// </summary>
     private static string RedDxf() => DxfFixture.CreateTempDxf(doc =>
     {
-        doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
         doc.Entities.Add(new ProxyEntity
         {
             DxfClass = new DxfClass
