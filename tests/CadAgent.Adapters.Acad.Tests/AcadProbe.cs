@@ -42,14 +42,15 @@ internal static class AcadProbe
             // 真机核定（2026-11-24，AutoCAD 2014）：激活返回≠初始化完成，启动窗口内
             // Visible=false 被拒（实测约 0.4s 后恢复）。拒绝有两种包装形态：
             // Invoke 层→COMException(0x80010001)；GetIDsOfNames 层→MissingMemberException
-            // （消息含 HRESULT）。xunit 工作线程非 STA，消息过滤器不适用→双形态有界重试
-            // （60×500ms=30s 上限，与 AcadRuntime.SetVisibleStartupReady 同款语义）。
+            // （消息含 HRESULT）。xunit 工作线程非 STA，消息过滤器不适用→双形态有界重试。
+            // M1（PR#24 修复波）：上限/延迟引用 AcadRuntime 同一 internal 常量
+            // （默认 60×500ms=30s，与 SetVisibleStartupReady 同款语义，不再硬编码漂移）。
             for (int i = 0; ; i++)
             {
                 try { app!.Visible = false; break; }
-                catch (Exception ex) when (IsStartupRejection(ex) && i < 59)
+                catch (Exception ex) when (IsStartupRejection(ex) && i < AcadRuntime.StartupRetryAttempts - 1)
                 {
-                    Thread.Sleep(500);
+                    Thread.Sleep(AcadRuntime.StartupRetryDelay);
                 }
             }
             app!.Quit();

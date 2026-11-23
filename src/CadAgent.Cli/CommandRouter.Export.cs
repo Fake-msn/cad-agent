@@ -30,6 +30,38 @@ public static partial class CommandRouter
     }
 
     /// <summary>
+    /// I1 fail-closed 闸指引（PR#24 修复波）：acad 拒绝 working 派生 DXF 时的统一 guidance。
+    /// </summary>
+    internal const string AcadWorkingDxfGuidance =
+        "AutoCAD 2014 无法解析 ACadSharp 写入的 DXF（内容级不兼容，实证崩溃 0xE0000001）；请用默认 zwcad 运行时或 T3 转换件";
+
+    /// <summary>
+    /// I1 fail-closed 闸（PR#24 修复波，单点化，镜像 GateRefusesRun 先例）：
+    /// runtime=acad 且输入为 working 派生 DXF → 拒绝。export（ExportService.Open(sourceDxf)）
+    /// 与 --live（事务前快照同源 working DXF→rt.Open(snap)）两条生产流均把 ACadSharp
+    /// DxfWriter 产物喂厂商 COM Open——AutoCAD 2014 读取器内容级不兼容（实证崩溃
+    /// 0xE0000001，spec §12 崩溃注记）；闸先于运行时创建（不激活 COM，拒绝路径无厂商
+    /// 进程、无 CUIX 竞态暴露），拒绝+审计+guidance，exit 非零。zwcad 不受影响
+    /// （读取器兼容 ACadSharp DXF，真机实证）。判定口径：
+    /// ① .working.dxf 后缀（.dwg 源 sidecar；--live 快照保留源 basename）；
+    /// ② 路径==DrawingSession.WorkingPathFor(源)（.dxf 源恒真——引擎 SaveWorking 原地
+    ///    重写，任何 .dxf 输入均按 working 派生 fail-closed）；
+    /// ③ --live 快照同源：basename 与 working 源一致且源即 working 文件。
+    /// tracked 后续：working 文件兼容写出格式评估（根因未修，本闸为 interim fail-closed）。
+    /// </summary>
+    internal static bool AcadWorkingDxfGateRefuses(string inputPath, string sourcePath)
+    {
+        if (ResolveRuntimeName() != "acad") return false;
+        if (inputPath.EndsWith(".working.dxf", StringComparison.OrdinalIgnoreCase)) return true;
+        if (string.Equals(Path.GetFullPath(inputPath),
+                Path.GetFullPath(DrawingSession.WorkingPathFor(sourcePath)), StringComparison.OrdinalIgnoreCase))
+            return true;
+        return string.Equals(Path.GetFileName(inputPath), Path.GetFileName(sourcePath), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Path.GetFullPath(sourcePath),
+                Path.GetFullPath(DrawingSession.WorkingPathFor(sourcePath)), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// 纯工厂 seam（不做可用性检查；构造不激活 COM）；Func 化供测试注入假 runtime
     /// （PR#18 修复波 Important#2：GetInfo 抛后 Dispose 回归钉住），调用语法不变。
     /// </summary>
@@ -66,6 +98,20 @@ public static partial class CommandRouter
                 }),
                 gateHash, gateHash, "", ""));
             stderr.WriteLine(gateReport.Guidance);
+            return 1;
+        }
+
+        // I1 fail-closed 闸（PR#24 修复波）：acad + working 派生 DXF → 先于运行时创建拒绝
+        // （ExportService.Open 会把 ACadSharp DXF 喂 AutoCAD 2014 → 实证崩溃 0xE0000001）。
+        // 拒绝留痕复用既有 export-rejected kind（params reason/guidance），不产任何衍生产物。
+        if (AcadWorkingDxfGateRefuses(drawing.SourcePath, drawingPath))
+        {
+            string acadHash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "export", "export-rejected", drawingPath,
+                JsonSerializer.Serialize(new { reason = "acad-working-dxf", guidance = AcadWorkingDxfGuidance }),
+                acadHash, acadHash, "", ""));
+            stderr.WriteLine(AcadWorkingDxfGuidance);
             return 1;
         }
 

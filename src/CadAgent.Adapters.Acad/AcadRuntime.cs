@@ -46,12 +46,15 @@ public sealed class AcadRuntime : ICadRuntime
         _staThread.Start();
     }
 
+    // Run=纯 STA 调度（I2，PR#24 修复波）：不再整 lambda 忙重试——复合方法
+    // （AddX+SetLayer/EnsureBlock 多基元）后段拒绝→整段重试会重复前段副作用（重复实体）。
+    // 忙重试降至单个 COM 基元调用粒度（RetryBusy），由各入口/基元自行包装。
     private T Run<T>(Func<T> f)
     {
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         _queue.Add(() =>
         {
-            try { tcs.SetResult(RetryBusy(f)); }
+            try { tcs.SetResult(f()); }
             catch (Exception ex) { tcs.SetException(ex); }
         });
         return tcs.Task.GetAwaiter().GetResult();
@@ -60,8 +63,11 @@ public sealed class AcadRuntime : ICadRuntime
     // 应用层忙拒绝有界重试（真机核定 2026-11-24）：AutoCAD 忙时（Open 后再生窗口等）
     // IDispatch::Invoke 直接把 RPC_E_CALL_REJECTED(0x80010001)/RETRYLATER(0x8001010A)
     // 作为调用结果返回——RPC 层消息过滤器兜不住此形态（f9 实证：SaveAs 仍被拒）。
-    // 拒绝=调用未被执行，重试无副作用重复之虞；非忙错误立即上抛不吞诊断。
-    // 操作内层已把 COMException 包装为 CadRuntimeException→沿 InnerException 链判定。
+    // **单调用口径（I2 更正）**：拒绝=该单个 COM 基元调用未被执行，仅对单调用重试安全；
+    // 复合方法不得整段重试（后段拒绝→前段副作用重复），须逐基元包装（见 Add*/EnsureBlock）。
+    // 只读取值（ModelSpace()/Blocks/Count 等 getter）无副作用，可与后续单写调用同组重试。
+    // 非忙错误立即上抛不吞诊断；操作内层已把 COMException 包装为 CadRuntimeException→
+    // 沿 InnerException 链判定。
     private static T RetryBusy<T>(Func<T> f)
     {
         for (int i = 0; ; i++)
@@ -74,6 +80,8 @@ public sealed class AcadRuntime : ICadRuntime
         }
     }
 
+    private static void RetryBusy(Action a) => RetryBusy<object?>(() => { a(); return null; });
+
     private static bool IsBusyRejection(Exception? ex)
     {
         for (var e = ex; e != null; e = e.InnerException)
@@ -82,6 +90,9 @@ public sealed class AcadRuntime : ICadRuntime
                 (com.HResult == unchecked((int)0x80010001) || com.HResult == unchecked((int)0x8001010A)))
                 return true;
             // GetIDsOfNames 层拒绝被 C# 绑定器包装为 MissingMemberException（消息含 HRESULT）。
+            // M3 脆弱面披露（PR#24 修复波）：消息文本匹配依赖绑定器消息格式含 HRESULT 十六进制
+            // 串——区域设置/运行时版本变化可能失配（漏判→忙拒绝当普通错误上抛，安全侧失败，
+            // 不产生重复副作用）。COMException HResult 直判为主通道；此分支为 f6 实证形态兜底。
             if (e is MissingMemberException mm &&
                 (mm.Message.Contains("0x80010001") || mm.Message.Contains("0x8001010A")))
                 return true;
@@ -137,7 +148,11 @@ public sealed class AcadRuntime : ICadRuntime
             return new RuntimeInfo("AutoCAD", "", false);
         try
         {
-            string version = EnsureApp().Version;
+            // 激活（含启动窗口有界重试）先行：失败直达 catch→Available=false（旧语义保持，
+            // 不得经忙重试路径绕过启动窗口——EnsureApp 失败后 _app 已缓存，重试会跳过 Visible）。
+            var app = EnsureApp();
+            // 单调用入口：Version 只读 getter 独立忙重试。
+            string version = RetryBusy(() => (string)app.Version);
             return new RuntimeInfo("AutoCAD", version, true);
         }
         catch
@@ -148,7 +163,13 @@ public sealed class AcadRuntime : ICadRuntime
 
     public void Open(string drawingPath) => Run(() =>
     {
-        try { _doc = EnsureApp().Documents.Open(drawingPath); }
+        // 单调用入口：激活先行（自带启动窗口重试，失败即上抛）；Documents.Open 单个 COM
+        // 基元独立忙重试——拒绝=未执行，重试不重复打开。
+        try
+        {
+            var app = EnsureApp();
+            _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath));
+        }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"打开图纸失败: {ex.Message}", ex); }
     });
@@ -156,7 +177,8 @@ public sealed class AcadRuntime : ICadRuntime
     public void SaveAs(string outputPath) => Run(() =>
     {
         if (_doc == null) throw new CadRuntimeException("无打开的图纸");
-        try { _doc.SaveAs(outputPath); }
+        // 单调用入口：SaveAs 单个 COM 基元独立忙重试（f9 实证形态）。
+        try { RetryBusy(() => { _doc.SaveAs(outputPath); }); }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"SaveAs 失败: {ex.Message}", ex); }
     });
@@ -165,7 +187,8 @@ public sealed class AcadRuntime : ICadRuntime
     {
         // COM 失败统一 CadRuntimeException（与 SaveAs 同款）；
         // 仅 Close 成功后清空 _doc——失败时文档可能仍开，保留引用供重试/Restart。
-        try { if (_doc != null) { _doc.Close(save); _doc = null; } }
+        // 单调用入口：Close 单个 COM 基元独立忙重试；耗尽→包装上抛（_doc 保留）。
+        try { if (_doc != null) { RetryBusy(() => { _doc.Close(save); }); _doc = null; } }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"Close 失败: {ex.Message}", ex); }
     });
@@ -173,11 +196,11 @@ public sealed class AcadRuntime : ICadRuntime
     public void Restart() => Run(() =>
     {
         // 先关文档再 Quit：带开文档 Quit 会被判异常终止→下次启动弹 CUIX 修复对话框（根因 a）。
-        // 忙拒绝（0x80010001/0x8001010A）须上抛给 RetryBusy 重试——真机核定（f12/f13）：
-        // 内层全吞会把忙拒绝当崩溃忽略→Quit 未生效→进程残留→下一测试守卫拒绝。
-        try { _doc?.Close(false); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Close 可能失败，忽略 */ }
+        // I2：每个基元独立忙重试——Close 成功后 Quit 被拒仅重试 Quit，不重复 Close。
+        // 忙拒绝耗尽→上抛（M3 边界，调用方降级）；非忙错误忽略（崩溃后 Close/Quit 可能失败）。
+        try { RetryBusy(() => { _doc?.Close(false); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Close 可能失败，忽略 */ }
         _doc = null;
-        try { _app?.Quit(); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Quit 可能失败，忽略 */ }
+        try { RetryBusy(() => { _app?.Quit(); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Quit 可能失败，忽略 */ }
         _app = null;
     });
 
@@ -191,23 +214,28 @@ public sealed class AcadRuntime : ICadRuntime
 
     private void EnsureLayer(string layer)
     {
-        try { dynamic l = _doc.Layers.Item(layer); if (l != null) return; }
+        // I2：Item 只读探测 / Add 单写调用各自独立忙重试（拒绝=该调用未执行，不重复建层）。
+        try { dynamic l = RetryBusy<object?>(() => _doc.Layers.Item(layer))!; if (l != null) return; }
         catch { /* 不存在→创建 */ }
-        _doc.Layers.Add(layer);
+        RetryBusy(() => { _doc.Layers.Add(layer); });
     }
 
     private void SetLayer(dynamic e, string? layer)
     {
         if (layer == null) return;
         EnsureLayer(layer);
-        e.Layer = layer;
+        // I2：Layer 属性写入为独立单写调用——AddX 成功后此处被拒仅重试写入，不重复建实体。
+        RetryBusy(() => { e.Layer = layer; });
     }
 
+    // I2（PR#24 修复波）：复合方法=AddX+SetLayer 多 COM 调用——每个基元独立忙重试，
+    // 组合不外层重试（后段拒绝→整段重试会重复实体）。ModelSpace() 只读 getter 无副作用，
+    // 与后续单写调用同组重试安全。
     public void AddLine(double x1, double y1, double x2, double y2, string? layer = null) => Run(() =>
     {
         try
         {
-            dynamic e = ModelSpace().AddLine(Pt(x1, y1), Pt(x2, y2));
+            dynamic e = RetryBusy<object?>(() => ModelSpace().AddLine(Pt(x1, y1), Pt(x2, y2)))!;
             SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
@@ -218,7 +246,7 @@ public sealed class AcadRuntime : ICadRuntime
     {
         try
         {
-            dynamic e = ModelSpace().AddText(text, Pt(x, y), height);
+            dynamic e = RetryBusy<object?>(() => ModelSpace().AddText(text, Pt(x, y), height))!;
             SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
@@ -229,7 +257,7 @@ public sealed class AcadRuntime : ICadRuntime
     {
         try
         {
-            dynamic e = ModelSpace().AddCircle(Pt(x, y), radius);
+            dynamic e = RetryBusy<object?>(() => ModelSpace().AddCircle(Pt(x, y), radius))!;
             SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
@@ -240,7 +268,7 @@ public sealed class AcadRuntime : ICadRuntime
     {
         try
         {
-            dynamic e = ModelSpace().InsertBlock(Pt(x, y), blockName, scale, scale, scale, rotation);
+            dynamic e = RetryBusy<object?>(() => ModelSpace().InsertBlock(Pt(x, y), blockName, scale, scale, scale, rotation))!;
             SetLayer(e, layer);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
@@ -252,34 +280,58 @@ public sealed class AcadRuntime : ICadRuntime
         if (_doc == null) throw new CadRuntimeException("无打开的图纸");
         try
         {
-            dynamic blocks = _doc.Blocks;
-            bool exists = false;
-            try { dynamic b0 = blocks.Item(blockName); exists = b0 != null; }
-            catch { exists = false; }
-            if (exists) return;
+            // I2：逐基元独立忙重试，无整段外层重试（中途拒绝→整段重试会重复基元）。
+            dynamic blocks = RetryBusy<object?>(() => _doc.Blocks)!;
+            dynamic? existing = null;
+            try { existing = RetryBusy<object?>(() => blocks.Item(blockName)); }
+            catch { existing = null; /* 不存在→创建 */ }
+            if (existing != null)
+            {
+                // I2 重入补全（PR#24 修复波）：本方先前失败可能残留部分块（中途忙拒绝耗尽）——
+                // 静默早退会留下静默部分块（读回计数闸只数模型空间，兜不住块内容）。
+                // 比对块内实体数与期望基元数：完整→复用（幂等保持）；不一致（不足=残留）→
+                // 清除残留基元再重建。仅本方命名块（EnsureBlock 调用方=技能符号库块，
+                // 无用户内容），清除安全；块定义本身保留（origin 不变，引用不受影响）。
+                int count = RetryBusy(() => (int)existing.Count);
+                if (count == primitives.Count) return;
+                for (int i = count - 1; i >= 0; i--)
+                {
+                    dynamic item = RetryBusy<object?>(() => existing.Item(i))!;
+                    RetryBusy(() => { item.Delete(); });
+                }
+                AddBlockPrimitives(existing, primitives);
+                return;
+            }
             // AutoCAD 2014 实测序=(origin, Name)（2026-11-24 探针核定，与文档序相反，同 ZWCAD）。
             // 厂商差异仅数据：翻 VendorProfiles.Acad.BlocksAddNameFirst 即可，无需改此逻辑。
-            dynamic block = Profile.BlocksAddNameFirst
+            dynamic block = RetryBusy<object?>(() => Profile.BlocksAddNameFirst
                 ? blocks.Add(blockName, Pt(0, 0))
-                : blocks.Add(Pt(0, 0), blockName);
-            foreach (var p in primitives)
-            {
-                switch (p)
-                {
-                    case BlockLine l: block.AddLine(Pt(l.X1, l.Y1), Pt(l.X2, l.Y2)); break;
-                    case BlockCircle c: block.AddCircle(Pt(c.X, c.Y), c.Radius); break;
-                    case BlockText t: block.AddText(t.Value, Pt(t.X, t.Y), t.Height); break;
-                    default: throw new CadRuntimeException($"不支持的块基元: {p.GetType().Name}");
-                }
-            }
+                : blocks.Add(Pt(0, 0), blockName))!;
+            AddBlockPrimitives(block, primitives);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"EnsureBlock 失败: {ex.Message}", ex); }
     });
 
+    // 块基元逐个独立忙重试（I2）：每个 AddX 为单写调用，拒绝=未执行，重试不重复。
+    private static void AddBlockPrimitives(dynamic block, IReadOnlyList<BlockPrimitive> primitives)
+    {
+        foreach (var p in primitives)
+        {
+            switch (p)
+            {
+                case BlockLine l: RetryBusy(() => { block.AddLine(Pt(l.X1, l.Y1), Pt(l.X2, l.Y2)); }); break;
+                case BlockCircle c: RetryBusy(() => { block.AddCircle(Pt(c.X, c.Y), c.Radius); }); break;
+                case BlockText t: RetryBusy(() => { block.AddText(t.Value, Pt(t.X, t.Y), t.Height); }); break;
+                default: throw new CadRuntimeException($"不支持的块基元: {p.GetType().Name}");
+            }
+        }
+    }
+
     public int EntityCount() => Run(() =>
     {
-        try { return (int)ModelSpace().Count; }
+        // 只读组合（ModelSpace getter + Count getter）无副作用，同组忙重试安全。
+        try { return RetryBusy(() => (int)ModelSpace().Count); }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"EntityCount 失败: {ex.Message}", ex); }
     });
@@ -292,10 +344,12 @@ public sealed class AcadRuntime : ICadRuntime
         {
             Run(() =>
             {
-                // 忙拒绝上抛给 RetryBusy 重试（同 Restart 注记）；其余退出期错误忽略。
-                try { _doc?.Close(false); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
+                // I2：每个基元独立忙重试（同 Restart）；忙拒绝耗尽由 RetryBusy 上抛→
+                // 外层 catch 兜底（Dispose 不抛，best-effort 收尾；有界尝试次数单测钉住）。
+                // 其余退出期错误忽略。
+                try { RetryBusy(() => { _doc?.Close(false); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
                 _doc = null;
-                try { _app?.Quit(); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
+                try { RetryBusy(() => { _app?.Quit(); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
                 _app = null;
             });
         }

@@ -66,6 +66,14 @@ public class VendorCommandTests : IDisposable
         Assert.Contains("AutoCAD", stdout);
         Assert.Contains("Unsupported", stdout);
         Assert.DoesNotContain("CompatibleUnverified", stdout);
+        // M2（PR#24 修复波）行级收紧：全局 Contains 会被他厂商行掩盖——逐行钉住
+        // AutoCAD 条目自身 status=Verified + versionRange=19.1 + verifiedAt 非空。
+        using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+        var acad = doc.RootElement.GetProperty("entries").EnumerateArray()
+            .Single(e => e.GetProperty("vendor").GetString() == "AutoCAD");
+        Assert.Equal("Verified", acad.GetProperty("status").GetString());
+        Assert.Equal("19.1", acad.GetProperty("versionRange").GetString());
+        Assert.Equal("2026-11-24", acad.GetProperty("verifiedAt").GetString());
     }
 
     [Fact]
