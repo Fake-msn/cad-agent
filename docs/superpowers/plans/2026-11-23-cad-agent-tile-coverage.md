@@ -302,3 +302,16 @@ public void RealSpecimen_TileCoverage_ContentCovered()
 - **占位符扫描**：夹具"镜像既有"指向 SheetTilerTests 现状助手；WeightedMedian/密度格网/图签瓦完整代码给出；无 TBD。
 - **类型一致性**：TilingResult 五字段 T1 定义 T2 消费 T3 断言；Tiles 返回类型变更消费点（VisionScanMode:202+测试）T1/T2 同步 sanctioned。
 - **已知取舍**：间隙倍率阈 8（实证 55× vs 峰内 1.6×，裕度充分）；密度格网 score 用全部 inSheet 实体（含微字——微字密集区也是内容区，合理）；coverage 加权口径实体数；多幅 basis 取首非 none（注释说明）。
+
+---
+
+## 执行记录（SDD 2026-11-23）
+
+- T1 SheetTiler 根因修复：4982fe2 + fix 8a7bb00（R5 单遍分桶 O(N+K)+long 溢出修复）；Data 318/318。
+- T2 stdout 披露：d9e9083；View 292/292、Cli 210/210（真实 E2E 实跑）。
+- T3 真实实证+闭环：925ebcf+8946072；首幅 coverage 0.003→1.0、12 幅加权 0.741074；claims 14→77（20 条幻觉全拦截，含凭空"君悦新居"）；seeded 0→0（设备种子实证保持开放）；幅面4/6 纯微字详图 coverage≈0.09 含 1 空瓦（诚实披露）；云端总成本 3 跑×6 瓦=18 瓦；审计 8 条验链绿；密钥 grep 零命中；标本 SHA-256 前后一致。
+- 门禁：全 sln 1082/1082 连绿两次（gate1/gate2.log，0 失败 0 跳过，无 ZWCAD 残留）。
+- 最终全切片审查：0 Critical/Important；修复波 145aba6（计划文档 EOF 换行）；scoped 复审 ADDRESSED。
+- Rulings：R1 T1→T2 间 View 编译红 sanctioned（顺序任务，门禁只在 T3）；R2 ReadableHeight out bimodal 重载（计划 split 越界笔误）；R3 夹具按注释规格直构 sanctioned；R4 单峰路径旧 Median 口径逐字保持（WeightedMedian 仅双峰上峰）；R5 密度评分单遍分桶+long（plan-mandated Important 本环修复，语义保持）；R6 最终修复波仅 EOF 换行，none 三态混同/cx clamp/锚层关键词 internal 化 park 后续。
+- 遗留 minors（整支 triage 可留）：倍率=8 边界/空表直测、半开 vs inclusive 口径、浮点归桶压线差一格（10% 扩边兜底）、long.MaxValue 极端、none-跳过聚合夹具、锚层关键词测试镜像、存量 CS8602/CS8604 警告、弱子串断言。
+- spec §12：⑥骑缝闭合+覆盖率披露注记（8946072）；④设备种子/⑦多幅预算分配保持开放。
