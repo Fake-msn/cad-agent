@@ -18,7 +18,8 @@ public sealed record BlockHistEntry(string Type, int Count);
 public sealed record BlockBbox(double MinX, double MinY, double MaxX, double MaxY);
 /// <summary>
 /// 块级歧义项。R9② 加性末位：Histogram=块定义全部实体类型计数（含非白名单，诊断全量口径，
-/// 按 Type Ordinal 排序）；Bbox=块定义几何 bbox（可空——代理无几何块 null）。旧四字段逐字不变。
+/// 按 Type Ordinal 排序）；Bbox=块定义几何 bbox（BboxOf 口径：零 PointsOf 点→null；
+/// Hatch+AttDef 代理块可得退化点 bbox）。旧四字段逐字不变。
 /// </summary>
 public sealed record BlockAmbiguous(string BlockName, int Instances, string Reason, IReadOnlyList<string> SampleHandles,
     IReadOnlyList<BlockHistEntry> Histogram, BlockBbox? Bbox);

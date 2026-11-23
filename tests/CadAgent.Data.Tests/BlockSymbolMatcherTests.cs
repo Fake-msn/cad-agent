@@ -568,4 +568,30 @@ public class BlockSymbolMatcherTests : IDisposable
         Assert.Equal(0, r.SymbolsLoaded);
         Assert.Equal(0, r.NonFiniteDropped);
     }
+
+    /// <summary>
+    /// ③ NaN-only 符号包早退判别（钉住批准设计"早退 0"口径，防日后"顺手修复"为累计值）：
+    /// 符号 DXF 仅一条 NaN 坐标 Line——过白名单→Extract null（symDropped 已累计 1）→
+    /// symbols.Count==0 早退→NonFiniteDropped==0 而非累计 1。与全符号损坏早退测试的判别差异：
+    /// 该路径确实发生了 Extract 剔除累计（损坏路径 catch 在 Extract 之前，累计恒 0 无判别力）。
+    /// 夹具镜像 BrokenSymbolDxf 覆盖模式；NaN 经 DxfWriter/DxfReader 往返保 NaN
+    /// （probe 实证，outputs/block-diagnostics/probe.txt）。
+    /// </summary>
+    [Fact]
+    public void NaNOnlySymbolPackage_EarlyExit_NonFiniteDroppedZero_NotAccumulated()
+    {
+        // 覆盖 sym.dxf 为 NaN-only（yaml 唯一符号）——Line 过白名单，Extract 全剔除→null→跳过
+        var nanOnly = new CadDocument();
+        nanOnly.Entities.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "sym.dxf")))
+            DxfWriter.Write(fs, nanOnly);
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var r = Run(doc);
+        Assert.Equal(0, r.SymbolsLoaded);
+        Assert.Equal(1, r.SymbolsSkipped); // fp null 跳过路径（非读取异常 catch 路径）
+        Assert.Equal(0, r.NonFiniteDropped); // 早退归 0——即使 symDropped 已累计 1，不得披露累计值
+        Assert.Empty(r.AutoSeeds);
+        Assert.Empty(r.Suggestions);
+        Assert.Empty(r.Ambiguous);
+    }
 }
