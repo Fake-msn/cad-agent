@@ -4,6 +4,21 @@
 > 无 LocalServer32）。AcadRuntime 已实现但 **CompatibleUnverified**。
 > 本协议在工作环境（实装 AutoCAD 2024-2026）执行，产出 Verified 升级证据。
 
+> **更正注记（2026-11-23，追加式，上文旧状态保留存档）**：本机已实装 AutoCAD 2014
+> （R19.1.18.0.0，chs profile）+ 天正电气 5.0。注册态已核实有效：
+> HKCR\AutoCAD.Application → CLSID {BD0DEB94-63DB-4392-9420-6EEE05094B1F} →
+> LocalServer32 = `C:\Program Files\Autodesk\AutoCAD 2014\acad.exe /Automation`
+> （64 位视图，acad.exe PE Machine=0x8664）——头部"孤儿 ProgID 无 LocalServer32"描述已过时。
+> 但真机验证 **BLOCKED**：HKCU\Software\Microsoft\Windows NT\CurrentVersion\
+> AppCompatFlags\Layers 存在 `acad.exe : RUNASADMIN` 兼容层（用户/安装器设置），
+> 强制 acad.exe 提升启动；非提升测试宿主 COM 激活即抛 0x800702E4
+> （ERROR_ELEVATION_REQUIRED），未启动任何进程。acad.exe 内嵌 manifest 为 asInvoker，
+> CLSID 无 Elevation 键——RUNASADMIN 兼容层是唯一提升源。
+> 解除需用户决策（取消 acad.exe"以管理员身份运行"兼容设置，或授权提升运行自动化会话；
+> 擅自移除可能破坏用户许可/破解环境，不在验证代理权限内）。
+> 本次执行证据：outputs/autocad-verify-20261123/（3 真机测试显式跳过，矩阵不升级，
+> Blocks.Add 签名序仍未核定）。
+
 ## 前置约束（CUIX 竞态根因 b，PR#17 事故教训）
 
 1. 验证期间**禁止**并行运行任何 AutoCAD 自动化或人工会话——并发实例共享用户
