@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using CadAgent.Core.Cad;
 
 namespace CadAgent.Adapters.Acad;
@@ -25,10 +26,18 @@ public sealed class AcadRuntime : ICadRuntime
     internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
 
+    // 真机核定（2026-11-24，AutoCAD 2014 R19.1）：CreateInstance 返回≠初始化完成，
+    // 启动窗口内 COM 调用抛 RPC_E_CALL_REJECTED(0x80010001)/RPC_E_SERVERCALL_RETRYLATER(0x8001010A)
+    // （实测约 0.4s 后恢复）。有界重试等待就绪；默认上限 30s 防挂死，耗尽→上层优雅降级。
+    internal static int StartupRetryAttempts = 60;
+    internal static TimeSpan StartupRetryDelay = TimeSpan.FromMilliseconds(500);
+
     public AcadRuntime()
     {
         _staThread = new Thread(() =>
         {
+            // 启动窗口 COM 拒绝在消息过滤器层自动重试（真机核定，见 ComMessageFilter 注释）。
+            ComMessageFilter.Register();
             foreach (var action in _queue.GetConsumingEnumerable())
                 action();
         });
@@ -42,10 +51,42 @@ public sealed class AcadRuntime : ICadRuntime
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         _queue.Add(() =>
         {
-            try { tcs.SetResult(f()); }
+            try { tcs.SetResult(RetryBusy(f)); }
             catch (Exception ex) { tcs.SetException(ex); }
         });
         return tcs.Task.GetAwaiter().GetResult();
+    }
+
+    // 应用层忙拒绝有界重试（真机核定 2026-11-24）：AutoCAD 忙时（Open 后再生窗口等）
+    // IDispatch::Invoke 直接把 RPC_E_CALL_REJECTED(0x80010001)/RETRYLATER(0x8001010A)
+    // 作为调用结果返回——RPC 层消息过滤器兜不住此形态（f9 实证：SaveAs 仍被拒）。
+    // 拒绝=调用未被执行，重试无副作用重复之虞；非忙错误立即上抛不吞诊断。
+    // 操作内层已把 COMException 包装为 CadRuntimeException→沿 InnerException 链判定。
+    private static T RetryBusy<T>(Func<T> f)
+    {
+        for (int i = 0; ; i++)
+        {
+            try { return f(); }
+            catch (Exception ex) when (IsBusyRejection(ex) && i < StartupRetryAttempts - 1)
+            {
+                Thread.Sleep(StartupRetryDelay);
+            }
+        }
+    }
+
+    private static bool IsBusyRejection(Exception? ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is COMException com &&
+                (com.HResult == unchecked((int)0x80010001) || com.HResult == unchecked((int)0x8001010A)))
+                return true;
+            // GetIDsOfNames 层拒绝被 C# 绑定器包装为 MissingMemberException（消息含 HRESULT）。
+            if (e is MissingMemberException mm &&
+                (mm.Message.Contains("0x80010001") || mm.Message.Contains("0x8001010A")))
+                return true;
+        }
+        return false;
     }
 
     private void Run(Action a) => Run<object?>(() => { a(); return null; });
@@ -67,9 +108,25 @@ public sealed class AcadRuntime : ICadRuntime
                 throw new CadRuntimeException(
                     $"AutoCAD COM 激活失败（ProgID 可能为孤儿注册，无 LocalServer32）: {ex.Message}", ex);
             }
-            _app.Visible = false;
+            SetVisibleStartupReady();
         }
         return _app;
+    }
+
+    // 启动窗口拒绝重试：仅对 RPC_E_CALL_REJECTED/RPC_E_SERVERCALL_RETRYLATER 重试，
+    // 其他 COM 错误（孤儿注册/许可失败等）立即上抛，不吞诊断信息。
+    private void SetVisibleStartupReady()
+    {
+        for (int i = 0; ; i++)
+        {
+            try { _app!.Visible = false; return; }
+            catch (COMException ex) when (
+                (ex.HResult == unchecked((int)0x80010001) || ex.HResult == unchecked((int)0x8001010A))
+                && i < StartupRetryAttempts - 1)
+            {
+                Thread.Sleep(StartupRetryDelay);
+            }
+        }
     }
 
     // 孤儿注册/激活失败/守卫超时均优雅降级 Available=false（CLI 据此走 DXF 降级+警示）。
@@ -115,10 +172,12 @@ public sealed class AcadRuntime : ICadRuntime
 
     public void Restart() => Run(() =>
     {
-        // 先关文档再 Quit：带开文档 Quit 会被判异常终止→下次启动弹 CUIX 修复对话框（根因 a）
-        try { _doc?.Close(false); } catch { /* 崩溃后 Close 可能失败，忽略 */ }
+        // 先关文档再 Quit：带开文档 Quit 会被判异常终止→下次启动弹 CUIX 修复对话框（根因 a）。
+        // 忙拒绝（0x80010001/0x8001010A）须上抛给 RetryBusy 重试——真机核定（f12/f13）：
+        // 内层全吞会把忙拒绝当崩溃忽略→Quit 未生效→进程残留→下一测试守卫拒绝。
+        try { _doc?.Close(false); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Close 可能失败，忽略 */ }
         _doc = null;
-        try { _app?.Quit(); } catch { /* 崩溃后 Quit 可能失败，忽略 */ }
+        try { _app?.Quit(); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Quit 可能失败，忽略 */ }
         _app = null;
     });
 
@@ -233,9 +292,10 @@ public sealed class AcadRuntime : ICadRuntime
         {
             Run(() =>
             {
-                try { _doc?.Close(false); } catch { /* 退出时忽略 */ }
+                // 忙拒绝上抛给 RetryBusy 重试（同 Restart 注记）；其余退出期错误忽略。
+                try { _doc?.Close(false); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
                 _doc = null;
-                try { _app?.Quit(); } catch { /* 退出时忽略 */ }
+                try { _app?.Quit(); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
                 _app = null;
             });
         }
