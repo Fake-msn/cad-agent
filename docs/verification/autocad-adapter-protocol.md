@@ -37,6 +37,20 @@
 > 解锁：用户授权 TypeLib 修复 → 重跑 DrawingOps + 步骤 4 探针 → 全绿后升级。
 > 证据：outputs/autocad-verify-20261123/（f1-f23 + final-verify-report.md）。
 
+> **更正注记（2026-11-24 收尾轮，追加式，上文旧状态保留存档）**：TypeLib 修复已由用户批准落地
+> （HKCU 覆盖 {AB513495-C0DC-4E03-AD6E-E851E08428D1}\1.0\{0,804}\{win32,win64} →
+> `Common Files\Autodesk Shared\axdb19chs.tlb`；HKLM 零触碰）。实测发现 controller 落地仅写
+> 1.0 版本级默认值、缺 lcid/platform 叶键（g1 仍 0x80029C4A），按批准布局补全后 dispatch 全通（g2）。
+> **AcadLive 4/4 真机绿（g4）**：GetInfo=19.1s (LMS Tech)/DrawingOps 全链（含 EnsureBlock+Insert+
+> SaveAs DWG 读回 5 实体）/OpenSaveAs R12 往返/CUIX 金丝雀（哈希与备份逐字一致）。
+> **步骤 4 探针核定：AutoCAD 2014 Blocks.Add 实测序=(origin, Name)，与 Autodesk 文档序相反，
+> 与 ZWCAD 一致**——`BlocksAddNameFirst` 翻 false（g3 参数 0 转换失败实证→g4 绿）。
+> 全 sln 回归 **1297 绿/0 败/0 跳过**（Acad 4 真机不再跳过）。**矩阵已升级 Verified**
+> （verifiedAt 2026-11-24，versionRange "19.1"=实测 GetInfo 前缀；未实测版本 export gating 照旧警示）。
+> 上文「3 绿/1 环境败」「探针未核定」「矩阵不升级」状态自此闭合。SaveAs 人工目视仍 deferred。
+> 环境依赖：移除 HKCU 覆盖即复现 0x80029C4A（HKLM 坏值未修）；回滚指令见
+> outputs/autocad-verify-20261123/c3-typelib-fix-record.txt。证据：g1-g7 + matrix-upgrade-report.md。
+
 ## 前置约束（CUIX 竞态根因 b，PR#17 事故教训）
 
 1. 验证期间**禁止**并行运行任何 AutoCAD 自动化或人工会话——并发实例共享用户

@@ -623,6 +623,17 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **矩阵判定：不升级**（非全绿 + Blocks.Add 未核定）——AutoCAD 维持 **CompatibleUnverified**，vendor-support.json 零改动。**解锁路径**：用户授权 TypeLib 注册修复（HKCU 覆盖重建或 HKLM 路径修正）→ 重跑 DrawingOps + Blocks.Add 探针核定 → 4 绿后按协议升级 Verified（versionRange 实测 R19.1）。
 - 证据 `outputs/autocad-verify-20261123/`（f1-f23 系列 + scripts/ + final-verify-report.md + MANIFEST 追加）。
 
+**AutoCAD 2014 真机验证 🟢 全绿收尾（2026-11-24 记录；TypeLib 修复落地 + Blocks.Add 探针核定 + 矩阵升级 Verified；追加式，旧文 0 删）**：
+
+- **TypeLib 修复落地（用户批准，HKCU-only，HKLM 零触碰）**：controller 批准布局=HKCU TypeLib `{AB513495-C0DC-4E03-AD6E-E851E08428D1}\1.0\{0,804}\{win32,win64}` → `C:\Program Files\Common Files\Autodesk Shared\axdb19chs.tlb`。**实测落地偏差核定（g1/g2）**：本轮开跑前注册态仅有 `1.0` 版本级默认值，**缺 lcid/platform 叶键**——HKCR 合并视图叶键仍解析 HKLM RealDwg 坏值，g1 重跑 DrawingOps 仍抛 0x80029C4A（GetInfo 亦败一次，29s≈30s 忙重试上限耗尽，推断冷启动慢；g3/g4 复绿，无代码改动）。按批准布局补全 4 叶键（scripts/g2-complete-typelib-hkcu.ps1，前后注册态 g2/g2b 留档）后 dispatch 全通。回滚指令不变：`Remove-Item -Recurse HKCU:\Software\Classes\TypeLib\{AB513495-C0DC-4E03-AD6E-E851E08428D1}`（c3-typelib-fix-record.txt）。**环境依赖明示**：移除覆盖即复现 0x80029C4A（HKLM 坏值仍在，未修）。
+- **Blocks.Add 签名序探针：核定=(origin, Name)，与 Autodesk 文档序相反，与 ZWCAD 实测一致**——TypeLib 修复后 g3 DrawingOps 推进至 EnsureBlock，`blocks.Add(blockName, Pt(0,0))`（文档序 Name 先）抛 `Could not convert argument 0 for call to Add`（CallSite 实证 ComObject,String,Double[] 参数 0 转换失败→首参非字符串=点）。翻 `VendorProfiles.Acad.BlocksAddNameFirst=false` 重跑 **g4 全绿**。ZWCAD 前车之鉴口径兑现：不赌文档，两厂商签名序均真机核定。注释同步更新（VendorProfile/AcadRuntime/AcadLiveTests）。
+- **AcadLive 4/4 真机绿（g4 终录）**：GetInfo（Version=**19.1s (LMS Tech)**，R19.1.18.0.0）/ DrawingOps（AddLine/AddText 中文「生成式标注」/AddCircle/EnsureBlock SYM 三基元+幂等/AddInsert→SaveAs DWG→DwgReader 读回 **5 实体**含中文文本与 SYM Insert）/ OpenSaveAs（手写 R12→DWG 往返实体数 1 保持）/ CUIX 金丝雀。**SaveAs 人工目视仍 deferred**（测试产物临时目录用后即清，本轮未产持久 ops.dwg；COM 读回闸绿）。
+- **CUIX 金丝雀：PASS**——前置/后置 SHA256 均 `F355D54FADA770E303BA277CFA1F9CEDCD74914A0EFE928C9E95FDE06E633F63`，与备份逐字一致（g5）；全程零 CAD 残留进程（每轮前后 tasklist）。
+- **门禁（全 sln 一次）**：**1297 通过/0 失败/0 跳过**（Llm 33/Core 235/Data 368/View 381/Cli 249/Zwcad 10 真机实跑/**Acad 21=17 单测+4 真机全实跑不再跳过**）。诚实口径：controller 预期「4 跳过」未出现——本机 AutoCAD/ZWCAD/真实标本条件全满足，skip-gated 测试全实跑，0 跳过优于预期。矩阵/断言改动后终态全 sln 复跑亦 1297/0/0（g7）。
+- **矩阵升级：Verified**——`src/CadAgent.Cli/vendor-support.json` AutoCAD：status→**Verified**、verifiedAt→**2026-11-24**、versionRange→**"19.1"**（实测 GetInfo 前缀；VendorSupport.VersionMatches=StartsWith 语义，"19.1s (LMS Tech)" 命中）、testCoverage 含探针核定结论+R12 夹具+TypeLib 修复注记。**未实测版本（含原标 2024-2026）不再收录**→export gating 照旧警示+审计（Export_UnverifiedVendor_WarnsAndAudits 以 AutoCAD 2025 验证此路径仍绿）。VendorCommandTests 矩阵断言同步（CompatibleUnverified 条目已不存在，改钉 AutoCAD Verified+TArch Unsupported）。
+- **本轮不做（明示）**：天正运行时读取（Task B deferred）；HKLM 修正（用户未授权，HKCU 覆盖绕开）；ACadSharp DXF 写入器替代（生产含义注记沿用上条，后续切片）。
+- 证据 `outputs/autocad-verify-20261123/`（g1-g7 系列 + scripts/g2 + matrix-upgrade-report.md + MANIFEST 追加）。
+
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
 **动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。
