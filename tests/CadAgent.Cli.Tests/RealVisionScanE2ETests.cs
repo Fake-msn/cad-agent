@@ -13,7 +13,7 @@ namespace CadAgent.Cli.Tests;
 /// 离屏 Skia 瓦片 → qwen3-vl-plus 读图 → 矢量交叉验证 → overlay/审计）。
 /// 成本控制（T4 绑定约束 瓦片≤6/标本）：--max-tiles 6 瓦片预算（截断披露见 View 侧测试）。
 /// profile+keys 从 outputs/view-closure/.cadagent 复制复用（DPAPI CurrentUser 同用户可解）；
-/// 复制侧 timeoutSeconds 60→240（T1 实证视觉长输出超默认超时，outputs/vision-read/REPORT.md 结论4）；
+/// 源 profile timeoutSeconds 已按用户裁定 600（2026-11-23），复制侧不再 override；
 /// 不复制 cloud-consent.json——首次出境确认通道必须真实行使。
 /// 密钥硬规则：stdout/审计全文 grep sk- 零命中；标本只读（副本字节前后一致，源目录零触碰）。
 /// 缺标本/缺 profile/缺密钥 → 显式 Skipped 不假装。
@@ -56,12 +56,10 @@ public class RealVisionScanE2ETests : IDisposable
         File.Copy(specimenSrc, specimen);
         byte[] sourceBefore = File.ReadAllBytes(specimen);
 
-        // profile 复制 + timeoutSeconds 240（视觉长输出；源 profile 不动）
+        // profile 复制（源 profile timeoutSeconds 已按用户裁定 600，2026-11-23；不再 override）
         string agentDir = Path.Combine(_project, ".cadagent");
         Directory.CreateDirectory(agentDir);
         var profiles = JsonNode.Parse(File.ReadAllText(profileSrc))!;
-        foreach (var p in profiles["profiles"]!.AsArray())
-            p!["limits"]!["timeoutSeconds"] = 240;
         File.WriteAllText(Path.Combine(agentDir, "llm-profiles.json"),
             profiles.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         // DPAPI 密钥文件复制复用（CurrentUser 同用户；密钥值永不入测试输出）
