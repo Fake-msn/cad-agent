@@ -137,4 +137,39 @@ public class SemanticScanVisionRelayTests : IDisposable
             "\"C:\\bin\\CadAgent.View.dll\" --vision-scan --drawing \"C:\\d\\f.dxf\" --project \"C:\\proj\" --confirm-egress",
             args);
     }
+
+    [Fact]
+    public void SemanticScan_VisionWithBareSkill_UsageRefused_NoRelay()
+    {
+        // R11④：裸 --skill（末位无值）也须拒绝——GetOptionValues 取不到值，但 flag 存在
+        // 本身即冲突（静默丢弃=诚实缺口，R9 同口径）；不得进入 relay，先于一切副作用。
+        string[]? captured = null;
+        CommandRouter.VisionScanSpawn = a => { captured = a; return 0; };
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = CommandRouter.Run(
+            new[] { "semantic", "scan", "--vision", "--drawing", _drawing, "--project", _project, "--skill" },
+            outW, errW);
+
+        Assert.Equal(1, code);
+        Assert.Null(captured); // 不得进入 relay
+        Assert.Empty(outW.ToString());
+        Assert.Contains("--skill", errW.ToString());
+        Assert.Contains("--vision", errW.ToString());
+    }
+
+    [Fact]
+    public void SemanticScan_Vision_SessionForwarded()
+    {
+        // R11⑤：--session 转发 View 进程（View 入口读 --session；不转发则 relay 链审计会话断档）。
+        string[]? captured = null;
+        CommandRouter.VisionScanSpawn = a => { captured = a; return 0; };
+
+        var (code, _, _) = Run("semantic", "scan", "--vision", "--drawing", _drawing, "--session", "sess-42");
+
+        Assert.Equal(0, code);
+        Assert.NotNull(captured);
+        Assert.Contains("--session", captured!);
+        int i = Array.IndexOf(captured!, "--session");
+        Assert.Equal("sess-42", captured![i + 1]);
+    }
 }

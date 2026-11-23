@@ -28,7 +28,7 @@ public class VisionReaderTests
     public async Task ReadTile_ValidJson_ClaimsParsed_ImageUrlSent()
     {
         var client = new FakeVisionClient("{\"claims\":[{\"text\":\"深照型灯\",\"region\":\"左上\",\"confidence\":0.9}]}");
-        var reader = new VisionReader(client, "fake-vl");
+        var reader = new VisionReader(client);
         var read = await reader.ReadTileAsync(Png, "S1", (0, 0, 100, 100));
         Assert.Single(read.Claims);
         Assert.Equal("深照型灯", read.Claims[0].Text);
@@ -41,7 +41,7 @@ public class VisionReaderTests
     public async Task ReadTile_JsonEmbeddedInProse_Extracted()
     {
         var client = new FakeVisionClient("读图如下：{\"claims\":[{\"text\":\"AL1\",\"region\":\"中\",\"confidence\":0.8}]} 以上。");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Single(read.Claims);
         Assert.Null(read.ParseError);
     }
@@ -50,7 +50,7 @@ public class VisionReaderTests
     public async Task ReadTile_Malformed_ParseErrorEmptyClaims()
     {
         var client = new FakeVisionClient("我无法读取该图。");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Empty(read.Claims);
         Assert.NotNull(read.ParseError);
     }
@@ -59,7 +59,7 @@ public class VisionReaderTests
     public async Task ReadTile_ClaimMissingFields_SkippedNotThrow()
     {
         var client = new FakeVisionClient("{\"claims\":[{\"text\":\"X\"},{\"text\":\"Y\",\"region\":\"r\",\"confidence\":0.7}]}");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Single(read.Claims); // 缺 confidence/region 的 claim 跳过（诚实：不完整不种子）
     }
 
@@ -70,7 +70,7 @@ public class VisionReaderTests
         var client = new FakeVisionClient(
             "{\"claims\":[{\"text\":\"X\",\"region\":\"r\",\"confidence\":1e999}," +
             "{\"text\":\"Y\",\"region\":\"r\",\"confidence\":0.9}]}");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Single(read.Claims); // 溢出 claim 与缺字段同通道跳过，不抛；合法 0.9 保留
         Assert.Equal("Y", read.Claims[0].Text);
         Assert.Equal(0.9, read.Claims[0].Confidence);
@@ -86,7 +86,7 @@ public class VisionReaderTests
         var client = new FakeVisionClient(
             "{\"claims\":[{\"text\":\"X\",\"region\":\"r\",\"confidence\":" + conf + "}," +
             "{\"text\":\"Y\",\"region\":\"r\",\"confidence\":0.9}]}");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Single(read.Claims);
         Assert.Equal("Y", read.Claims[0].Text);
         Assert.Null(read.ParseError);
@@ -98,7 +98,7 @@ public class VisionReaderTests
     public async Task ReadTile_ClaimsNotArray_ParseErrorEmptyClaims(string content)
     {
         // 降级分支覆盖：claims 非数组（字符串/对象）→ ParseError + 空 claims（诚实降级）
-        var read = await new VisionReader(new FakeVisionClient(content), "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(new FakeVisionClient(content)).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Empty(read.Claims);
         Assert.NotNull(read.ParseError);
     }
@@ -108,7 +108,7 @@ public class VisionReaderTests
     {
         // 降级分支覆盖：首{尾}提取后仍非法 JSON → JsonException catch 路径 → ParseError + 空 claims
         var client = new FakeVisionClient("读图：{broken} 完毕");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Empty(read.Claims);
         Assert.NotNull(read.ParseError);
         Assert.Contains("解析失败", read.ParseError); // 钉住走的是 JsonException 通道而非"非 JSON"通道
@@ -120,7 +120,7 @@ public class VisionReaderTests
         // 降级分支覆盖：claims 数组含非对象元素（数字/字符串/null）→ 跳过；合法对象保留
         var client = new FakeVisionClient(
             "{\"claims\":[42,\"s\",null,{\"text\":\"Y\",\"region\":\"r\",\"confidence\":0.9}]}");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Single(read.Claims);
         Assert.Equal("Y", read.Claims[0].Text);
         Assert.Null(read.ParseError);
@@ -133,7 +133,7 @@ public class VisionReaderTests
         var client = new FakeVisionClient(
             "{\"claims\":[{\"text\":\"X\",\"region\":\"r\",\"confidence\":\"high\"}," +
             "{\"text\":\"Y\",\"region\":\"r\",\"confidence\":0.9}]}");
-        var read = await new VisionReader(client, "m").ReadTileAsync(Png, "S1", (0, 0, 1, 1));
+        var read = await new VisionReader(client).ReadTileAsync(Png, "S1", (0, 0, 1, 1));
         Assert.Single(read.Claims);
         Assert.Equal("Y", read.Claims[0].Text);
         Assert.Null(read.ParseError);

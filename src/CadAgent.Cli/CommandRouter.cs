@@ -478,7 +478,7 @@ public static partial class CommandRouter
     /// 视觉接线 T3：semantic scan --vision → 独立 View 进程 --vision-scan headless 入口
     /// （R4 parity：ViewLaunch 进程模式镜像——Cli 不 using Avalonia；区别：relay 须等进程
     /// 结束并转发 stdout/stderr/退出码，故 RedirectStandardOutput/Error + WaitForExit）。
-    /// 转发 --drawing/--project/--confirm-egress/--name/--max-tiles；闸口/出境/审计全在 View 进程内。
+    /// 转发 --drawing/--project/--confirm-egress/--name/--max-tiles/--session；闸口/出境/审计全在 View 进程内。
     /// View 程序集缺失→stderr + exit 1（ViewLaunch 同口径）。
     /// </summary>
     private static int VisionScanRelay(string[] args, string drawingPath, string agentDir,
@@ -492,6 +492,10 @@ public static partial class CommandRouter
         // T4 成本闸：--max-tiles 瓦片预算直通 View 进程（值非法由 View 用法拒绝，先于其副作用）。
         string? maxTiles = GetOption(args, "--max-tiles");
         if (maxTiles is not null) { relayArgs.Add("--max-tiles"); relayArgs.Add(maxTiles); }
+        // R11⑤：--session 直通 View 进程（View 入口读 --session；不转发则 relay 链审计会话断档）。
+        // 未给定不转发（View 侧自生成 GUID，既有契约逐字保持）。
+        string? sessionOpt = GetOption(args, "--session");
+        if (sessionOpt is not null) { relayArgs.Add("--session"); relayArgs.Add(sessionOpt); }
         if (VisionScanSpawn is { } spawn)
             return spawn(relayArgs.ToArray());
         string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
@@ -608,7 +612,9 @@ public static partial class CommandRouter
         // --vision relay 先于一切在进程副作用（闸口/出境/审计全在 View 进程内编排）。
         if (args.Contains("--vision"))
         {
-            if (GetOptionValues(args, "--skill").Count > 0)
+            // R11④：args.Contains 判定替代 GetOptionValues 计数——裸 --skill（末位无值）
+            // 取不到值但 flag 存在本身即冲突，同样拒绝（静默丢弃=诚实缺口，R9 同口径）。
+            if (args.Contains("--skill"))
             {
                 stderr.WriteLine("用法: semantic scan --vision 与 --skill 不能并存（视觉读图不支持 skill 别名；请去掉 --skill 或改用无 --vision 的语义扫描）");
                 return 1;

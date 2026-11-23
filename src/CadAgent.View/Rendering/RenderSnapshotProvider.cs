@@ -94,7 +94,9 @@ public sealed class RenderSnapshotProvider : IRenderSnapshot
         // 包围盒重 Fit（窗口交互口径），若先 Fit(rect) 会被覆盖——瓦片 rect 映射语义
         // （世界/纸面矩形→w×h 像素）要求最终 VM 变换以请求 rect 为准（测试钉住）。
         vm.Fit(rect, w, h);
-        var rtb = new RenderTargetBitmap(new PixelSize(w, h));
+        // R11③：using 确定性释放——RenderTargetBitmap 非托管像素面（约 19.6MB/瓦×82 瓦级）
+        // 不得靠终结器延迟回收（内存峰值面）；Save 完毕即 Dispose。
+        using var rtb = new RenderTargetBitmap(new PixelSize(w, h));
         rtb.Render(control);
         using var ms = new MemoryStream();
         rtb.Save(ms);

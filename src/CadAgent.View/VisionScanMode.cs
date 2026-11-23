@@ -70,26 +70,58 @@ internal static class VisionScanMode
         }
         string agentDir = Path.Combine(project, ".cadagent");
         string session = GetOption(args, "--session") ?? Guid.NewGuid().ToString("N");
+        // R11②：audit/op hoist 至 catch 可见——consent 后网络/timeout/渲染失败必须留终态失败条目
+        // （链有 egress-consent+部分 llm-call 时审计者须能区分崩溃与完成，§9）；
+        // progress 记录读瓦中断点（tilesDone/claimsSoFar 与已留痕 llm-call 一致）。
+        SqliteAuditStore? audit = null;
+        OperatorIdentity? op = null;
+        var progress = new ScanProgress();
         try
         {
             Directory.CreateDirectory(agentDir);
-            using var audit = new SqliteAuditStore(Path.Combine(agentDir, "audit.db"),
+            audit = new SqliteAuditStore(Path.Combine(agentDir, "audit.db"),
                 new CadAgent.Core.Audit.AnchorService(agentDir));
-            var op = new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml"))).Current;
+            op = new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml"))).Current;
             return RunCore(drawing, project, agentDir, session, confirmEgress, profileName, maxTiles,
-                clientOverride, profileOverride, audit, op, stdout, stderr);
+                clientOverride, profileOverride, audit, op, progress, stdout, stderr);
         }
         catch (Exception ex)
         {
-            // 异常兜底：stderr + exit 1（不崩进程栈）
+            // 异常兜底：终态失败审计（kind vision-scan + status=failed；成功 payload 无 status，加性区分）
+            // + stderr + exit 1（不崩进程栈）。审计自身失败嵌套守卫：不重抛掩原始错误（stderr 仍携信息）。
+            if (audit is not null && op is not null)
+            {
+                try
+                {
+                    Append(audit, op, session, "vision-scan", drawing, new
+                    {
+                        status = "failed",
+                        error = ex.Message,
+                        tilesDone = progress.TilesDone,
+                        claimsSoFar = progress.ClaimsSoFar
+                    });
+                }
+                catch { /* 审计存储故障：失败条目缺如但 stderr/exit 1 仍诚实 */ }
+            }
             stderr.WriteLine(ex.Message);
             return 1;
         }
+        finally
+        {
+            audit?.Dispose();
+        }
+    }
+
+    /// <summary>R11②：读瓦进度（catch 可见）——终态失败审计携带中断点，不假装完成。</summary>
+    private sealed class ScanProgress
+    {
+        public int TilesDone;
+        public int ClaimsSoFar;
     }
 
     private static int RunCore(string drawing, string project, string agentDir, string session,
         bool confirmEgress, string? profileName, int? maxTiles, ILlmClient? clientOverride, ProviderProfile? profileOverride,
-        SqliteAuditStore audit, OperatorIdentity op, TextWriter stdout, TextWriter stderr)
+        SqliteAuditStore audit, OperatorIdentity op, ScanProgress progress, TextWriter stdout, TextWriter stderr)
     {
         // 2. 读图 + census sidecar（与 Cli LoadWithCensus 同模式：persisted 直载 + 非空回写）
         var doc = LoadOrReject(() =>
@@ -178,7 +210,8 @@ internal static class VisionScanMode
         }
         var provider = new RenderSnapshotProvider(doc);
         ILlmClient client = clientOverride ?? new OpenAiClient(profile, key!);
-        var reader = new VisionReader(client, profile.Model);
+        // R11⑥：VisionReader 删 model 死参（model 仅 llm-call 审计消费，下方 ReadTilesAsync 透传）
+        var reader = new VisionReader(client);
 
         // 7-阶段一（R7 线程契约，顺序钉住）：主调线程同步预渲染全部瓦片 PNG——
         // RenderPng 须与平台初始化同线程（EnsurePlatform 在本线程 SetupWithoutStarting，
@@ -189,7 +222,7 @@ internal static class VisionScanMode
 
         // 7-阶段二（R7）：渲染全部完成后才顺序 await reader（Task.Run 线程池执行，
         // 不捕获主调线程上下文——headless 测试会话 dispatcher 阻塞等待亦不死锁）。
-        var read = Task.Run(() => ReadTilesAsync(reader, rendered, audit, op, session, profile.Model))
+        var read = Task.Run(() => ReadTilesAsync(reader, rendered, audit, op, session, profile.Model, progress))
             .GetAwaiter().GetResult();
 
         // 8. 逐幅交叉验证（claims 按 sheet 聚合；种子 Upsert，歧义聚合去重）
@@ -240,7 +273,7 @@ internal static class VisionScanMode
     /// </summary>
     private static async Task<ReadPhaseResult> ReadTilesAsync(VisionReader reader,
         List<(string SheetId, (double MinX, double MinY, double MaxX, double MaxY) Rect, byte[] Png)> rendered,
-        SqliteAuditStore audit, OperatorIdentity op, string session, string model)
+        SqliteAuditStore audit, OperatorIdentity op, string session, string model, ScanProgress progress)
     {
         var claimsBySheet = new Dictionary<string, List<VisionClaim>>();
         var parseErrors = new List<string>();
@@ -253,6 +286,9 @@ internal static class VisionScanMode
                 "llm", "llm-call", model,
                 JsonSerializer.Serialize(new { model, read.Usage.PromptTokens, read.Usage.CompletionTokens, attempt, planId = (string?)null }),
                 "", "", "", ""));
+            // R11②：进度与已留痕 llm-call 同步——中途失败时 catch 审计携带一致中断点
+            progress.TilesDone++;
+            progress.ClaimsSoFar += read.Claims.Count;
             promptTokens += read.Usage.PromptTokens;
             completionTokens += read.Usage.CompletionTokens;
             if (read.ParseError is not null) parseErrors.Add(read.ParseError);

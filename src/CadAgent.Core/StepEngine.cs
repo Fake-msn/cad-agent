@@ -118,24 +118,44 @@ public sealed class StepEngine
                 {
                     if (step.Params.TryGetProperty("handle", out var hEl))
                     {
-                        targetHandle = hEl.ValueKind switch
+                        switch (hEl.ValueKind)
                         {
-                            JsonValueKind.Number => hEl.GetUInt64().ToString(),
-                            JsonValueKind.String => hEl.GetString(),
-                            _ => null
-                        };
+                            case JsonValueKind.Number:
+                                // R11①：TryGetUInt64 替代 GetUInt64 裸抛——负数/小数/指数/超 ulong
+                                // （LLM 任意数值输入）不得 FormatException/OverflowException 逸出 Run
+                                // （§9 全入审计）；失败→审计拒绝 fail-closed，合法整数路径逐字保持。
+                                if (!hEl.TryGetUInt64(out ulong hNum))
+                                    return RefuseInvalidNumericParam(op, sessionId, step, "handle", hEl, beforeHash, snapshot, plan, done, txId);
+                                targetHandle = hNum.ToString();
+                                break;
+                            case JsonValueKind.String:
+                                targetHandle = hEl.GetString();
+                                break;
+                            default:
+                                targetHandle = null;
+                                break;
+                        }
                     }
                     // T4：params 含 "sheetId" → 三参幅面作用域校验（防跨幅跑偏）；无 sheetId → 两参 legacy。
-                    // R12：number sheetId 镜像 handle 先例（:123）number→decimal string 强制转换 →
+                    // R12：number sheetId 镜像 handle 先例 number→decimal string 强制转换 →
                     // 作用域生效（不再 fail-open 静默走两参 legacy）；string/缺失/其余非法形态行为保持。
+                    // R11①：number 非法值同 handle 口径审计拒绝（不裸抛）。
                     if (step.Params.TryGetProperty("sheetId", out var sEl))
                     {
-                        sheetId = sEl.ValueKind switch
+                        switch (sEl.ValueKind)
                         {
-                            JsonValueKind.Number => sEl.GetUInt64().ToString(),
-                            JsonValueKind.String => sEl.GetString(),
-                            _ => null
-                        };
+                            case JsonValueKind.Number:
+                                if (!sEl.TryGetUInt64(out ulong sNum))
+                                    return RefuseInvalidNumericParam(op, sessionId, step, "sheetId", sEl, beforeHash, snapshot, plan, done, txId);
+                                sheetId = sNum.ToString();
+                                break;
+                            case JsonValueKind.String:
+                                sheetId = sEl.GetString();
+                                break;
+                            default:
+                                sheetId = null;
+                                break;
+                        }
                     }
                     if (sheetId != null)
                     {
@@ -236,6 +256,22 @@ public sealed class StepEngine
         Append(op, sessionId, "step-undone", session.SourcePath,
             JsonSerializer.Serialize(new { remaining = _undoStack.Count }), before, session.ComputeHash(), "", "");
         return true;
+    }
+
+    /// <summary>
+    /// R11①：数值 handle/sheetId 非法（TryGetUInt64 失败：负数/小数/指数/溢出）→
+    /// step-failed 审计拒绝 + TxResult(false) fail-closed（不执行该步、不 SaveWorking）。
+    /// tx-start 已开组 → step-failed 按既有引擎语义闭合（失败步即事务终态，无 tx-commit）；
+    /// params 携带非法值原文（GetRawText）+reason，审计者可复现 LLM 输入。
+    /// </summary>
+    private TxResult RefuseInvalidNumericParam(OperatorIdentity op, string sessionId, StepSpec step,
+        string field, JsonElement el, string beforeHash, string snapshot, StepPlan plan, int done, string txId)
+    {
+        string reason = $"非法数值 {field}: {el.GetRawText()}（须为非负整数）";
+        Append(op, sessionId, "step-failed", step.Kind,
+            JsonSerializer.Serialize(new { step.Kind, field, raw = el.GetRawText(), reason }),
+            beforeHash, beforeHash, snapshot, plan.PlanId);
+        return new TxResult(txId, false, done, reason);
     }
 
     private void Append(OperatorIdentity op, string session, string kind, string target,

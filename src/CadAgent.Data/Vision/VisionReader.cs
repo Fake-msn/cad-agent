@@ -19,8 +19,9 @@ public sealed class VisionReader
         "不可读/模糊区域给低 confidence；看不到的不要编造；不要输出 JSON 以外文字。";
 
     private readonly ILlmClient _client;
-    private readonly string _model;
-    public VisionReader(ILlmClient client, string model) { _client = client; _model = model; }
+    // R11⑥：model 死字段/死参删除——model 仅 llm-call 审计消费（调用方透传），reader 不消费；
+    // ctor 签名 breaking 限内部调用方（sanctioned：VisionScanMode + VisionReaderTests 同步）。
+    public VisionReader(ILlmClient client) => _client = client;
 
     public async Task<VisionTileRead> ReadTileAsync(byte[] png, string sheetId,
         (double MinX, double MinY, double MaxX, double MaxY) rect, CancellationToken ct = default)

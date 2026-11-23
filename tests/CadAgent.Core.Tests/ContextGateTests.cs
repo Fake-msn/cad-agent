@@ -192,4 +192,59 @@ public class ContextGateTests : IDisposable
         Assert.True(result.Ok);
         Assert.Equal("h-ok", _gate.LastHandle);
     }
+
+    // ---------- R11①：非法数值 handle/sheetId → TryGetUInt64 审计拒绝（不裸抛逸出 Run） ----------
+    // LLM 任意数值（负数/小数/指数/超 ulong）不得 FormatException/OverflowException 出 Run——
+    // §9 全入审计：step-failed 留痕（params 含非法值原文+reason）+ TxResult(false) fail-closed；
+    // tx-start 已开组 → step-failed 闭合（读现状引擎语义：失败步即事务终态，无 tx-commit）。
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("1e30")]
+    [InlineData("18446744073709551616")]
+    public void Engine_InvalidNumericSheetId_AuditedRefusal_NotThrow(string raw)
+    {
+        var gate = new SheetRecordingGate();
+        var result = EngineWith(gate).Run(Plan($$"""{"handle":"h-ok","sheetId":{{raw}}}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.False(result.Ok);
+        Assert.Equal(0, result.StepsDone);
+        Assert.Contains(raw, result.Error);
+        Assert.False(gate.ThreeArgCalled); // 拒绝先于闸口检查（非法值不得流入闸口）
+        Assert.False(gate.TwoArgCalled);
+        var records = _audit.ReadAll();
+        var last = records[^1];
+        Assert.Equal("step-failed", last.Entry.Kind); // 已开 tx-start 组以 step-failed 闭合
+        Assert.Contains("sheetId", last.Entry.ParamsJson);
+        Assert.Contains(raw, last.Entry.ParamsJson); // params 携带非法值原文
+        Assert.Contains(records, r => r.Entry.Kind == "tx-start");
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit"); // 无开放组假装提交
+        Assert.True(_audit.VerifyChain(out _));
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("1e30")]
+    [InlineData("18446744073709551616")]
+    public void Engine_InvalidNumericHandle_AuditedRefusal_NotThrow(string raw)
+    {
+        var gate = new SheetRecordingGate();
+        var result = EngineWith(gate).Run(Plan($$"""{"handle":{{raw}}}"""),
+            new FakeSession(Path.Combine(_dir, "f.dxf")), "s1");
+        Assert.False(result.Ok);
+        Assert.Equal(0, result.StepsDone);
+        Assert.Contains(raw, result.Error);
+        Assert.False(gate.ThreeArgCalled);
+        Assert.False(gate.TwoArgCalled);
+        var records = _audit.ReadAll();
+        var last = records[^1];
+        Assert.Equal("step-failed", last.Entry.Kind);
+        Assert.Contains("handle", last.Entry.ParamsJson);
+        Assert.Contains(raw, last.Entry.ParamsJson);
+        Assert.Contains(records, r => r.Entry.Kind == "tx-start");
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
+        Assert.True(_audit.VerifyChain(out _));
+    }
 }

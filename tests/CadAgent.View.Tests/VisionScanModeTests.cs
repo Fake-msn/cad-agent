@@ -342,4 +342,87 @@ public class VisionScanModeTests : IDisposable
         Assert.DoesNotContain("tilesTotal", stdout);
         Assert.DoesNotContain("maxTiles", stdout);
     }
+
+    // ===== R11②：consent 后异常 → 终态失败审计（审计者区分崩溃与完成，§9 缺口闭合）=====
+
+    /// <summary>恒抛 fake：模拟 consent 后网络失败（HttpRequestException 经 ReadTilesAsync 逸出）。</summary>
+    private sealed class ThrowingVisionClient : ILlmClient
+    {
+        public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default) =>
+            throw new HttpRequestException("模拟网络失败");
+        public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<string>>(new[] { "fake-vl" });
+    }
+
+    /// <summary>首瓦成功后抛：模拟读图中途 timeout（部分 llm-call 已留痕的失败形态）。</summary>
+    private sealed class FailAfterFirstClient : ILlmClient
+    {
+        private readonly FakeVisionClient _inner = new(MatchingClaims);
+        public int Calls;
+        public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default)
+        {
+            Calls++;
+            if (Calls > 1) throw new TimeoutException("模拟超时");
+            return _inner.ChatAsync(request, ct);
+        }
+        public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<string>>(new[] { "fake-vl" });
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_ClientThrows_FailureAudited_ChainGreen()
+    {
+        InjectCensus();
+        var (code, stdout, stderr) = RunWith(new ThrowingVisionClient(), "--confirm-egress");
+
+        Assert.Equal(1, code);
+        Assert.Empty(stdout);
+        Assert.Contains("模拟网络失败", stderr);
+        var records = AuditRecords();
+        Assert.Contains(records, x => x.Entry.Kind == "egress-consent"); // 失败发生于 consent 后
+        // 终态失败条目：kind vision-scan + status=failed（成功 payload 无 status，加性区分）
+        var failed = Assert.Single(records, r => r.Entry.Kind == "vision-scan");
+        using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+        {
+            Assert.Equal("failed", p.RootElement.GetProperty("status").GetString());
+            Assert.Contains("模拟网络失败", p.RootElement.GetProperty("error").GetString());
+            Assert.Equal(0, p.RootElement.GetProperty("tilesDone").GetInt32());
+            Assert.Equal(0, p.RootElement.GetProperty("claimsSoFar").GetInt32());
+        }
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _)); // 失败留痕后链仍完整
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_MidReadFailure_ProgressAudited()
+    {
+        // 多瓦夹具首瓦读成功后 timeout：失败条目携带进度（tilesDone/claimsSoFar），
+        // 与已留痕 llm-call 计数一致——审计者可重建中断点，不假装完成。
+        string drawing = CreateMultiTileDrawing();
+        try
+        {
+            InjectCensus(drawing);
+            var client = new FailAfterFirstClient();
+            var outW = new StringWriter(); var errW = new StringWriter();
+            int code = VisionScanMode.Run(
+                new[] { "--vision-scan", "--drawing", drawing, "--project", _project, "--confirm-egress" },
+                outW, errW, client, FakeProfile());
+
+            Assert.Equal(1, code);
+            Assert.Equal(2, client.Calls); // 首瓦成功 + 次瓦抛
+            Assert.Contains("模拟超时", errW.ToString());
+            var records = AuditRecords();
+            Assert.Single(records, r => r.Entry.Kind == "llm-call"); // 首瓦已留痕
+            var failed = Assert.Single(records, r => r.Entry.Kind == "vision-scan");
+            using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+            {
+                Assert.Equal("failed", p.RootElement.GetProperty("status").GetString());
+                Assert.Equal(1, p.RootElement.GetProperty("tilesDone").GetInt32());
+                Assert.Equal(1, p.RootElement.GetProperty("claimsSoFar").GetInt32());
+            }
+            using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+            Assert.True(audit.VerifyChain(out _));
+        }
+        finally { File.Delete(drawing); }
+    }
 }
