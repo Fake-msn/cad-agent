@@ -28,15 +28,24 @@ public static class BlockFingerprint
         IReadOnlyList<(double CX, double CY, double R, double A0, double A1)> Arcs,
         double Aspect);
 
-    /// <summary>指纹 = 规范串 SHA256 大写 hex + 归一化几何（供结构签名与距离计算消费）。</summary>
-    public sealed record Fingerprint(string Hash, NormGeom Geom);
+    /// <summary>指纹 = 规范串 SHA256 大写 hex + 归一化几何（供结构签名与距离计算消费）
+    /// + DroppedNonFinite（R9③，spec §13.4：Extract 剔除的非有限坐标实体计数，加性末位字段）。</summary>
+    public sealed record Fingerprint(string Hash, NormGeom Geom, int DroppedNonFinite);
 
     /// <summary>
     /// 提取块几何指纹。仅 LINE/CIRCLE/ARC 入哈希；NaN/∞ 坐标实体整条剔除；
-    /// 无白名单几何或最长边 &lt; 1e-9（退化）→ null。
+    /// 无白名单几何或最长边 &lt; 1e-9（退化）→ null。旧签名逐字保持（委托 out 重载）。
     /// </summary>
-    public static Fingerprint? Extract(IEnumerable<Entity> entities)
+    public static Fingerprint? Extract(IEnumerable<Entity> entities) => Extract(entities, out _);
+
+    /// <summary>
+    /// out 重载（R9③ 披露通道）：droppedNonFinite = Finite 守卫命中整条剔除的实体数
+    /// （NaN/∞ 任一分量非有限即计 1）。null 返回路径（零白名单/退化 bbox）剔除数不丢——
+    /// NaN-only 代理块仍须披露剔除计数（spec §13.4 "剔除+披露"）。
+    /// </summary>
+    public static Fingerprint? Extract(IEnumerable<Entity> entities, out int droppedNonFinite)
     {
+        int dropped = 0;
         var lines = new List<(double, double, double, double)>();
         var circles = new List<(double, double, double)>();
         var arcs = new List<(double, double, double, double, double)>();
@@ -53,22 +62,22 @@ public static class BlockFingerprint
             switch (e)
             {
                 case Line l:
-                    if (!Finite(l.StartPoint.X, l.StartPoint.Y, l.EndPoint.X, l.EndPoint.Y)) continue;
+                    if (!Finite(l.StartPoint.X, l.StartPoint.Y, l.EndPoint.X, l.EndPoint.Y)) { dropped++; continue; }
                     lines.Add((l.StartPoint.X, l.StartPoint.Y, l.EndPoint.X, l.EndPoint.Y));
                     Pt(l.StartPoint.X, l.StartPoint.Y); Pt(l.EndPoint.X, l.EndPoint.Y); break;
                 case Circle c when e is not Arc: // Arc : Circle——守卫排除弧，弧走下方分支
-                    if (!Finite(c.Center.X, c.Center.Y, c.Radius)) continue;
+                    if (!Finite(c.Center.X, c.Center.Y, c.Radius)) { dropped++; continue; }
                     circles.Add((c.Center.X, c.Center.Y, c.Radius));
                     Pt(c.Center.X - c.Radius, c.Center.Y - c.Radius); Pt(c.Center.X + c.Radius, c.Center.Y + c.Radius); break;
                 case Arc a:
-                    if (!Finite(a.Center.X, a.Center.Y, a.Radius, a.StartAngle, a.EndAngle)) continue;
+                    if (!Finite(a.Center.X, a.Center.Y, a.Radius, a.StartAngle, a.EndAngle)) { dropped++; continue; }
                     arcs.Add((a.Center.X, a.Center.Y, a.Radius, a.StartAngle, a.EndAngle));
                     Pt(a.Center.X - a.Radius, a.Center.Y - a.Radius); Pt(a.Center.X + a.Radius, a.Center.Y + a.Radius); break;
             }
         }
-        if (lines.Count + circles.Count + arcs.Count == 0) return null; // 无白名单几何
+        if (lines.Count + circles.Count + arcs.Count == 0) { droppedNonFinite = dropped; return null; } // 无白名单几何
         double w = maxX - minX, h = maxY - minY, scale = Math.Max(w, h);
-        if (scale < 1e-9) return null; // 退化 bbox（点状/数值噪声）
+        if (scale < 1e-9) { droppedNonFinite = dropped; return null; } // 退化 bbox（点状/数值噪声）
         double aspect = Math.Min(w, h) / scale; // 原始 bbox 纵横比（归一化前）
         // 量化 1e-3：消除浮点噪声，保证平移/均匀缩放后逐位相等
         double Q(double v) => Math.Round(v, 3);
@@ -85,7 +94,8 @@ public static class BlockFingerprint
         foreach (var t in nc) sb.Append(FormattableString.Invariant($"C{t.Item1},{t.Item2},{t.Item3};"));
         foreach (var t in na) sb.Append(FormattableString.Invariant($"A{t.Item1},{t.Item2},{t.Item3},{t.Item4},{t.Item5};"));
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))); // 大写 hex
-        return new Fingerprint(hash, new NormGeom(nl, nc, na, aspect));
+        droppedNonFinite = dropped;
+        return new Fingerprint(hash, new NormGeom(nl, nc, na, aspect), dropped);
     }
 
     // 全部分量有限（NaN/∞ 任一 → 整条实体剔除）

@@ -71,6 +71,10 @@ public class RealBlockFingerprintTests
                 Assert.Contains(a.Reason, new[] { "代理图形不可读", "无匹配" });
                 Assert.NotEmpty(a.SampleHandles);
                 Assert.True(a.Instances >= 3);
+                // R9②：歧义诊断直方图全量披露（非空块定义必有 ≥1 实体类型）+ Ordinal 排序不变量
+                Assert.NotEmpty(a.Histogram);
+                Assert.Equal(a.Histogram.Select(h => h.Type).OrderBy(t => t, StringComparer.Ordinal),
+                    a.Histogram.Select(h => h.Type));
             });
             // $equip$00002832×1364 高频块必须披露入歧义（不静默丢弃）+ reason 合法 + 绝不自动种子。
             // 实战更正（spec §12 注记）：该块定义暴露最小可读几何占位（2 Line+1 Circle），fp 非 null，

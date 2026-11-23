@@ -611,6 +611,8 @@ public static partial class CommandRouter
     /// stdout 加性四键恒在 blockAutoSeeded/blockSuggestions/blockAmbiguous(+guidance)/symbolsSkipped
     /// （无包→零/空；旧键 version/annotations/ambiguous/sheets 逐字不变）；审计 params 加性
     /// blockAutoSeeded/blockSuggestionCount/blockAmbiguousCount/symbolsSkipped。
+    /// R9②③（诊断披露补全，spec §13.2/§13.4）：blockAmbiguous 项加性 histogram/bbox；
+    /// stdout+审计 params 加性 nonFiniteDropped 恒在（无包 0）——旧字段逐字不变。
     /// --min-block-instances 正整数旗标（镜像 --max-tiles 先例）：非法值→stderr + exit 1，
     /// 先于一切副作用（含 --vision relay——新旗标无 legacy 行为可破）。
     /// </summary>
@@ -672,6 +674,8 @@ public static partial class CommandRouter
         // BF-T3 加性披露口径（审计与 stdout 共用）：无包→BlockMatch null→零/空恒在。
         int blockAutoSeeded = result.BlockMatch?.AutoSeeds.Sum(s => s.Handles.Count) ?? 0;
         int symbolsSkipped = result.BlockMatch?.SymbolsSkipped ?? 0;
+        // R9③（spec §13.4）：NaN/∞ 实体剔除披露计数——块+符号提取累计；无包 0 恒在。
+        int nonFiniteDropped = result.BlockMatch?.NonFiniteDropped ?? 0;
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "semantic", "semantic-scan", drawingPath,
             JsonSerializer.Serialize(new
@@ -687,7 +691,9 @@ public static partial class CommandRouter
                 blockAutoSeeded,
                 blockSuggestionCount = result.BlockMatch?.Suggestions.Count ?? 0,
                 blockAmbiguousCount = result.BlockMatch?.Ambiguous.Count ?? 0,
-                symbolsSkipped
+                symbolsSkipped,
+                // R9③ 审计加性（spec §13.4）：非有限坐标实体剔除累计数（旧字段逐字不变）。
+                nonFiniteDropped
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -708,8 +714,13 @@ public static partial class CommandRouter
             blockAmbiguous = (result.BlockMatch?.Ambiguous ?? Array.Empty<BlockAmbiguous>())
                 .Select(a => new { block = a.BlockName, instances = a.Instances, reason = a.Reason,
                     sampleHandles = a.SampleHandles,
-                    guidance = a.Reason == "代理图形不可读" ? "建议天正 T3 转换后重扫" : null }),
-            symbolsSkipped
+                    guidance = a.Reason == "代理图形不可读" ? "建议天正 T3 转换后重扫" : null,
+                    // R9② 加性诊断字段（spec §13.2）：histogram=全量类型计数（Ordinal 排序）/
+                    // bbox=几何包围盒（可空）。命名 record 直序列化——ValueTuple 会退化为 {}。
+                    histogram = a.Histogram, bbox = a.Bbox }),
+            symbolsSkipped,
+            // R9③ stdout 加性键恒在（spec §13.4）：NaN/∞ 实体剔除累计数（无包 0）。
+            nonFiniteDropped
         }, SemanticJsonOpts));
         return 0;
     }

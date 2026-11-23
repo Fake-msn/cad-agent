@@ -257,4 +257,54 @@ public class BlockFingerprintTests
         Assert.InRange(d, 0.14, 0.16); // 有占用=0.15；无占用会落到 0.05 → 回红
         Assert.True(d > 0.1);
     }
+
+    // ---- R9②③ 诊断披露补全（spec §13.4 NaN/∞ 剔除披露计数）----
+
+    /// <summary>③ DroppedNonFinite：1 NaN 线 → 计 1（整条剔除口径，Finite 守卫命中即计 1）；
+    /// 加性字段不破既有哈希（与无 NaN 基准逐位相等）。</summary>
+    [Fact]
+    public void Extract_NaNLine_DroppedNonFiniteOne()
+    {
+        var ents = Symbol();
+        ents.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(1, 1, 0) });
+        var fp = BlockFingerprint.Extract(ents)!;
+        Assert.Equal(1, fp.DroppedNonFinite);
+        Assert.Equal(BlockFingerprint.Extract(Symbol())!.Hash, fp.Hash); // 哈希口径不变
+    }
+
+    /// <summary>③ 全有限实体 → DroppedNonFinite=0（加性字段默认口径）。</summary>
+    [Fact]
+    public void Extract_AllFinite_DroppedNonFiniteZero()
+    {
+        Assert.Equal(0, BlockFingerprint.Extract(Symbol())!.DroppedNonFinite);
+    }
+
+    /// <summary>③ ∞ 半径圆 + NaN 圆心弧 → 各计 1 合计 2（NaN 与 ∞ 同守卫口径）。</summary>
+    [Fact]
+    public void Extract_InfinityCircleAndNaNArc_DroppedNonFiniteTwo()
+    {
+        var ents = Symbol();
+        ents.Add(new Circle { Center = new XYZ(1, 1, 0), Radius = double.PositiveInfinity });
+        ents.Add(new Arc { Center = new XYZ(double.NaN, 0, 0), Radius = 5, StartAngle = 0, EndAngle = 1 });
+        var fp = BlockFingerprint.Extract(ents)!;
+        Assert.Equal(2, fp.DroppedNonFinite);
+    }
+
+    /// <summary>③ out 重载：NaN-only 块 Extract→null 但剔除数不丢（代理块披露通道）；
+    /// 非 null 路径 out 值与 record 字段一致。</summary>
+    [Fact]
+    public void Extract_OutOverload_NaNOnlyNullFp_DroppedStillCounted()
+    {
+        var fp = BlockFingerprint.Extract(new List<Entity>
+        {
+            new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(1, 1, 0) },
+        }, out int dropped);
+        Assert.Null(fp); // 零白名单几何（NaN 线整条剔除后为空）
+        Assert.Equal(1, dropped);
+        var ents = Symbol();
+        ents.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(1, 1, 0) });
+        var fp2 = BlockFingerprint.Extract(ents, out int dropped2)!;
+        Assert.Equal(1, dropped2);
+        Assert.Equal(fp2.DroppedNonFinite, dropped2);
+    }
 }
