@@ -176,6 +176,134 @@ public class CanvasHeadlessTests
         finally { window.Close(); }
     }
 
+    [AvaloniaFact]
+    public void Hatch_Solid_RenderedFilled_DoesNotThrow()
+    {
+        // 实心填充方块 (0,0)-(10,10)：渲染一帧无异常 + 视觉树存活（镜像既有帧测试
+        // 断言粒度）；像素探针镜像 NeighborhoodBrightness 模式：边界内实心填充亮、
+        // 边界外保持深色背景。200x200 视口 Fit → scale 18，世界 (5,5)→屏幕 (100,100)。
+        var hatch = new RenderItem(RenderKind.Hatch,
+            new[] { (0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0) },
+            "0", 0xFFFFFF, null, 0, 0, "H1", Fill: true);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { hatch }, 200, 200);
+        try
+        {
+            Assert.True(canvas.Bounds.Width > 0 && canvas.Bounds.Height > 0);
+            window.CaptureRenderedFrame(); // ensure at least one composed frame
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame); // Hatch 渲染产出真实帧（无异常）
+            Assert.True(frame!.PixelSize.Width > 0 && frame.PixelSize.Height > 0);
+            (double ix, double iy) = vm.WorldToScreen(5, 5);      // 方块内部 → 实心填充
+            (double ox, double oy) = vm.WorldToScreen(-0.3, 5);   // 左边界外（仍在视口内）→ 背景
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ix), (int)Math.Round(iy)) > 200,
+                "expected solid fill inside the hatch boundary");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ox), (int)Math.Round(oy)) < 90,
+                "expected background outside the hatch boundary");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Hatch_TwoPaths_EvenOddHoleNotFilled()
+    {
+        // 外方 (0,0)-(10,10) + 岛 (3,3)-(7,7)，(NaN,NaN) 路径分隔 → EvenOdd 跨路径
+        // 挖岛：岛中心须为背景（未填充），内外方形之间须填充。钉住 NaN 分隔约定的
+        // 画布端语义（StreamGeometry FillRule.EvenOdd + 逐路径 BeginFigure/EndFigure）。
+        var hatch = new RenderItem(RenderKind.Hatch,
+            new[]
+            {
+                (0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0),
+                (double.NaN, double.NaN),
+                (3.0, 3.0), (7.0, 3.0), (7.0, 7.0), (3.0, 7.0)
+            },
+            "0", 0xFFFFFF, null, 0, 0, "H2", Fill: true);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { hatch }, 200, 200);
+        try
+        {
+            window.CaptureRenderedFrame(); // ensure at least one composed frame
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+            (double hx, double hy) = vm.WorldToScreen(5, 5);     // 岛中心 → EvenOdd 挖空
+            (double fx, double fy) = vm.WorldToScreen(1.5, 5);   // 内外方形之间 → 填充
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(hx), (int)Math.Round(hy)) < 90,
+                "expected EvenOdd hole (background) at the island center");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(fx), (int)Math.Round(fy)) > 200,
+                "expected solid fill between outer boundary and island");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_DashedLine_PixelProbeShowsGaps()
+    {
+        // Task 3（线型虚实）：水平线 (0,0)-(100,0) + DashPattern [10,10]（drawing
+        // 单位）。800x600 视口 Fit → scale 7.2，设备段长 72px：世界 x∈[0,10) 为划、
+        // [10,20) 为空。探针钉住 pen DashStyle 克隆生效：划中点亮、空中点背景。
+        var dashed = new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (100.0, 0.0) },
+            "0", 0xFFFFFF, null, 0, 0, "D1", DashPattern: new double[] { 10, 10 });
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { dashed });
+        try
+        {
+            window.CaptureRenderedFrame(); // ensure at least one composed frame
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+            (double dx, double dy) = vm.WorldToScreen(5, 0);   // 第一划中点 → 亮
+            (double gx, double gy) = vm.WorldToScreen(15, 0);  // 第一空中点 → 背景
+            // 1px 水平描边落在整数屏幕 y → AA 上下半覆盖（~142），亮阈值 >100
+            // （背景 30；空中探针 <90 仍可判别）。
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(dx), (int)Math.Round(dy)) > 100,
+                "expected bright dash segment at world x=5");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(gx), (int)Math.Round(gy)) < 90,
+                "expected background gap at world x=15 (dash pattern must reach the pen)");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_SubpixelDashPattern_DegradesToSolid()
+    {
+        // 亚像素守卫：DashPattern [0.01,10] → 设备 [0.072,72]px，任一段 < 0.25px
+        // →实线降级防摩尔纹。若守卫失效，0.072px 短划 + 72px 长空会使 x=5/x=15
+        // 均落在空中（暗）；降级实线则两点皆亮——探针可判别。
+        var tiny = new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (100.0, 0.0) },
+            "0", 0xFFFFFF, null, 0, 0, "D2", DashPattern: new double[] { 0.01, 10 });
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { tiny });
+        try
+        {
+            window.CaptureRenderedFrame();
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+            (double ax, double ay) = vm.WorldToScreen(5, 0);
+            (double bx, double by) = vm.WorldToScreen(15, 0);
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ax), (int)Math.Round(ay)) > 100,
+                "subpixel pattern must degrade to solid (bright at x=5)");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(bx), (int)Math.Round(by)) > 100,
+                "subpixel pattern must degrade to solid (bright at x=15)");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_SolidLine_NoDashPattern_Continuous()
+    {
+        // 行为保持回归锚：无 DashPattern（null）→实线，全程亮（既有渲染不变）。
+        var solid = Line(0, 0, 100, 0, "D3");
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { solid });
+        try
+        {
+            window.CaptureRenderedFrame();
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+            (double ax, double ay) = vm.WorldToScreen(5, 0);
+            (double bx, double by) = vm.WorldToScreen(15, 0);
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ax), (int)Math.Round(ay)) > 100,
+                "solid line must stay continuous at x=5");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(bx), (int)Math.Round(by)) > 100,
+                "solid line must stay continuous at x=15");
+        }
+        finally { window.Close(); }
+    }
+
     /// <summary>Max RGB channel in a 5x5 neighborhood (anti-aliased 1px stroke may
     /// not fully cover the exact mathematical point), bounds-checked.</summary>
     private static int NeighborhoodBrightness(WriteableBitmap frame, int x, int y)

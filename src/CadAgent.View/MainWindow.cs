@@ -1,3 +1,4 @@
+using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -6,6 +7,7 @@ using Avalonia.Interactivity;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CadAgent.Core;
 using CadAgent.View.Controls;
@@ -57,6 +59,18 @@ namespace CadAgent.View;
 /// ②驳回签认→快照回滚（RollbackTx→EditViewModel.UndoAsync，仅已提交 tx 可签认）；
 /// ③状态文件损坏优雅降级（audit.db/roles.yaml/signoffs.json → ErrorMessage/
 /// StateNote 提示，窗口照常打开、图纸照常渲染）；SetActiveTool 补 _editBusy 硬闸。
+/// 视图闭环 T5：审计时间线 live-rebuild（RefreshAfterEdit → Audit.Rebuild →
+/// TimelineChanged 刷新列表，编辑/撤销后无需重开窗口）；_diffBusy 硬闸
+/// （diff 加载期间画布点击/工具切换/撤销/删除/改层一律忽略，镜像 _editBusy）。
+/// 视图闭环 T9：编辑 UX 收尾——字高/缩放/旋转°输入框（非法输入 fallback
+/// 3.5/1/0；旋转 UI 度→handler 弧度）；Delete 第二击经 ConfirmDialog 模态确认
+/// （取消保持选中不清状态；headless 测试经 ConfirmDeleteOverride seam 注入，
+/// 真模态走 Task 11 真机协议）。删除仍经 EditViewModel→StepEngine，无审计旁路。
+/// 视图闭环 T10：④纠偏计划预览面板（左栏"计划"tab，spec §4.1④）——意图→
+/// AgentOrchestrator（Core 零改动，confirmPlan/confirmCloudEgress 回调即预览钩子）
+/// →人工确认→StepEngine 执行（无审计旁路）；首次云端出境同意提示；执行成功→
+/// 全视图刷新 + 问题清单重评 + 审计 live-rebuild。编排期间会话闸粗粒度持有
+/// （编辑/问题刷新在闸上阻塞——计划明示）。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -64,7 +78,8 @@ public sealed class MainWindow : Window
     private static readonly string[] ClassOptions =
         Enum.GetNames<SemanticClass>().Where(n => n != nameof(SemanticClass.Unknown)).ToArray();
 
-    /// <summary>T9 文本工具默认字高（GB 50001 字高系列常用值；高度输入留 T10）。</summary>
+    /// <summary>T9 文本工具默认字高（GB 50001 字高系列常用值；视图闭环 T9 起
+    /// 字高输入框可覆盖，非法/≤0 输入回落此值）。</summary>
     private const double DefaultTextHeight = 3.5;
 
     /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
@@ -84,10 +99,28 @@ public sealed class MainWindow : Window
     /// </summary>
     private bool _editBusy;
 
+    /// <summary>视图闭环 T7：最近一次编辑的非空 Warning（Yellow 闸口警示 / run-regression
+    /// 回归警告）——拼入状态栏尾部；新编辑/撤销/切换工具时清除，避免陈旧警示误导。</summary>
+    private string _editWarning = "";
+
+    /// <summary>
+    /// Diff 加载重入闸（视图闭环 T5，镜像 _editBusy 结构性保证）：ApplyDiffAsync
+    /// 置位、完成复位；Diff 加载期间画布点击/工具切换/撤销/删除/改层一律忽略——
+    /// IsEnabled 只是视觉提示，RaiseEvent/画布点击可绕过禁用态，标志位才是硬闸。
+    /// </summary>
+    private bool _diffBusy;
+
     /// <summary>T9 Move 工具：选中图元的首点（dx/dy 基准）；目标点击后清除。</summary>
     private (double X, double Y)? _moveBase;
 
-    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null)
+    /// <summary>最终审查顺手修（T10 deferred）：预览确认/拒绝按钮的轮次闸。
+    /// PreviewReady 处理时置位（启用按钮）；确认/拒绝点击后立即复位（禁用）——
+    /// 防纠正循环二次 confirmPlan 时，用户在下一轮 PreviewReady 的 Post 处理前
+    /// 点击确认（确认到尚未显示的旧计划）。仅 PreviewReady 重新启用，RunCompleted 不复位。</summary>
+    private bool _planConfirmPending;
+
+    public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null,
+        PlanPreviewViewModel? planPreview = null)
     {
         DataContext = vm;
         _skillDirs = vm.SkillDirs;
@@ -108,7 +141,8 @@ public sealed class MainWindow : Window
 
         IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
         Canvas = new CanvasViewModel(items);
-        var layers = new LayersViewModel(items, Canvas);
+        // T8：传 session → 图层面板 = renderItems ∪ 图层表（空图层计数 0+表色样）。
+        var layers = new LayersViewModel(items, Canvas, vm.Session);
         Layers = layers;
 
         // T9 会话闸：编辑/撤销（EditViewModel）与后台 session 读（diff/check/scan）
@@ -145,11 +179,8 @@ public sealed class MainWindow : Window
         panel.Children.Add(showAll);
         panel.Children.Add(layerList); // LastChildFill：列表占满面板其余区域
 
-        // T5：右栏问题清单（in-process check；T10：--skill 目录经 MainViewModel 接线）。
-        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, _skillDirs, Canvas, sessionGate);
-        Issues = issues;
-        issues.IssuesChanged += UpdateIssuesPanel;
-
+        // T5：右栏问题清单 UI（VM 构造移至 writeAudit/signoffIdentity 声明之后——
+        // 视图闭环 T6：Issues 刷新留 check-run 审计需要两者）。
         var issuesHeader = new TextBlock
         {
             Text = "Issues",
@@ -197,7 +228,10 @@ public sealed class MainWindow : Window
         IAuditStore auditStore;
         if (!File.Exists(auditDbPath))
         {
-            auditStore = new EmptyAuditStore();
+            // Fix Round 1：创建前 ReadAll 空库语义等价 EmptyAuditStore；与 writeAudit
+            // 同实例 → 首写后 live-rebuild 可见（首 tx 无需重开窗口）。打开窗口不建库
+            // 约定不变——Ensure 仅首 Append 触发。
+            auditStore = new LazyWriteAuditStore(auditDbPath);
         }
         else
         {
@@ -244,6 +278,12 @@ public sealed class MainWindow : Window
         };
         auditList.SelectionChanged += OnTxSelected;
         AuditList = auditList;
+        // 视图闭环 T5：Rebuild 完成（成功或失败）→ live 刷新事务列表（无需重开窗口）。
+        audit.TimelineChanged += () =>
+        {
+            if (AuditList is not null && Audit is not null)
+                AuditList.ItemsSource = Audit.Transactions;
+        };
 
         var auditTopRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         auditTopRow.Children.Add(auditHeader);
@@ -358,9 +398,19 @@ public sealed class MainWindow : Window
 
         // T8：写审计存储——audit.db 存在 → 复用 T6 存储；缺失 → 惰性建库占位
         // （首次 Append 才创建 .cadagent/audit.db；打开窗口不建库，沿用 T6 约定）。
-        IAuditStore writeAudit = auditStore is SqliteAuditStore
+        // Fix Round 1：无库分支 auditStore 已是 LazyWriteAuditStore → 复用同实例
+        // （读/写同源，首 tx 后 Audit.Rebuild 即可见）；损坏降级分支仍另建惰性占位。
+        IAuditStore writeAudit = auditStore is SqliteAuditStore or LazyWriteAuditStore
             ? auditStore
             : new LazyWriteAuditStore(auditDbPath);
+
+        // T5：右栏问题清单 VM（in-process check；T10：--skill 目录经 MainViewModel 接线）。
+        // 视图闭环 T6：刷新留 check-run 审计（parity CLI check）——写审计复用 T8 存储，
+        // 身份与签认同源；构造位于 writeAudit/signoffIdentity 声明之后。
+        var issues = new IssuesViewModel(vm.Session, vm.ProjectDir, _skillDirs, Canvas, sessionGate,
+            audit: writeAudit, identity: signoffIdentity);
+        Issues = issues;
+        issues.IssuesChanged += UpdateIssuesPanel;
 
         // T9：手动编辑视图模型——所有编辑经 StepEngine（无旁路）；写审计复用 T8
         // 存储；身份/角色与签认同源；语义闸口由 VM 按 overlay 存在性注入（镜像 CLI）。
@@ -391,7 +441,7 @@ public sealed class MainWindow : Window
         }
         Tool("Select", EditTool.Select, "选择：点击选中实体（默认工具）");
         Tool("Line", EditTool.Line, "画线：第一击设起点，第二击提交（经审计管线）");
-        Tool("Text", EditTool.Text, "文字：先在工具栏输入内容，再点击放置（字高 3.5）");
+        Tool("Text", EditTool.Text, "文字：先在工具栏输入内容，再点击放置（字高取输入框，默认 3.5）");
         Tool("Move", EditTool.Move, "移动：点击实体选中，再点击目标点（相对首点位移）");
         // Delete 两段式：首按激活工具 → 画布点击选中 → 再按本按钮确认删除。
         var delete = new Button
@@ -400,7 +450,7 @@ public sealed class MainWindow : Window
             Margin = new Thickness(2, 0),
             [ToolTip.TipProperty] = "选中实体后再次点击确认删除"
         };
-        delete.Click += OnDeleteClick;
+        delete.Click += (_, _) => _ = OnDeleteClickAsync();
         toolbar.Children.Add(delete);
         Tool("ChangeLayer", EditTool.ChangeLayer, "改层：点击实体选中，再从层下拉选择目标层");
         Tool("InsertBlock", EditTool.InsertBlock, "插块：先在工具栏输入块名，再点击放置");
@@ -421,6 +471,16 @@ public sealed class MainWindow : Window
         var blockInput = new TextBox { Watermark = "Block name", Width = 120, Margin = new Thickness(2, 0) };
         EditBlockInput = blockInput;
         toolbar.Children.Add(blockInput);
+        // 视图闭环 T9：字高/缩放/旋转°输入（镜像 textInput/blockInput 装配模式）。
+        var heightInput = new TextBox { Watermark = "字高", Width = 60, Margin = new Thickness(2, 0), Text = "3.5" };
+        TextHeightInput = heightInput;
+        toolbar.Children.Add(heightInput);
+        var scaleInput = new TextBox { Watermark = "缩放", Width = 60, Margin = new Thickness(2, 0), Text = "1" };
+        BlockScaleInput = scaleInput;
+        toolbar.Children.Add(scaleInput);
+        var rotationInput = new TextBox { Watermark = "旋转°", Width = 60, Margin = new Thickness(2, 0), Text = "0" };
+        BlockRotationInput = rotationInput;
+        toolbar.Children.Add(rotationInput);
         var layerSelector = new ComboBox
         {
             ItemsSource = layers.Layers.Select(l => l.Name).ToList(),
@@ -578,11 +638,129 @@ public sealed class MainWindow : Window
         adjudicationPanel.Children.Add(adjudicationError);
         adjudicationPanel.Children.Add(adjudicationList); // LastChildFill：当前裁定列表
 
+        // 视图闭环 T10：④纠偏计划预览面板（spec §4.1④）。生产装配复用
+        // writeAudit/signoffIdentity/sessionGate（与编辑/签认同源，无审计旁路）；
+        // headless 测试经 planPreview 可选参注入 fake client VM。
+        PlanPreview = planPreview ?? new PlanPreviewViewModel(vm.Session, vm.ProjectDir,
+            writeAudit, signoffIdentity, new RoleChecker(), sessionGate);
+
+        var planHeader = new TextBlock
+        {
+            Text = "纠偏计划",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4)
+        };
+        var intentInput = new TextBox
+        {
+            Watermark = "纠偏意图（可先从问题清单填充）",
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            Height = 64,
+            Margin = new Thickness(4, 2)
+        };
+        PlanIntentInput = intentInput;
+        var fillIntent = new Button { Content = "从问题填充", Margin = new Thickness(4, 2) };
+        fillIntent.Click += OnFillIntentFromIssues;
+        FillIntentButton = fillIntent;
+        var generate = new Button { Content = "生成计划", Margin = new Thickness(4, 2) };
+        generate.Click += OnGeneratePlanClick;
+        GeneratePlanButton = generate;
+        var planButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        planButtons.Children.Add(fillIntent);
+        planButtons.Children.Add(generate);
+
+        var planError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        PlanError = planError;
+
+        // 出境同意提示（首次云端出境；ConfirmEgress(true/false) 应答编排回调）。
+        var egressPrompt = new TextBlock { Margin = new Thickness(6, 2), TextWrapping = TextWrapping.Wrap };
+        EgressPromptText = egressPrompt;
+        var egressConfirm = new Button { Content = "确认发送", Margin = new Thickness(4, 2) };
+        egressConfirm.Click += (_, _) => { PlanPreview?.ConfirmEgress(true); UpdatePlanPanel(); };
+        ConfirmEgressButton = egressConfirm;
+        var egressReject = new Button { Content = "拒绝", Margin = new Thickness(4, 2) };
+        egressReject.Click += (_, _) => { PlanPreview?.ConfirmEgress(false); UpdatePlanPanel(); };
+        RejectEgressButton = egressReject;
+        var egressButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        egressButtons.Children.Add(egressConfirm);
+        egressButtons.Children.Add(egressReject);
+        var egressSection = new StackPanel { Spacing = 2, IsVisible = false };
+        egressSection.Children.Add(egressPrompt);
+        egressSection.Children.Add(egressButtons);
+        EgressConsentSection = egressSection;
+
+        // 预览步骤列表（kind + params JSON 文本）+ 确认执行/拒绝（ConfirmPlan 应答）。
+        var previewList = new ItemsControl
+        {
+            ItemTemplate = new FuncDataTemplate<StepSpec>((s, _) =>
+                s is null ? new Control() : new TextBlock
+                {
+                    Text = $"{s.Kind} {s.Params.GetRawText()}",
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 11,
+                    Margin = new Thickness(4, 2)
+                })
+        };
+        PlanPreviewList = previewList;
+        var confirmPlan = new Button { Content = "确认执行", Margin = new Thickness(4, 2) };
+        confirmPlan.Click += (_, _) => { _planConfirmPending = false; PlanPreview?.ConfirmPlan(true); UpdatePlanPanel(); };
+        ConfirmPlanButton = confirmPlan;
+        var rejectPlan = new Button { Content = "拒绝", Margin = new Thickness(4, 2) };
+        rejectPlan.Click += (_, _) => { _planConfirmPending = false; PlanPreview?.ConfirmPlan(false); UpdatePlanPanel(); };
+        RejectPlanButton = rejectPlan;
+        var previewButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        previewButtons.Children.Add(confirmPlan);
+        previewButtons.Children.Add(rejectPlan);
+        var previewSection = new DockPanel { IsVisible = false };
+        DockPanel.SetDock(previewButtons, Dock.Bottom);
+        previewSection.Children.Add(previewButtons);
+        previewSection.Children.Add(new ScrollViewer { Content = previewList }); // LastChildFill
+        PlanPreviewSection = previewSection;
+
+        var planStatus = new TextBlock { Margin = new Thickness(6, 2), TextWrapping = TextWrapping.Wrap };
+        PlanStatusText = planStatus;
+
+        var planPanel = new DockPanel();
+        DockPanel.SetDock(planHeader, Dock.Top);
+        planPanel.Children.Add(planHeader);
+        DockPanel.SetDock(intentInput, Dock.Top);
+        planPanel.Children.Add(intentInput);
+        DockPanel.SetDock(planButtons, Dock.Top);
+        planPanel.Children.Add(planButtons);
+        DockPanel.SetDock(planError, Dock.Top);
+        planPanel.Children.Add(planError);
+        DockPanel.SetDock(egressSection, Dock.Top);
+        planPanel.Children.Add(egressSection);
+        DockPanel.SetDock(planStatus, Dock.Top);
+        planPanel.Children.Add(planStatus);
+        planPanel.Children.Add(previewSection); // LastChildFill：预览步骤占满其余区域
+
+        // 事件 marshal：VM 事件在编排线程触发（Task.Run）→ Dispatcher.Post 回 UI 线程。
+        // PreviewReady 处理时置位轮次闸（启用确认/拒绝按钮）——新一轮计划已显示方可应答。
+        PlanPreview.PreviewReady += () => Dispatcher.UIThread.Post(() => { _planConfirmPending = true; UpdatePlanPanel(); });
+        PlanPreview.RunCompleted += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
+        PlanPreview.EgressConsentRequired += () => Dispatcher.UIThread.Post(UpdatePlanPanel);
+        PlanPreview.PlanExecuted += () => Dispatcher.UIThread.Post(() =>
+        {
+            RefreshAfterEdit(vm);
+            _ = Issues?.RefreshAsync();
+            Audit?.Rebuild();
+        });
+
         // T8：左栏三 tab（图层默认选中，T4 行为不变；未选中 tab 内容不进入视觉树）。
+        // 视图闭环 T10：计划面板加入既有 TabControl（第四 tab）——不动主 DockPanel
+        // 子序（LastChildFill 教训：画布必须保持最后一个子控件）。
         var tabs = new TabControl { Width = 220 };
         tabs.Items.Add(new TabItem { Header = "图层", Content = panel });
         tabs.Items.Add(new TabItem { Header = "纠偏", Content = semanticPanel });
         tabs.Items.Add(new TabItem { Header = "裁定", Content = adjudicationPanel });
+        tabs.Items.Add(new TabItem { Header = "计划", Content = planPanel });
         LeftTabs = tabs;
 
         var dock = new DockPanel();
@@ -623,6 +801,7 @@ public sealed class MainWindow : Window
         UpdateIssuesPanel();
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
+        UpdatePlanPanel();
         if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
     }
 
@@ -752,11 +931,69 @@ public sealed class MainWindow : Window
     /// <summary>块插入工具块名输入框（T9）。</summary>
     public TextBox? EditBlockInput { get; }
 
+    /// <summary>字高输入框（视图闭环 T9：Text 工具字高；非法/≤0 回落 3.5。headless 测试可达）。</summary>
+    internal TextBox? TextHeightInput { get; }
+
+    /// <summary>缩放输入框（视图闭环 T9：InsertBlock 缩放；非法/≤0 回落 1。headless 测试可达）。</summary>
+    internal TextBox? BlockScaleInput { get; }
+
+    /// <summary>旋转输入框（视图闭环 T9：InsertBlock 旋转，UI 度→handler 弧度；非法回落 0。headless 测试可达）。</summary>
+    internal TextBox? BlockRotationInput { get; }
+
+    /// <summary>
+    /// Delete 确认 seam（视图闭环 T9，headless 测试注入）：null → 真模态
+    /// ConfirmDialog.ShowDialog&lt;bool&gt;；非 null → 测试代理确认结果
+    /// （headless 无 owner 消息泵不测 ShowDialog，真模态走 Task 11 真机协议）。
+    /// </summary>
+    internal Func<string, Task<bool>>? ConfirmDeleteOverride;
+
     /// <summary>改层工具目标层下拉（T9：ChangeLayer 激活且选中实体时选择即应用）。</summary>
     public ComboBox? EditLayerSelector { get; }
 
     /// <summary>编辑错误/引导文本（T9，可见时非空）。</summary>
     public TextBlock? EditError { get; }
+
+    /// <summary>纠偏计划预览视图模型（视图闭环 T10，加载成功时非 null；headless 测试可达）。</summary>
+    internal PlanPreviewViewModel? PlanPreview { get; }
+
+    /// <summary>纠偏意图输入框（视图闭环 T10；headless 测试可达）。</summary>
+    internal TextBox? PlanIntentInput { get; }
+
+    /// <summary>从问题填充按钮（视图闭环 T10：mandatory 项 ruleId+建议拼接入意图）。</summary>
+    internal Button? FillIntentButton { get; }
+
+    /// <summary>生成计划按钮（视图闭环 T10；IsBusy 期间禁用 + 硬闸守卫）。</summary>
+    internal Button? GeneratePlanButton { get; }
+
+    /// <summary>预览步骤列表（视图闭环 T10：kind + params JSON 文本）。</summary>
+    internal ItemsControl? PlanPreviewList { get; }
+
+    /// <summary>预览区段（视图闭环 T10：IsPreviewVisible 联动可见性；headless 测试可达）。</summary>
+    internal DockPanel? PlanPreviewSection { get; }
+
+    /// <summary>确认执行按钮（视图闭环 T10：ConfirmPlan(true)）。</summary>
+    internal Button? ConfirmPlanButton { get; }
+
+    /// <summary>拒绝计划按钮（视图闭环 T10：ConfirmPlan(false)）。</summary>
+    internal Button? RejectPlanButton { get; }
+
+    /// <summary>出境同意区段（视图闭环 T10：首次云端出境时可见）。</summary>
+    internal StackPanel? EgressConsentSection { get; }
+
+    /// <summary>出境同意提示文本（视图闭环 T10：EgressPrompt）。</summary>
+    internal TextBlock? EgressPromptText { get; }
+
+    /// <summary>确认发送按钮（视图闭环 T10：ConfirmEgress(true)）。</summary>
+    internal Button? ConfirmEgressButton { get; }
+
+    /// <summary>拒绝出境按钮（视图闭环 T10：ConfirmEgress(false)）。</summary>
+    internal Button? RejectEgressButton { get; }
+
+    /// <summary>计划状态文本（视图闭环 T10：Status + LastTxId 短号）。</summary>
+    internal TextBlock? PlanStatusText { get; }
+
+    /// <summary>计划错误/引导文本（视图闭环 T10：ErrorMessage/填充引导，可见时非空）。</summary>
+    internal TextBlock? PlanError { get; }
 
     /// <summary>
     /// 行模板：复选框（仅勾选框本体，可见性）+ 色样 + 名称（计数）。Click → Toggle。
@@ -923,6 +1160,8 @@ public sealed class MainWindow : Window
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
             if (_diffSummary.Length > 0) status += $" | {_diffSummary}";
+            // T7：编辑警示（Yellow 闸口 / run-regression 回归警告）入状态栏尾部。
+            if (_editWarning.Length > 0) status += $" | {_editWarning}";
             Status.Text = status;
         }
         if (LayerList is not null)
@@ -982,10 +1221,13 @@ public sealed class MainWindow : Window
     /// <summary>
     /// T6：加载对比并施加叠加层（评估期间禁用切换防重入）。失败 → 行内错误 +
     /// 切换回退；等待期间选择了别的事务 → 丢弃过期结果。
+    /// 视图闭环 T5：_diffBusy 硬闸——加载在途时重入一律忽略（IsEnabled 只是视觉提示）。
     /// </summary>
     private async Task ApplyDiffAsync(string txId)
     {
+        if (_diffBusy) return; // 硬闸：diff 加载在途时重入一律忽略（RaiseEvent 可绕过禁用态）
         if (DiffToggle is null || Canvas is null || Audit is null) return;
+        _diffBusy = true;
         DiffToggle.IsEnabled = false;
         if (EditToolbar is not null) EditToolbar.IsEnabled = false; // T9：diff 加载期间禁止编辑（互斥）
         try
@@ -1009,6 +1251,7 @@ public sealed class MainWindow : Window
         }
         finally
         {
+            _diffBusy = false;
             DiffToggle.IsEnabled = true;
             if (EditToolbar is not null) EditToolbar.IsEnabled = true;
         }
@@ -1209,42 +1452,69 @@ public sealed class MainWindow : Window
 
     /// <summary>T9：激活工具（清预览锚点/Move 基准/旧错误）。Select 恢复默认选择路径。
     /// 最终审查打包小项：_editBusy 硬闸——在途编辑期间工具切换一律忽略
-    /// （RaiseEvent 可绕过工具栏 IsEnabled=false，标志位才是结构性保证）。</summary>
+    /// （RaiseEvent 可绕过工具栏 IsEnabled=false，标志位才是结构性保证）。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间同样忽略。</summary>
     private void SetActiveTool(EditTool tool)
     {
-        if (Edit is null || Canvas is null || _editBusy) return;
+        if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         Edit.ActiveTool = tool;
         Canvas.SetPendingPoint(null);
         _moveBase = null;
         SetEditError(null);
+        SetEditWarning(""); // T7：切换工具清掉上一次编辑的警示（与错误通道同口径）
     }
 
-    /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。</summary>
-    private void OnDeleteClick(object? sender, RoutedEventArgs e)
+    /// <summary>
+    /// Imp#3：Insert/Dimension 子图元渲染句柄为 "{parent}:{i}"（嵌套 "{top}:{i}:{j}"，
+    /// RenderModel 展开口径）。编辑语义 = 编辑父实体/块整体——剥后缀取顶层句柄传处理器
+    /// （EditViewModel.WithHandle 的 ulong.TryParse 只认十进制顶层句柄，后缀会致"非法句柄"
+    /// 拒绝，块/标注几何在视图内 Move/Delete/ChangeLayer 不可达）。独立子图元编辑 deferred
+    /// （spec §12 注记）。三编辑入口（Move/Delete/ChangeLayer）统一经此。
+    /// </summary>
+    private static string ParentHandle(string handle) => handle.Split(':')[0];
+
+    /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
+    /// 视图闭环 T9：第二击先经模态确认（ConfirmDialog.ShowDialog&lt;bool&gt;；headless
+    /// 测试经 ConfirmDeleteOverride seam 注入）——取消保持选中不清状态；确认后才走
+    /// 既有删除执行逻辑（EditViewModel→StepEngine，无审计旁路）。</summary>
+    private async Task OnDeleteClickAsync()
     {
-        if (Edit is null || Canvas is null || _editBusy) return;
-        if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string handle)
-            _ = RunEditAsync(() => Edit.DeleteAsync(handle));
+        if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
+        if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string selected)
+        {
+            string handle = ParentHandle(selected); // Imp#3：子图元句柄→父实体整体删除
+            string msg = $"确认删除选中实体（句柄 {handle}）？删除经审计管线，可 Undo 撤回。";
+            bool confirmed = ConfirmDeleteOverride is not null
+                ? await ConfirmDeleteOverride(msg)
+                : await new ConfirmDialog(msg).ShowDialog<bool>(this);
+            if (!confirmed) return; // 取消：保持选中，不清状态
+            // 确认等待期间编辑/diff 抢跑 → 硬闸兜底（模态阻塞 owner 时理论不可达，seam 路径防御）。
+            if (_editBusy || _diffBusy) return;
+            await RunEditAsync(() => Edit.DeleteAsync(handle));
+        }
         else
             SetActiveTool(EditTool.Delete);
     }
 
-    /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。</summary>
+    /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
     private void OnUndoClick(object? sender, RoutedEventArgs e)
     {
-        if (Edit is null || _editBusy || Edit.RecentTxIds.Count == 0) return;
+        if (Edit is null || _editBusy || _diffBusy || Edit.RecentTxIds.Count == 0) return;
         string txId = Edit.RecentTxIds[^1];
         _ = RunEditAsync(() => Edit.UndoAsync(txId));
     }
 
-    /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。</summary>
+    /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
     private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
     {
-        if (Edit is null || Canvas is null || _editBusy) return;
+        if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.ChangeLayer
-            && Canvas.SelectedHandle is string handle
+            && Canvas.SelectedHandle is string selected
             && EditLayerSelector?.SelectedItem is string layer)
-            _ = RunEditAsync(() => Edit.ChangeLayerAsync(handle, layer));
+            _ = RunEditAsync(() => Edit.ChangeLayerAsync(ParentHandle(selected), layer)); // Imp#3：父实体整体改层
     }
 
     /// <summary>
@@ -1257,7 +1527,8 @@ public sealed class MainWindow : Window
     {
         if (Edit is null || Canvas is null) return false;
         // T10 重入闸：编辑在途时忽略画布点击（消费事件，不落预览锚点/不改选择）。
-        if (_editBusy) return true;
+        // 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间同样消费忽略。
+        if (_editBusy || _diffBusy) return true;
         switch (Edit.ActiveTool)
         {
             case EditTool.Line:
@@ -1279,7 +1550,10 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入文本内容（工具栏 Text content 框）");
                     return true;
                 }
-                _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, DefaultTextHeight));
+                // 视图闭环 T9：字高取输入框（InvariantCulture；非法/≤0 → 默认 3.5，不崩）。
+                // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查）。
+                double height = double.TryParse(TextHeightInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && double.IsFinite(h) && h > 0 ? h : DefaultTextHeight;
+                _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, height));
                 return true;
 
             case EditTool.InsertBlock:
@@ -1289,7 +1563,12 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入块名（工具栏 Block name 框）");
                     return true;
                 }
-                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy));
+                // 视图闭环 T9：缩放非法/≤0 → 1；旋转 UI 度 → handler 弧度（非法 → 0）。
+                // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查；
+                // NaN/∞ 入 JsonSerializer 会抛异常致编辑静默失败）。
+                double scale = double.TryParse(BlockScaleInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && double.IsFinite(s) && s > 0 ? s : 1;
+                double rotation = double.TryParse(BlockRotationInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double deg) && double.IsFinite(deg) ? deg * Math.PI / 180.0 : 0;
+                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy, scale, rotation));
                 return true;
 
             case EditTool.Move:
@@ -1304,7 +1583,8 @@ public sealed class MainWindow : Window
                 else if (Canvas.SelectedHandle is string moveHandle && _moveBase is (double bx, double by))
                 {
                     _moveBase = null;
-                    _ = RunEditAsync(() => Edit.MoveAsync(moveHandle, wx - bx, wy - by));
+                    // Imp#3：子图元句柄→父 Insert/Dimension 整体移动（块/标注几何随父平移）。
+                    _ = RunEditAsync(() => Edit.MoveAsync(ParentHandle(moveHandle), wx - bx, wy - by));
                 }
                 return true;
 
@@ -1318,12 +1598,38 @@ public sealed class MainWindow : Window
         }
     }
 
-    /// <summary>T9：编辑/撤销评估期间禁用工具栏 + Diff 切换（防重入 + diff/编辑互斥）。</summary>
+    /// <summary>T9：编辑/撤销评估期间禁用工具栏 + Diff 切换（防重入 + diff/编辑互斥）。
+    /// 视图闭环 T7：撤销无 EditResult——清掉上一次编辑的回归/闸口警示（图纸已变，旧警告失效）。</summary>
     private async Task RunEditAsync(Func<Task> apply)
     {
         SetEditBusy(true);
-        try { await apply(); }
+        try { SetEditWarning(""); await apply(); }
         finally { SetEditBusy(false); }
+    }
+
+    /// <summary>
+    /// 视图闭环 T7：带结果的编辑入口——任何非空 EditResult.Warning（Yellow 闸口警示 /
+    /// 编辑后 run-regression 回归警告）均入状态栏（此前 RunEditAsync 丢弃结果，Warning
+    /// 完全不可见）。新编辑开始先清旧警示；与 EditError 错误通道分离，互不覆盖。
+    /// 重载决议：Task&lt;EditResult&gt; 比 Task 更特化，编辑调用点自动命中本重载。
+    /// </summary>
+    private async Task RunEditAsync(Func<Task<EditResult>> apply)
+    {
+        SetEditBusy(true);
+        try
+        {
+            SetEditWarning("");
+            EditResult result = await apply();
+            SetEditWarning(result.Warning);
+        }
+        finally { SetEditBusy(false); }
+    }
+
+    /// <summary>T7：编辑警示入状态栏（OnCanvasInvalidated 拼接待显警告；空串=清除）。</summary>
+    private void SetEditWarning(string warning)
+    {
+        _editWarning = warning;
+        Canvas?.Invalidate(); // 状态栏重建（EditCompleted 先于结果返回，须再刷一次）
     }
 
     private void SetEditBusy(bool busy)
@@ -1342,7 +1648,7 @@ public sealed class MainWindow : Window
         if (Canvas is null || Layers is null || Edit is null) return;
         IReadOnlyList<RenderItem> items = RenderModelBuilder.Build(vm.Session);
         Canvas.Refresh(items);
-        Layers.Refresh(items);
+        Layers.Refresh(items, vm.Session); // T8：图层表并集（编辑清空某层后空层仍显示）
         if (LayerList is not null) LayerList.ItemsSource = Layers.Layers;
         if (EditLayerSelector is not null)
             EditLayerSelector.ItemsSource = Layers.Layers.Select(l => l.Name).ToList();
@@ -1354,6 +1660,8 @@ public sealed class MainWindow : Window
         Canvas.Invalidate(); // 状态栏计数刷新
         SetEditError(Edit.ErrorMessage);
         if (UndoButton is not null) UndoButton.IsEnabled = Edit.RecentTxIds.Count > 0;
+        // T9 承接闭环：审计时间线 live-rebuild（编辑/撤销/回滚后无需重开窗口）
+        Audit?.Rebuild();
     }
 
     private void SetEditError(string? message)
@@ -1361,6 +1669,77 @@ public sealed class MainWindow : Window
         if (EditError is null) return;
         EditError.Text = message ?? "";
         EditError.IsVisible = message is not null;
+    }
+
+    /// <summary>视图闭环 T10：从问题填充意图——Issues 中 mandatory 项拼接
+    /// ruleId+建议文本入意图框；无 mandatory 项 → 行内引导（先 Refresh 或手动输入）。</summary>
+    private void OnFillIntentFromIssues(object? sender, RoutedEventArgs e)
+    {
+        if (PlanPreview is null || PlanIntentInput is null) return;
+        List<IssueEntry> mandatory = Issues?.Issues
+            .Where(i => i.Force == RuleForce.Mandatory).ToList() ?? new List<IssueEntry>();
+        if (mandatory.Count == 0)
+        {
+            SetPlanError("问题清单无 mandatory 项——先 Refresh 问题清单或手动输入纠偏意图");
+            return;
+        }
+        SetPlanError(null);
+        PlanIntentInput.Text = string.Join("\n", mandatory.Select(i => $"{i.RuleId}: {i.Suggestion}"));
+    }
+
+    /// <summary>视图闭环 T10：生成计划（async void 包装 GenerateAsync）。
+    /// _editBusy/_diffBusy 并列硬闸 + IsBusy 重入闸（IsEnabled 只是视觉提示，
+    /// RaiseEvent 可绕过禁用态，标志位才是结构性保证——镜像 T10 编辑重入闸）。
+    /// 编排经 VM 内 Task.Run 下线程池，confirmPlan 阻塞回调不占 UI 线程。</summary>
+    private async void OnGeneratePlanClick(object? sender, RoutedEventArgs e)
+    {
+        if (PlanPreview is null || _editBusy || _diffBusy || PlanPreview.IsBusy) return;
+        PlanPreview.Intent = PlanIntentInput?.Text ?? "";
+        if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = false;
+        try
+        {
+            await PlanPreview.GenerateAsync();
+            UpdatePlanPanel();
+        }
+        catch (Exception ex)
+        {
+            // Imp#2 防御兜底（镜像既有 async void 惯例 OnAdjudicateClick）：GenerateAsync
+            // 已内部全捕获前奏/编排异常，此处兜底装配/刷新意外——异常入错误通道，绝不崩进程。
+            SetPlanError(ex.Message);
+        }
+        finally { if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = true; }
+    }
+
+    /// <summary>视图闭环 T10：计划面板刷新——预览/出境同意可见性 + 步骤列表 +
+    /// 状态文本（Status/LastTxId）+ 错误通道（ErrorMessage）。事件经 Dispatcher.Post
+    /// marshal 到 UI 线程后调用；按钮 Click 应答后也同步刷新。</summary>
+    private void UpdatePlanPanel()
+    {
+        if (PlanPreview is null) return;
+        if (PlanPreviewList is not null) PlanPreviewList.ItemsSource = PlanPreview.PreviewSteps;
+        if (PlanPreviewSection is not null) PlanPreviewSection.IsVisible = PlanPreview.IsPreviewVisible;
+        if (EgressConsentSection is not null) EgressConsentSection.IsVisible = PlanPreview.IsEgressConsentVisible;
+        if (EgressPromptText is not null) EgressPromptText.Text = PlanPreview.EgressPrompt;
+        if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = !PlanPreview.IsBusy;
+        // 最终审查顺手修（T10）：确认/拒绝按钮仅在 PreviewReady 处理后启用（_planConfirmPending），
+        // 点击应答后立即禁用至下一轮 PreviewReady——防纠正循环确认到尚未显示的计划。
+        if (ConfirmPlanButton is not null) ConfirmPlanButton.IsEnabled = _planConfirmPending;
+        if (RejectPlanButton is not null) RejectPlanButton.IsEnabled = _planConfirmPending;
+        if (PlanStatusText is not null)
+        {
+            string text = PlanPreview.Status;
+            if (PlanPreview.LastTxId is string tx)
+                text += (text.Length > 0 ? " | " : "") + $"tx {(tx.Length > 8 ? tx[..8] : tx)}";
+            PlanStatusText.Text = text;
+        }
+        SetPlanError(PlanPreview.ErrorMessage);
+    }
+
+    private void SetPlanError(string? message)
+    {
+        if (PlanError is null) return;
+        PlanError.Text = message ?? "";
+        PlanError.IsVisible = message is not null;
     }
 
     /// <summary>T6：无 audit.db 时的只读空存储占位——视图绝不创建/写入审计库。</summary>

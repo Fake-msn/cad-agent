@@ -111,7 +111,7 @@ public static partial class CommandRouter
             string summary = DrawingSummarizer.Summarize(drawing, overlay);
             var orch = new AgentOrchestrator(client, meter, egress, engine, audit,
                 IdentityOverride ?? Identity(agentDir), profile.Model, profile);
-            var result = orch.RunAsync(line, summary, drawing, session, allowedKinds, KindDocs,
+            var result = orch.RunAsync(line, summary, drawing, session, allowedKinds, HandlerKindDocs.Default,
                 confirmPlan, confirmEgress,
                 postSummaryProvider: () => DrawingSummarizer.Summarize(drawing, overlay)).GetAwaiter().GetResult();
             string? liveOut = null;

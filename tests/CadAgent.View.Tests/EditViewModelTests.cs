@@ -42,7 +42,9 @@ public class EditViewModelTests
         public string LineHandle { get; }
         public string TextHandle { get; }
 
-        public Fixture()
+        /// <summary>textHeight 默认 3.5（合规）；回归测试传 4.2 构造字高违规图纸
+        /// （镜像 Cli.Tests RunRegressionTests 的违规夹具构造法）。</summary>
+        public Fixture(double textHeight = 3.5)
         {
             ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(AgentDir);
@@ -51,7 +53,7 @@ public class EditViewModelTests
                 var wall = new Layer("WALL");
                 doc.Layers.Add(wall);
                 doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0), Layer = wall });
-                doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(10, 10, 0), Value = "注记", Height = 3.5, Layer = wall });
+                doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(10, 10, 0), Value = "注记", Height = textHeight, Layer = wall });
                 DxfFixture.AddLumBlock(doc);
             });
             Session = DrawingSession.Load(DxfPath);
@@ -65,6 +67,15 @@ public class EditViewModelTests
             new(Session, Audit, Snapshots,
                 new FixedIdentity(new OperatorIdentity("tester", role)),
                 new RoleChecker(), ProjectDir, sessionGate: sessionGate);
+
+        /// <summary>裁定夹具（镜像 IssuesViewModelTests.SaveAdjudication）：Load→Upsert→Save。</summary>
+        public void SaveAdjudication(Adjudication a)
+        {
+            string path = Path.Combine(AgentDir, "adjudications.json");
+            var set = AdjudicationSet.Load(path);
+            set.Upsert(a);
+            set.Save(path);
+        }
 
         public void Dispose()
         {
@@ -608,5 +619,88 @@ public class EditViewModelTests
         Assert.True(r.Ok, r.Error);
         Assert.DoesNotContain(f.Audit.ReadAll(), x => x.Entry.Kind == "run-rejected");
         Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "tx-commit");
+    }
+
+    // ---- 视图闭环 T7：编辑后 run-regression（镜像 CLI RunRegressionCheck，观察性） ----
+
+    [Fact]
+    public async Task Edit_Success_MandatoryViolation_RegressionWarningAndAudit()
+    {
+        // 夹具：字高 4.2 违规 TextEntity（镜像 Cli.Tests RunRegressionTests）+
+        // adjudications.json 升级 R-50001-5.0.2 为 mandatory（镜像既有裁定夹具）。
+        using var f = new Fixture(textHeight: 4.2);
+        f.SaveAdjudication(new Adjudication("R-50001-5.0.2", "tester", DateTimeOffset.UtcNow,
+            "院标升级", ForceOverride: RuleForce.Mandatory));
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.DrawLineAsync(0, 0, 50, 50);
+
+        // tx 仍 Ok（观察性不回滚）；警告含 mandatory 违规与"不自动回滚"（决策权归人）。
+        Assert.True(r.Ok, r.Error);
+        Assert.Contains("强制(mandatory)规范违规", r.Warning);
+        Assert.Contains("不自动回滚", r.Warning);
+        Assert.Contains("R-50001-5.0.2", r.Warning);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(new[] { r.TxId }, vm.RecentTxIds);
+        List<AuditRecord> records = f.Audit.ReadAll().ToList();
+        AuditRecord commit = Assert.Single(records, x => x.Entry.Kind == "tx-commit");
+        Assert.DoesNotContain(records, x => x.Entry.Kind == "rollback");
+        // 无论有无违规均审计 check-run（Source="view-regression"），且在 tx 提交之后。
+        AuditRecord reg = Assert.Single(records,
+            x => x.Entry.Source == "view-regression" && x.Entry.Kind == "check-run");
+        Assert.True(commit.Seq < reg.Seq);
+        Assert.Equal(f.Session.SourcePath, reg.Entry.Target);
+        Assert.Equal(reg.Entry.BeforeHash, reg.Entry.AfterHash); // 只读检查：前后哈希一致
+        Assert.Equal(f.Session.ComputeHash(), reg.Entry.AfterHash); // 提交后图纸哈希
+        JsonElement p = Params(reg);
+        Assert.True(p.GetProperty("mandatoryViolations").GetInt32() >= 1);
+        Assert.False(p.GetProperty("overlayPresent").GetBoolean()); // 夹具无 overlay
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task Edit_Success_CleanDrawing_RegressionAuditNoWarning()
+    {
+        // 合规图纸（字高 3.5）+ 无裁定（全 recommended）→ 无警告，但 check-run 仍留痕。
+        using var f = new Fixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.DrawLineAsync(0, 0, 50, 50);
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("", r.Warning); // Yellow 在 EmptySupportMatrix 下不可达 → Warning 空
+        AuditRecord reg = Assert.Single(f.Audit.ReadAll(),
+            x => x.Entry.Source == "view-regression" && x.Entry.Kind == "check-run");
+        JsonElement p = Params(reg);
+        Assert.Equal(0, p.GetProperty("mandatoryViolations").GetInt32());
+        Assert.Equal(reg.Entry.BeforeHash, reg.Entry.AfterHash);
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task Edit_Success_AdjudicationsCorrupt_RegressionSkippedAuditErrorTxUnaffected()
+    {
+        // adjudications.json 垃圾字节 → Load 抛 → catch 审计 Error 路径（观察性不影响 tx）。
+        using var f = new Fixture();
+        await File.WriteAllTextAsync(Path.Combine(f.AgentDir, "adjudications.json"), "{corrupt json!!");
+        EditViewModel vm = f.MakeVm();
+        int countBefore = f.Session.Doc.Entities.Count;
+
+        EditResult r = await vm.DrawLineAsync(0, 0, 50, 50);
+
+        Assert.True(r.Ok, r.Error); // tx 仍 Ok
+        Assert.Contains("回归检查未完成", r.Warning);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(countBefore + 1, f.Session.Doc.Entities.Count);
+        Assert.Equal(countBefore + 1, DrawingSession.Load(f.DxfPath).Doc.Entities.Count); // 已落盘不回滚
+        List<AuditRecord> records = f.Audit.ReadAll().ToList();
+        Assert.Single(records, x => x.Entry.Kind == "tx-commit");
+        Assert.DoesNotContain(records, x => x.Entry.Kind == "rollback");
+        AuditRecord reg = Assert.Single(records,
+            x => x.Entry.Source == "view-regression" && x.Entry.Kind == "check-run");
+        JsonElement p = Params(reg);
+        Assert.True(p.TryGetProperty("Error", out JsonElement err)); // 故障也入审计（spec §9）
+        Assert.False(string.IsNullOrEmpty(err.GetString()));
+        Assert.True(f.Audit.VerifyChain(out string error), error);
     }
 }

@@ -288,6 +288,56 @@ public class IntegrationHeadlessTests
         finally { window.Close(); }
     }
 
+    // ---- 视图闭环 T7：编辑后回归警告入状态栏（Warning 可见性 + 带结果重载决议实证） ----
+
+    [AvaloniaFact]
+    public async Task Edit_MandatoryViolation_RegressionWarningVisibleInStatusBar()
+    {
+        // 夹具：字高 4.2 违规 TextEntity + R-50001-5.0.2 升级 mandatory → 编辑成功后
+        // 回归警告须显示在状态栏（此前 RunEditAsync 丢弃 EditResult，Warning 完全不可见）。
+        using var f = new Fixture(doc =>
+        {
+            var wall = new Layer("WALL");
+            doc.Layers.Add(wall);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0), Layer = wall });
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(10, 10, 0), Value = "字高违规", Height = 4.2, Layer = wall });
+        });
+        var adjPath = Path.Combine(f.AgentDir, "adjudications.json");
+        var set = AdjudicationSet.Load(adjPath);
+        set.Upsert(new Adjudication("R-50001-5.0.2", "tester", DateTimeOffset.UtcNow, "升级", ForceOverride: RuleForce.Mandatory));
+        set.Save(adjPath);
+
+        var vm = new MainViewModel(f.DxfPath, f.ProjectDir);
+        Assert.Null(vm.ErrorMessage);
+        var window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+        try
+        {
+            ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 20, 20); // 第一击设预览锚点
+            ClickCanvasAtWorld(window, 80, 30); // 第二击提交 → 编辑 + 回归检查
+
+            // 回归警告在 EditCompleted 之后由 RunEditAsync(Func<Task<EditResult>>) 写入状态栏——
+            // 轮询泵送调度器待其落位（证明编辑调用点命中带结果重载，Warning 未被丢弃）。
+            string? status = "";
+            DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+            while (DateTime.UtcNow < deadline)
+            {
+                Dispatcher.UIThread.RunJobs();
+                status = window.Status!.Text;
+                if (status is not null && status.Contains("强制(mandatory)规范违规")) break;
+                await Task.Delay(10);
+            }
+            Assert.Contains("强制(mandatory)规范违规", status);
+            Assert.Contains("不自动回滚", status);
+            Assert.Null(window.Edit!.ErrorMessage); // 观察性：tx 仍成功
+            Assert.Single(window.Edit.RecentTxIds);
+        }
+        finally { window.Close(); }
+    }
+
     [AvaloniaFact]
     public void ToolbarButtons_AllHaveTooltips()
     {

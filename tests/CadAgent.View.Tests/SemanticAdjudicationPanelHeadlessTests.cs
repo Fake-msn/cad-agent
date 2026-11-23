@@ -151,19 +151,22 @@ public class SemanticAdjudicationPanelHeadlessTests
             .ToList();
 
     [AvaloniaFact]
-    public void LeftTabs_Build_ThreeTabs_LayersDefault()
+    public void LeftTabs_Build_FourTabs_LayersDefault()
     {
         (MainWindow window, Fixture f) = ShowWindow();
         try
         {
             Assert.NotNull(window.LeftTabs);
-            Assert.Equal(3, window.LeftTabs!.ItemCount);
+            // 视图闭环 T10：新增"计划"tab（④纠偏计划预览）——三 tab 扩为四 tab。
+            Assert.Equal(4, window.LeftTabs!.ItemCount);
             Assert.Equal("图层", ((TabItem)window.LeftTabs.Items[0]!).Header);
             Assert.Equal("纠偏", ((TabItem)window.LeftTabs.Items[1]!).Header);
             Assert.Equal("裁定", ((TabItem)window.LeftTabs.Items[2]!).Header);
+            Assert.Equal("计划", ((TabItem)window.LeftTabs.Items[3]!).Header);
             Assert.Equal(0, window.LeftTabs.SelectedIndex);
+            Assert.NotNull(window.PlanPreview); // 生产装配（未注入 → writeAudit/signoffIdentity 同源）
             // Layers tab keeps T4 behavior; the other VMs are wired.
-            Assert.Equal(2, window.LayerList!.ItemCount);
+            Assert.Equal(3, window.LayerList!.ItemCount); // T8 图层表并集：含默认空层 "0"
             Assert.NotNull(window.Semantic);
             Assert.NotNull(window.Adjudication);
             Assert.Null(window.Adjudication!.ErrorMessage);

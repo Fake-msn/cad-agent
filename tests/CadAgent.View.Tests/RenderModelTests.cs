@@ -635,4 +635,530 @@ public class RenderModelTests
         };
         Assert.Equal((8.0, 8.0, 12.0, 12.0), RenderModelBuilder.Bounds(items));
     }
+
+    // ---- 计划4 视图延迟项 Task 1：OCS 任意轴变换（镜像/倾斜法向渲染） ----
+    // 夹具沿用既有 WithSession/DxfFixture 模式：经真实 DXF 写/读往返，
+    // 验证 Normal/Center/顶点/插入点/旋转均能在 DxfWriter/DxfReader 下存活。
+
+    [Fact]
+    public void Circle_MirroredNormal_TessellatesMirroredPolyline()
+    {
+        // Normal=(0,0,-1) → OCS x 轴镜像：圆心 (5,5) 半径 3 → WCS 圆心 (-5,5)
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(0, 0, -1) });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            var item = Assert.Single(items);
+            Assert.Equal(RenderKind.Polyline, item.Kind); // 非默认法向→tessellation（真椭圆投影的诚实近似）
+            Assert.True(item.Points.Count >= 72);
+            Assert.True(item.Closed); // 整圆经 Closed 标志闭合（画布 EndFigure 连回首点，无 5° 弦缺口）
+            double cx = item.Points.Average(p => p.X);
+            double cy = item.Points.Average(p => p.Y);
+            Assert.Equal(-5, cx, 3);
+            Assert.Equal(5, cy, 3);
+            Assert.Equal(3, item.Points.Max(p => Math.Abs(p.X - cx)), 2);
+        });
+    }
+
+    [Fact]
+    public void Circle_DefaultNormal_StillExactCircle()
+    {
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Circle, item.Kind); // 行为保持
+        });
+    }
+
+    [Fact]
+    public void LwPolyline_MirroredNormal_VerticesMirrored()
+    {
+        WithSession(doc =>
+        {
+            var lw = new LwPolyline { Normal = new XYZ(0, 0, -1) };
+            lw.Vertices.Add(new LwPolyline.Vertex(new XY(1, 2)));
+            lw.Vertices.Add(new LwPolyline.Vertex(new XY(3, 4)));
+            doc.Entities.Add(lw);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal((-1.0, 2.0), item.Points[0]);
+            Assert.Equal((-3.0, 4.0), item.Points[1]);
+        });
+    }
+
+    [Fact]
+    public void Text_MirroredNormal_InsertionMirroredRotationProjected()
+    {
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new TextEntity
+            {
+                InsertPoint = new XYZ(2, 3, 0), Value = "镜像", Height = 5,
+                Rotation = Math.PI / 2, Normal = new XYZ(0, 0, -1)
+            });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal((-2.0, 3.0), item.Points[0]);
+            // OCS 内 90° 方向 (0,1) → 镜像后 (0,1) → WCS 角仍 90°
+            Assert.Equal(90, item.RotationDeg, 3);
+        });
+    }
+
+    [Fact]
+    public void Arc_MirroredNormalInsideRotatedInsert_RotationAppliedOnce()
+    {
+        // 块内弧（OCS 0°→90°，镜像法向）+ Insert 旋转 90°：OCS 点 (cosθ,sinθ)
+        // 镜像 → (-cosθ,sinθ)，再经 insert 仿射 R90 → (-sinθ,-cosθ)。
+        // 正确 WCS 端点 (0,-1)→(-1,0)。tessellation 起始角若预加 rotationDeg
+        // 会二次旋转 → (-1,0)→(0,1)，必须不发生（旋转已由 t.Apply 施加）。
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("ARCM");
+            block.Entities.Add(new Arc(new XYZ(0, 0, 0), 1, 0, Math.PI / 2) { Normal = new XYZ(0, 0, -1) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(0, 0, 0), XScale = 1, YScale = 1, ZScale = 1, Rotation = Math.PI / 2 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Polyline, item.Kind);
+            Assert.Equal(73, item.Points.Count); // 弧含末端点：72 段 + 1
+            Assert.False(item.Closed); // 非整圆弧保持开放
+            Assert.Equal(0, item.Points[0].X, 3);
+            Assert.Equal(-1, item.Points[0].Y, 3);
+            Assert.Equal(-1, item.Points[^1].X, 3);
+            Assert.Equal(0, item.Points[^1].Y, 3);
+        });
+    }
+
+    [Fact]
+    public void Insert_MirroredNormalWithRotation_InsertionPointMirrored()
+    {
+        // DXF INSERT 插入点为 OCS 坐标（controller 探针核定：InsertPoint=(5,5,0)+
+        // Normal=(0,0,-1) DXF 往返保持原值，ACadSharp 不转换）→ canonical 变换
+        // M·T(ip)·R·S：先块内 R·S，再平移到 OCS 插入点，最后整体经 OCS 映射。
+        // 块含线 (0,0)→(1,0)，Insert ip=(5,5,0)、Normal=(0,0,-1)、Rotation=π/2：
+        // start = M·ip = (-5,5)；end = M·(R90·(1,0)+ip) = M·(5,6) = (-5,6)。
+        // 错误序 T(ip)·R·S·M 会得 (5,5)→(5,4)：位置未镜像 + 内容转向错误。
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("MIRINS");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block)
+            {
+                InsertPoint = new XYZ(5, 5, 0),
+                XScale = 1,
+                YScale = 1,
+                ZScale = 1,
+                Rotation = Math.PI / 2,
+                Normal = new XYZ(0, 0, -1)
+            });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Line, item.Kind);
+            Assert.Equal(-5, item.Points[0].X, 6);
+            Assert.Equal(5, item.Points[0].Y, 6);
+            Assert.Equal(-5, item.Points[1].X, 6);
+            Assert.Equal(6, item.Points[1].Y, 6);
+        });
+    }
+
+    // ---- 合并前 ISTQB I5：倾斜/退化法向代表钉住（近似口径钉住，非精确数学） ----
+    // 既有测试仅覆盖镜像 (0,0,-1)+默认 (0,0,1)；此处补倾斜 (1,0,1)/√2 与退化 (0,0,0)
+    // 代表，钉住当前披露口径（spec §12：倾斜法向 tessellation 投影近似）——
+    // 若未来改为精确椭圆数学或提取 Core 共享实现（I1 deferred），这些数值断言须同步审读。
+
+    [Fact]
+    public void Circle_TiltedNormal_TessellatesEllipseProjectionApproximation()
+    {
+        // N=(1,0,1)/√2（绕 Y 轴倾斜 45°）：任意轴算法 Ax=Wz×N 归一=(0,1,0)，
+        // Ay=N×Ax 归一=(-1/√2,0,1/√2) → OCS(x,y) 投影 WCS XY=(-y/√2, x)（丢弃 WCS Z）。
+        // 圆心 (5,5) r=3 → 投影椭圆中心 (-5/√2,5)、X 半轴 3/√2≈2.1213、Y 半轴 3，
+        // 72 段 tessellation 多边形近似（近似口径钉住，非精确椭圆数学）。
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(1, 0, 1) });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Polyline, item.Kind); // 非默认法向→tessellation
+            Assert.Equal(72, item.Points.Count); // 整圆 72 采样、不重复首点
+            Assert.True(item.Closed);
+            double cx = item.Points.Average(p => p.X);
+            double cy = item.Points.Average(p => p.Y);
+            Assert.Equal(-5 / Math.Sqrt(2), cx, 3);
+            Assert.Equal(5, cy, 3);
+            // 像素探针口径（镜像既有测试）：θ=0/90/180/270 均被 5° 步长采样 → 最大偏移=半轴。
+            Assert.Equal(3 / Math.Sqrt(2), item.Points.Max(p => Math.Abs(p.X - cx)), 3);
+            Assert.Equal(3, item.Points.Max(p => Math.Abs(p.Y - cy)), 3);
+            // 首点 θ=0：OCS(8,5) → WCS XY=(-5/√2, 8)。
+            Assert.Equal(-5 / Math.Sqrt(2), item.Points[0].X, 3);
+            Assert.Equal(8, item.Points[0].Y, 3);
+        });
+    }
+
+    [Fact]
+    public void Circle_ZeroNormal_NormalizeFallsBackToDefaultExactCircle()
+    {
+        // 退化法向 (0,0,0)：Normalize len<1e-12 → 回落 (0,0,1)（默认法向快路径）
+        // → 精确 Circle 元数据（非 tessellation）。OcsMapper 侧回落口径钉住
+        // （与 Data 侧 OcsDelta 回落双侧同款）。探针核定：ACadSharp DxfWriter 对
+        // 零法向圆整体不落盘（DXF 无 CIRCLE）——故经内存实体钉住 Normalize 防御路径
+        // （内存构造/编辑管线仍可达），不走 DXF 往返。
+        WithSession(_ => { }, s =>
+        {
+            s.Doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(0, 0, 0) });
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Circle, item.Kind);
+            Assert.Equal((5.0, 5.0), item.Points[0]);
+            Assert.Equal(3, item.Points[1].X, 6); // (radius,0) 元数据
+        });
+    }
+
+    // ---- 计划4 视图延迟项 Task 2：Dimension 匿名块展开 + Hatch 边界/实心填充 ----
+    // 夹具沿用既有 WithSession/DxfFixture 模式：经真实 DXF 写/读往返。探针核定：
+    // Dimension.Block 可设且往返保留匿名块（*Dnn，AssignDocument 重命名为 *D{handle}）；
+    // DxfWriter 默认配置不重生成标注几何（UpdateDimensionsInModel/InBlocks 默认 false，
+    // 块内厂商绘制的图元原样保留）；Hatch.BoundaryPath.GetPoints(16) 弧段插值。
+
+    /// <summary>
+    /// 辅助：4 条 Line 边构造矩形边界路径（探针核定 new Hatch.BoundaryPath.Line(new Line{...})
+    /// 边构造 + new Hatch.BoundaryPath(edges) 路径构造）。
+    /// </summary>
+    private static Hatch.BoundaryPath SquarePath(double x0, double y0, double x1, double y1)
+    {
+        return new Hatch.BoundaryPath(new Hatch.BoundaryPath.Edge[]
+        {
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x0, y0, 0), EndPoint = new XYZ(x1, y0, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x1, y0, 0), EndPoint = new XYZ(x1, y1, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x1, y1, 0), EndPoint = new XYZ(x0, y1, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(x0, y1, 0), EndPoint = new XYZ(x0, y0, 0) }),
+        });
+    }
+
+    [Fact]
+    public void Dimension_WithAnonymousBlock_ExpandsBlockEntities()
+    {
+        WithSession(doc =>
+        {
+            var blk = new BlockRecord("*D1");
+            blk.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            blk.Entities.Add(new TextEntity { InsertPoint = new XYZ(5, 2, 0), Value = "10", Height = 2.5 });
+            doc.BlockRecords.Add(blk);
+            doc.Entities.Add(new DimensionLinear { Block = blk, DefinitionPoint = new XYZ(0, 0, 0), InsertionPoint = new XYZ(5, 5, 0) });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            Assert.Equal(2, items.Count);
+            Assert.Contains(items, i => i.Kind == RenderKind.Line);
+            Assert.Contains(items, i => i.Kind == RenderKind.Text && i.Text == "10");
+            // 子图元句柄后缀口径同 Insert："{dimHandle}:{childIndex}"（取加载后的真实句柄）。
+            string dimHandle = s.Doc.Entities.OfType<DimensionLinear>().Single().Handle.ToString();
+            Assert.All(items, i => Assert.StartsWith(dimHandle, i.Handle));
+        });
+    }
+
+    [Fact]
+    public void Dimension_NullBlock_SkippedAndCounted()
+    {
+        WithSession(doc => doc.Entities.Add(new DimensionLinear()), s =>
+        {
+            var items = RenderModelBuilder.Build(s, out int skipped);
+            Assert.Empty(items);
+            Assert.Equal(1, skipped); // 诚实计数，不假装已渲染
+        });
+    }
+
+    [Fact]
+    public void Dimension_NestedChain_WithinLimit_Expands()
+    {
+        // 顶层 Dimension(depth 0) -> 块内 Dimension(depth 1) -> Line(depth 2)：
+        // 链深恰在 MaxInsertDepth=2 限内，全部展开（钉住守卫不过度拦截）。
+        WithSession(doc =>
+        {
+            var b2 = new BlockRecord("*D2");
+            b2.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            doc.BlockRecords.Add(b2);
+            var b1 = new BlockRecord("*D1");
+            b1.Entities.Add(new DimensionLinear { Block = b2 });
+            doc.BlockRecords.Add(b1);
+            doc.Entities.Add(new DimensionLinear { Block = b1 });
+        }, s =>
+        {
+            var line = Assert.Single(RenderModelBuilder.Build(s, out int skipped));
+            Assert.Equal(0, skipped);
+            Assert.Equal(RenderKind.Line, line.Kind);
+        });
+    }
+
+    [Fact]
+    public void Dimension_NestedChain_DepthGuardStopsBeyondLimit()
+    {
+        // 顶层 Dimension(depth 0) -> 块内 Dimension(depth 1) -> 块内 Dimension(depth 2)：
+        // 第三层 Dimension 与 Insert 深度守卫对齐——不展开、诚实 skip+计数，
+        // 最内层 Line 不可见（守卫缺失时会被展开，此断言 RED）。
+        WithSession(doc =>
+        {
+            var b3 = new BlockRecord("*D3");
+            b3.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(b3);
+            var b2 = new BlockRecord("*D2");
+            b2.Entities.Add(new DimensionLinear { Block = b3 });
+            doc.BlockRecords.Add(b2);
+            var b1 = new BlockRecord("*D1");
+            b1.Entities.Add(new DimensionLinear { Block = b2 });
+            doc.BlockRecords.Add(b1);
+            doc.Entities.Add(new DimensionLinear { Block = b1 });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s, out int skipped);
+            Assert.Empty(items);
+            Assert.Equal(1, skipped); // 超深 Dimension 诚实计数，不假装已渲染
+        });
+    }
+
+    [Fact]
+    public void Dimension_SelfReferentialBlock_DepthGuardPreventsInfiniteRecursion()
+    {
+        // 病态 DXF：块内 Dimension 回指自身所在块（自指环）。无守卫时无限递归
+        // → StackOverflow（进程崩溃不可捕获）；守卫在 depth 2 截断 → skip+计数。
+        WithSession(doc =>
+        {
+            var blk = new BlockRecord("*D1");
+            blk.Entities.Add(new DimensionLinear { Block = blk });
+            doc.BlockRecords.Add(blk);
+            doc.Entities.Add(new DimensionLinear { Block = blk });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s, out int skipped);
+            Assert.Empty(items);
+            Assert.Equal(1, skipped);
+        });
+    }
+
+    [Fact]
+    public void Hatch_SolidSquare_ProducesFilledHatchItem()
+    {
+        WithSession(doc =>
+        {
+            var h = new Hatch { IsSolid = true };
+            h.Paths.Add(SquarePath(0, 0, 10, 10));
+            doc.Entities.Add(h);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Hatch, item.Kind);
+            Assert.True(item.Fill);
+            // 方形 4 顶点；GetPoints 每边输出起点+终点（相邻顶点重复，探针实测
+            // DXF 往返后方形单路径 8 点）——按实际输出钉住精确点数。
+            Assert.Equal(8, item.Points.Count(p => !double.IsNaN(p.X)));
+        });
+    }
+
+    [Fact]
+    public void Hatch_TwoPaths_NaNSeparated()
+    {
+        WithSession(doc =>
+        {
+            var h = new Hatch { IsSolid = true };
+            h.Paths.Add(SquarePath(0, 0, 10, 10));
+            h.Paths.Add(SquarePath(3, 3, 7, 7)); // 岛
+            doc.Entities.Add(h);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Contains(item.Points, p => double.IsNaN(p.X)); // 路径分隔符
+        });
+    }
+
+    [Fact]
+    public void Hatch_MirroredNormal_PointsMirrored()
+    {
+        WithSession(doc =>
+        {
+            var h = new Hatch { IsSolid = true, Normal = new XYZ(0, 0, -1) };
+            h.Paths.Add(SquarePath(1, 1, 3, 3));
+            doc.Entities.Add(h);
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.All(item.Points.Where(p => !double.IsNaN(p.X)), p => Assert.True(p.X < 0));
+        });
+    }
+
+    [Fact]
+    public void Bounds_HatchNaNSeparators_Skipped()
+    {
+        // Hatch Points 的 (NaN,NaN) 路径分隔符不是坐标：Bounds 必须跳过，
+        // 包围盒只由真实顶点决定（NaN 比较恒 false，守卫前后行为一致——钉住约定）。
+        var items = new[]
+        {
+            new RenderItem(RenderKind.Hatch, new (double, double)[]
+            {
+                (0, 0), (10, 0), (10, 10), (0, 10),
+                (double.NaN, double.NaN),
+                (3, 3), (7, 3), (7, 7), (3, 7)
+            }, "0", 0xFFFFFF, null, 0, 0, "H1", Fill: true)
+        };
+        Assert.Equal((0.0, 0.0, 10.0, 10.0), RenderModelBuilder.Bounds(items));
+    }
+
+    // ---- Task 3（线型虚实 dash）：LineType 段 → DashPattern ----
+    // 夹具经真实 DXF 往返（WithSession 先例）。探针核定 3.8.35：往返保留
+    // LineType 名/段长/Shape/Text 标志、Entity.LineTypeScale、Layer.LineType；
+    // 默认实体 LineType 名为 ByLayer（回退图层线型）。HasShapes/IsComplex 只读
+    // （CS0200），且 IsComplex 语义为"含任意段"（纯划空线型亦 true）——复杂线型
+    // 夹具以 IsShape=true 的 Shape 段构造（IsShape 公开可设，往返保留）。
+
+    [Fact]
+    public void Line_DashedLineType_ProducesDashPattern()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASHED");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.NotNull(item.DashPattern);
+            Assert.Equal(new double[] { 5, 2 }, item.DashPattern!.ToArray()); // 绝对值，on/off 交替
+        });
+    }
+
+    [Fact]
+    public void Line_Continuous_NoDash()
+    {
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0) });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Null(item.DashPattern);
+        });
+    }
+
+    [Fact]
+    public void Line_ByLayerLineType_ResolvesLayerDash()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASH2");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 3 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -1 });
+            doc.LineTypes.Add(lt);
+            var layer = new Layer("DASHLAYER") { LineType = lt };
+            doc.Layers.Add(layer);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), Layer = layer });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 3, 1 }, item.DashPattern!.ToArray());
+        });
+    }
+
+    [Fact]
+    public void Line_LineTypeScale_MultipliesPattern()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASH3");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 4 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt, LineTypeScale = 2 });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 8, 4 }, item.DashPattern!.ToArray());
+        });
+    }
+
+    [Fact]
+    public void Line_ComplexLineType_SolidFallback()
+    {
+        WithSession(doc =>
+        {
+            var lt = new LineType("FENCELINE1");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2 });
+            // 复杂线型（形/文字）→实线降级（shapes deferred，spec 注记见计划 Task 11）。
+            // HasShapes 只读→以 Shape 段构造（探针核定 IsShape 公开可设且往返保留）。
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 0, IsShape = true, ShapeNumber = 1 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Null(item.DashPattern);
+        });
+    }
+
+    [Fact]
+    public void Line_TextLineType_SolidFallback()
+    {
+        // 文字嵌入线型（如 GAS_LINE）同样诚实降级实线——HasShapes 对纯 Text 段
+        // 为 false（探针核定），须按段 IsText 判定（shapes/text deferred）。
+        WithSession(doc =>
+        {
+            var lt = new LineType("GAS_LINE");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -2, IsText = true, Text = "GAS" });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Null(item.DashPattern);
+        });
+    }
+
+    [Fact]
+    public void Line_DashDotLineType_PointApproximated()
+    {
+        // 点段（Length=0）→ 0.1×scale 短划近似（注释说明的口径）；
+        // DASHDOT 4 段 [5,-1,0,-1] → [5,1,0.1,1]。
+        WithSession(doc =>
+        {
+            var lt = new LineType("DASHDOT");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -1 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 0 });
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = -1 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 5, 1, 0.1, 1 }, item.DashPattern!.ToArray());
+        });
+    }
+
+    [Fact]
+    public void Line_OddSegmentCount_PadsLastSegment()
+    {
+        // 奇数段→补末段凑偶（Avalonia DashStyle 要求 on/off 对）：[5] → [5,5]。
+        WithSession(doc =>
+        {
+            var lt = new LineType("ODD");
+            ((ICollection<LineType.Segment>)lt.Segments).Add(new LineType.Segment { Length = 5 });
+            doc.LineTypes.Add(lt);
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(20, 0, 0), LineType = lt });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(new double[] { 5, 5 }, item.DashPattern!.ToArray());
+        });
+    }
 }

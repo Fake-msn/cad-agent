@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\CadAgent.Core\CadAgent.Core.csproj" />
     <ProjectReference Include="..\CadAgent.Data\CadAgent.Data.csproj" />
+    <ProjectReference Include="..\CadAgent.Llm\CadAgent.Llm.csproj" />
   </ItemGroup>
 
   <ItemGroup>

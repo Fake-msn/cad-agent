@@ -127,7 +127,8 @@ public sealed class DiffResult
 /// <summary>
 /// 审计时间线视图模型（计划4 T6）：纯 C#，可单测。构造时读取 IAuditStore.ReadAll
 /// 映射 Entries 并按 tx-start 边界分组 Transactions（读取失败 → ErrorMessage，
-/// 列表为空，不崩 UI）。
+/// 列表为空，不崩 UI）。视图闭环 T5：Rebuild 重读审计库 live-rebuild（编辑/撤销后
+/// 无需重开窗口），TimelineChanged 通知 UI 刷新列表；只读审计库，绝不改图。
 /// 回放只读：SelectTx 仅高亮该事务 step 的 Target 句柄（canvas 接线时
 /// SelectHandles + CenterOn，沿用 T5 定位模式）；LoadDiffAsync 经
 /// SnapshotStore.Find → DrawingSession.Load → RenderModelBuilder.Build 渲染
@@ -135,6 +136,7 @@ public sealed class DiffResult
 /// </summary>
 public sealed class AuditViewModel
 {
+    private readonly IAuditStore _auditStore;
     private readonly SnapshotStore _snapshots;
     private readonly DrawingSession _session;
     private readonly CanvasViewModel? _canvas;
@@ -143,29 +145,14 @@ public sealed class AuditViewModel
     public AuditViewModel(IAuditStore auditStore, SnapshotStore snapshotStore,
         DrawingSession session, CanvasViewModel? canvas = null, SemaphoreSlim? sessionGate = null)
     {
+        _auditStore = auditStore;
         _snapshots = snapshotStore;
         _session = session;
         _canvas = canvas;
         _sessionGate = sessionGate;
         try
         {
-            var entries = new List<AuditEntryVm>();
-            var groups = new List<TxGroup>();
-            TxGroup? open = null;
-            foreach (AuditRecord record in auditStore.ReadAll())
-            {
-                var entry = new AuditEntryVm(record);
-                entries.Add(entry);
-                if (entry.Kind == "tx-start")
-                {
-                    open = new TxGroup(TxIdFromSnapshotRef(record.Entry.SnapshotRef, entry.PlanRef), entry);
-                    groups.Add(open);
-                }
-                else if (open is { Closed: false } && entry.PlanRef.Length > 0 && entry.PlanRef == open.PlanRef)
-                {
-                    open.Add(entry);
-                }
-            }
+            var (entries, groups) = ReadAll(auditStore);
             Entries = entries;
             Transactions = groups;
         }
@@ -176,13 +163,13 @@ public sealed class AuditViewModel
     }
 
     /// <summary>全部审计记录（Seq 顺序）。</summary>
-    public IReadOnlyList<AuditEntryVm> Entries { get; } = Array.Empty<AuditEntryVm>();
+    public IReadOnlyList<AuditEntryVm> Entries { get; private set; } = Array.Empty<AuditEntryVm>();
 
     /// <summary>事务分组（tx-start 顺序）。</summary>
-    public IReadOnlyList<TxGroup> Transactions { get; } = Array.Empty<TxGroup>();
+    public IReadOnlyList<TxGroup> Transactions { get; private set; } = Array.Empty<TxGroup>();
 
     /// <summary>审计存储读取失败原因；null=成功。</summary>
-    public string? ErrorMessage { get; }
+    public string? ErrorMessage { get; private set; }
 
     /// <summary>最近一次 SelectTx 命中的事务号；null=未选择。</summary>
     public string? SelectedTxId { get; private set; }
@@ -192,6 +179,52 @@ public sealed class AuditViewModel
 
     /// <summary>LoadDiffAsync 完成（成功或失败）→ UI 刷新。在调用方上下文触发。</summary>
     public event Action? DiffChanged;
+
+    /// <summary>编辑/撤销后重读审计库（live-rebuild，T9 承接遗留闭环）。
+    /// 失败→ErrorMessage 降级（镜像构造期）；选中 tx 仍存在则保留。</summary>
+    public void Rebuild()
+    {
+        try
+        {
+            var (entries, groups) = ReadAll(_auditStore);
+            Entries = entries;
+            Transactions = groups;
+            if (SelectedTxId is string sel && !groups.Any(g => g.TxId == sel))
+                SelectedTxId = null;
+            ErrorMessage = null;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = ex.Message;
+        }
+        TimelineChanged?.Invoke();
+    }
+
+    /// <summary>Rebuild 完成（成功或失败）→ UI 刷新列表。在调用方上下文触发。</summary>
+    public event Action? TimelineChanged;
+
+    /// <summary>读取审计库并按 tx-start 边界分组（构造期与 Rebuild 共用，逐字同源）。</summary>
+    private static (List<AuditEntryVm> Entries, List<TxGroup> Groups) ReadAll(IAuditStore store)
+    {
+        var entries = new List<AuditEntryVm>();
+        var groups = new List<TxGroup>();
+        TxGroup? open = null;
+        foreach (AuditRecord record in store.ReadAll())
+        {
+            var entry = new AuditEntryVm(record);
+            entries.Add(entry);
+            if (entry.Kind == "tx-start")
+            {
+                open = new TxGroup(TxIdFromSnapshotRef(record.Entry.SnapshotRef, entry.PlanRef), entry);
+                groups.Add(open);
+            }
+            else if (open is { Closed: false } && entry.PlanRef.Length > 0 && entry.PlanRef == open.PlanRef)
+            {
+                open.Add(entry);
+            }
+        }
+        return (entries, groups);
+    }
 
     /// <summary>
     /// 回放选择：返回该事务成功步骤的 Target 句柄（去重保序，空句柄剔除）；

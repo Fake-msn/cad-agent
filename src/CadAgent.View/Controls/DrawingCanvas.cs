@@ -149,6 +149,18 @@ public sealed class DrawingCanvas : Control
 
     private void DrawItem(DrawingContext context, RenderItem item, Pen pen)
     {
+        if (item.DashPattern is { Count: > 0 } dp)
+        {
+            // drawing 单位 → 设备像素 → pen 厚度倍数（Avalonia DashStyle 口径）。
+            // 亚像素图案（任一段 < 0.25px）→实线降级防摩尔纹；超长图案总量守卫防性能退化。
+            double[] device = dp.Select(d => d * ViewModel.Scale).ToArray();
+            if (device.All(d => d >= 0.25) && device.Sum() < 1e6)
+                pen = new Pen(pen.Brush, pen.Thickness)
+                {
+                    DashStyle = new DashStyle(device.Select(d => d / pen.Thickness), 0)
+                };
+        }
+
         switch (item.Kind)
         {
             case RenderKind.Line:
@@ -176,6 +188,9 @@ public sealed class DrawingCanvas : Control
                 {
                     g.BeginFigure(ScreenPoint(item.Points[0]), false);
                     for (int i = 1; i < item.Points.Count; i++) g.LineTo(ScreenPoint(item.Points[i]));
+                    // Closed=true（整圆 tessellation）连回首点闭合，消除弦缺口；
+                    // 默认 false 保持开放——既有闭合多段线重复首点自闭合，行为不变。
+                    g.EndFigure(item.Closed);
                 }
                 context.DrawGeometry(null, pen, geo);
                 break;
@@ -186,7 +201,9 @@ public sealed class DrawingCanvas : Control
                 if (item.Points.Count < 1 || string.IsNullOrEmpty(item.Text)) break;
                 double fontSize = item.TextHeight * ViewModel.Scale;
                 if (fontSize < MinTextFontSize) break; // 亚像素文本不可读，跳过
-                bool isSelected = ReferenceEquals(pen, SelectionPen);
+                // 选中判定按 brush 引用：dash 克隆 pen 保留原 brush（SelectionPen
+                // 用 Brushes.Yellow 单例，普通/对比 pen 均为独立实例），克隆后仍成立。
+                bool isSelected = ReferenceEquals(pen.Brush, SelectionPen.Brush);
                 // pen.Brush：普通 pen 即图元色；选中黄 / T6 对比灰/绿/红随 pen 传递。
                 var text = new FormattedText(
                     item.Text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
@@ -195,6 +212,37 @@ public sealed class DrawingCanvas : Control
                 Point p = ScreenPoint(item.Points[0]);
                 // CAD 插入点=基线左端；FormattedText 以左上角定位 → 上移文本高度。
                 context.DrawText(text, new Point(p.X, p.Y - text.Height));
+                break;
+            }
+
+            case RenderKind.Hatch:
+            {
+                // Hatch Points 约定：各边界路径以 (NaN,NaN) 分隔（RenderItem XML doc）。
+                // 逐路径 BeginFigure/EndFigure(true) 闭合 + FillRule.EvenOdd → 跨路径
+                // 挖岛（内环为洞）。实心（Fill=true）填充+描边；图案填充（非 solid）
+                // 仅描边界轮廓——图案线生成 deferred（spec 注记，不假装已渲染图案）。
+                if (item.Points.Count < 3) break;
+                var geo = new StreamGeometry();
+                using (StreamGeometryContext g = geo.Open())
+                {
+                    // Avalonia 11 无 StreamGeometry.FillRule 属性——填充规则经上下文
+                    // SetFillRule 设置（须在 BeginFigure 之前；默认即 EvenOdd，显式钉住）。
+                    g.SetFillRule(FillRule.EvenOdd);
+                    bool inFigure = false;
+                    foreach ((double x, double y) in item.Points)
+                    {
+                        if (double.IsNaN(x))
+                        {
+                            if (inFigure) g.EndFigure(true);
+                            inFigure = false;
+                            continue;
+                        }
+                        if (!inFigure) { g.BeginFigure(ScreenPoint((x, y)), item.Fill); inFigure = true; }
+                        else g.LineTo(ScreenPoint((x, y)));
+                    }
+                    if (inFigure) g.EndFigure(true);
+                }
+                context.DrawGeometry(item.Fill ? pen.Brush : null, pen, geo);
                 break;
             }
         }
