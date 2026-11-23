@@ -13,6 +13,13 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // 视觉接线 T3：--vision-scan headless 入口先于窗口分支（无 AppBuilder/窗口生命周期；
+        // CLI semantic scan --vision 经独立进程 relay 拉起，stdout UTF-8 供 relay 读取）。
+        if (args.Contains("--vision-scan"))
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            return VisionScanMode.Run(args, Console.Out, Console.Error);
+        }
         string? drawing = GetOption(args, "--drawing");
         if (drawing is null)
         {

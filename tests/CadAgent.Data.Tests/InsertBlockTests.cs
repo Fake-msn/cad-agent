@@ -101,7 +101,9 @@ public class InsertBlockTests : IDisposable
     [Fact]
     public void InsertBlock_IsNotSemanticAware()
     {
-        // Geometric-level handler: semantic requirements arrive with plan-3 lighting.
-        Assert.False(new InsertBlockHandler() is ISemanticAware);
+        // 几何级处理器：不声明语义需求（语义闸口需求随计划3布灯处理器落地）。
+        // 反射判定替代 is 模式匹配——sealed 类未实现接口时 is 恒 false 触发 CS0184
+        // 编译警告（死分支）；IsAssignableFrom 保持同一断言意图且无警告。
+        Assert.False(typeof(ISemanticAware).IsAssignableFrom(typeof(InsertBlockHandler)));
     }
 }

@@ -53,4 +53,11 @@ public class LlmProfileTests : IDisposable
         Assert.DoesNotContain("apiKey", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void ProfileLimits_DefaultTimeout600_UserRuling20261123()
+    {
+        // 视觉长输出实证超 60s；用户裁定默认 600（2026-11-23）；存储 profile 同步 600
+        Assert.Equal(600, new ProfileLimits().TimeoutSeconds);
+    }
 }

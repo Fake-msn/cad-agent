@@ -33,6 +33,19 @@ public sealed class LayoutLightingHandler : IStepHandler, ISemanticAware
         if (spacing <= 0 || width <= 0 || depth <= 0)
             return new StepResult(false, "spacing/width/depth 须为正数", "");
 
+        // R10：params 含 sheetId（string）→ 区域矩形须含于 declared sheet FrameBounds，
+        // 否则拒绝留痕（防区域跨幅）；无 sheetId → legacy 无 bounds 检查行为逐字保持。
+        string? sheetId = HandlerHelpers.OptString(p, "sheetId");
+        if (sheetId != null)
+        {
+            var sheet = s.Sheets.FirstOrDefault(sh => sh.SheetId == sheetId);
+            if (sheet is null)
+                return new StepResult(false, $"幅面不存在: {sheetId}", "");
+            var b = sheet.FrameBounds;
+            if (x < b.MinX || y < b.MinY || x + width > b.MaxX || y + depth > b.MaxY)
+                return new StepResult(false, $"区域超出幅面 {sheetId} bounds", "");
+        }
+
         int cols = 0, rows = 0;
         for (double px = x + spacing / 2; px < x + width; px += spacing) cols++;
         for (double py = y + spacing / 2; py < y + depth; py += spacing) rows++;

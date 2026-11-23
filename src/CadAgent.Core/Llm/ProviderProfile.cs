@@ -9,11 +9,11 @@ public enum DataPolicy { LocalOnly, CloudAllowed }
 public sealed record TokenPlan(long TotalTokens, int ResetDays);
 
 /// <summary>profile 限额：超时、单次调用上限、会话预算；Plan 为空表示无套餐窗口。</summary>
-/// <param name="TimeoutSeconds">单次调用超时（秒）。</param>
+/// <param name="TimeoutSeconds">单次调用超时（秒）。默认 600：视觉长输出实证超 60s（2026-11-23 用户裁定 60→600）。</param>
 /// <param name="MaxTokensPerCall">单次调用 max_tokens 上限。</param>
 /// <param name="SessionBudgetTokens">会话累计 token 预算。</param>
 /// <param name="Plan">可选套餐窗口。</param>
-public sealed record ProfileLimits(int TimeoutSeconds = 60, int MaxTokensPerCall = 4096, long SessionBudgetTokens = 200_000, TokenPlan? Plan = null);
+public sealed record ProfileLimits(int TimeoutSeconds = 600, int MaxTokensPerCall = 4096, long SessionBudgetTokens = 200_000, TokenPlan? Plan = null);
 
 /// <summary>
 /// LLM 供应商档案（纯模型，无密钥字段——密钥仅经 DPAPI/env 通道，spec 密钥安全钉死之一）。

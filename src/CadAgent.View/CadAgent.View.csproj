@@ -12,11 +12,14 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.3.2" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.2" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.2" />
+    <!-- 视觉接线 T2：RenderSnapshotProvider 生产 headless 入口（离屏 Skia PNG）平台初始化 -->
+    <PackageReference Include="Avalonia.Headless" Version="11.3.2" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\CadAgent.Core\CadAgent.Core.csproj" />
     <ProjectReference Include="..\CadAgent.Data\CadAgent.Data.csproj" />
+    <!-- 视觉接线 T3：vision-scan headless 入口生产路径 OpenAiClient/DpapiKeyProtector（Llm 仅引用 Core，无环） -->
     <ProjectReference Include="..\CadAgent.Llm\CadAgent.Llm.csproj" />
   </ItemGroup>
 

@@ -19,30 +19,38 @@ public static class AxisDetector
 
     public static void Detect(DrawingSession session, SemanticOverlay overlay,
         double minRadius = 100, double maxRadius = 1000)
+        => DetectWalked(BlockWalker.Walk(session.Doc, session.Sheets).ToList(), overlay, minRadius, maxRadius);
+
+    /// <summary>块遍历口径核心（扫描器复用同一次 Walk）：圆心/文本插入点/半径均用世界坐标。
+    /// T4：幅面归属随实体携带（WalkedEntity.SheetId），产出标注 stamp。</summary>
+    internal static void DetectWalked(IReadOnlyList<WalkedEntity> walked, SemanticOverlay overlay,
+        double minRadius = 100, double maxRadius = 1000)
     {
-        var texts = new List<(string Handle, double X, double Y, string Value)>();
-        foreach (var e in session.Doc.Entities)
+        var texts = new List<(string Handle, double X, double Y, string Value, string? SheetId)>();
+        foreach (var w in walked)
         {
-            if (e is not TextEntity text || string.IsNullOrEmpty(text.Value)) continue;
+            if (w.Entity is not TextEntity text || string.IsNullOrEmpty(text.Value)) continue;
             string value = text.Value.Trim();
             if (!NumberPattern.IsMatch(value)) continue;
-            texts.Add((e.Handle.ToString(), text.InsertPoint.X, text.InsertPoint.Y, value));
+            texts.Add((w.HandlePath, w.WorldX, w.WorldY, value, w.SheetId));
         }
         if (texts.Count == 0) return;
 
-        foreach (var e in session.Doc.Entities)
+        foreach (var w in walked)
         {
-            if (e is not Circle circle || e is Arc) continue;
-            if (circle.Radius < minRadius || circle.Radius > maxRadius) continue;
+            if (w.Entity is not Circle circle || w.Entity is Arc) continue;
+            // 世界半径：WorldPoints[1]=(半径,0)（Walk 内已按 RadiusScale 缩放；顶层=本地半径）
+            double radius = w.WorldPoints.Count >= 2 ? w.WorldPoints[1].X : circle.Radius;
+            if (radius < minRadius || radius > maxRadius) continue;
 
             // Nearest qualifying number text within radius×1.5 (2D distance).
-            double maxDist = circle.Radius * 1.5;
-            (string Handle, double X, double Y, string Value)? best = null;
+            double maxDist = radius * 1.5;
+            (string Handle, double X, double Y, string Value, string? SheetId)? best = null;
             double bestDist = double.MaxValue;
             foreach (var t in texts)
             {
-                double dx = t.X - circle.Center.X;
-                double dy = t.Y - circle.Center.Y;
+                double dx = t.X - w.WorldX;
+                double dy = t.Y - w.WorldY;
                 double dist = Math.Sqrt(dx * dx + dy * dy);
                 if (dist <= maxDist && dist < bestDist)
                 {
@@ -52,16 +60,17 @@ public static class AxisDetector
             }
             if (best is null) continue;
 
-            string evidence = $"轴号圆圈 r={circle.Radius:F0} 编号={best.Value.Value}";
-            Annotate(overlay, e.Handle.ToString(), evidence);
-            Annotate(overlay, best.Value.Handle, evidence);
+            string evidence = $"轴号圆圈 r={radius:F0} 编号={best.Value.Value}";
+            Annotate(overlay, w.HandlePath, evidence, w.SheetId);
+            Annotate(overlay, best.Value.Handle, evidence, best.Value.SheetId);
         }
     }
 
-    private static void Annotate(SemanticOverlay overlay, string handle, string evidence)
+    private static void Annotate(SemanticOverlay overlay, string handle, string evidence, string? sheetId)
     {
         if (overlay.Annotations.Any(x => x.TargetHandle == handle && x.Confidence > Confidence)) return;
+        // T4：stamp 幅面归属（框外=null legacy 全局）
         overlay.UpsertAnnotation(new SemanticAnnotation(
-            handle, SemanticClass.Axis, Provenance.GeometryInference, Confidence, evidence));
+            handle, SemanticClass.Axis, Provenance.GeometryInference, Confidence, evidence, sheetId));
     }
 }

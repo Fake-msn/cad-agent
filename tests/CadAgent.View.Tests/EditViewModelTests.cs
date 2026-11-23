@@ -506,14 +506,16 @@ public class EditViewModelTests
     // ---- Admission gate (final review fix 1): mirror CLI RunPlan at the edit boundary ----
 
     /// <summary>
-    /// Red fixture: a proxy-only-unknown drawing. ACadSharp 3.8.35 ProxyEntity has a
-    /// public ctor + settable DxfClass; the DxfWriter/DxfReader roundtrip preserves it
-    /// as a ProxyEntity (verified), so Summarize().Unknowns is non-empty and
-    /// GateDetector.Inspect with EmptySupportMatrix yields Red (all unknowns unsupported).
+    /// Red fixture: a proxy-only drawing with NO native entities (R6). ACadSharp 3.8.35
+    /// ProxyEntity has a public ctor + settable DxfClass; the DxfWriter/DxfReader roundtrip
+    /// preserves it as a ProxyEntity (verified). Summarize() puts the proxy only into
+    /// Unknowns (Entities stays empty), so GateDetector.Inspect with EmptySupportMatrix
+    /// yields Red (all unknowns unsupported AND nativeCount==Entities.Count==0).
+    /// A native Line was removed in the R6 fix round: with a Line present the drawing is
+    /// mixed (nativeCount>0) and correctly classifies Yellow, not Red.
     /// </summary>
     private static string RedDxf() => DxfFixture.CreateTempDxf(doc =>
     {
-        doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
         doc.Entities.Add(new ProxyEntity
         {
             DxfClass = new DxfClass
@@ -702,5 +704,67 @@ public class EditViewModelTests
         Assert.True(p.TryGetProperty("Error", out JsonElement err)); // 故障也入审计（spec §9）
         Assert.False(string.IsNullOrEmpty(err.GetString()));
         Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    // ---- 防假 Green 切片 T3：Yellow（有原生+未解析 census）修改拒绝（只读审查） ----
+
+    /// <summary>
+    /// Yellow fixture：原生 Line（nativeCount&gt;0）+ census TCH_WALL×2（Load persisted 参注入，
+    /// 等价 sidecar 恢复路径）→ GateDetector 三分判 Yellow。T3 前 Yellow 放行+警示；
+    /// T3 起与 Red 同样拒绝：run-rejected 留痕（params 含 level/unparsedCount/guidance）、无 tx。
+    /// </summary>
+    [Fact]
+    public async Task Edit_YellowUnparsed_RefusedNoTx_RunRejectedAudit()
+    {
+        string dxf = DxfFixture.CreateTempDxf(DxfFixture.AddSampleLine);
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-yellow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(projectDir, ".cadagent"));
+        var census = new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) });
+        try
+        {
+            DrawingSession session = DrawingSession.Load(dxf, census);
+            // Fixture sanity：有原生实体 + 未解析 census → Yellow（T2 三分），guidance 含只读审查。
+            GateReport report = GateDetector.Inspect(session.Summarize(), new EmptySupportMatrix());
+            Assert.Equal(GateLevel.Yellow, report.Level);
+            Assert.Contains("只读审查", report.Guidance);
+            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
+            var vm = new EditViewModel(session, audit, new SnapshotStore(Path.Combine(projectDir, ".cadagent", "snapshots")),
+                new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+                new RoleChecker(), projectDir);
+            byte[] fileBefore = await File.ReadAllBytesAsync(dxf);
+            int countBefore = session.Doc.Entities.Count;
+
+            EditResult r = await vm.DrawLineAsync(0, 0, 50, 50);
+
+            Assert.False(r.Ok);
+            Assert.Equal("", r.TxId); // 拒绝先于 tx
+            Assert.Contains("只读审查", r.Error); // Yellow guidance（拒绝理由）
+            Assert.Equal(r.Error, vm.ErrorMessage);
+            Assert.Empty(vm.RecentTxIds);
+            Assert.Equal(fileBefore, await File.ReadAllBytesAsync(dxf)); // 无执行、无保存
+            Assert.Equal(countBefore, session.Doc.Entities.Count);
+            List<AuditRecord> records = audit.ReadAll().ToList();
+            AuditRecord req = Assert.Single(records, x => x.Entry.Kind == "view-edit");
+            AuditRecord rejected = Assert.Single(records, x => x.Entry.Kind == "run-rejected");
+            Assert.True(req.Seq < rejected.Seq); // 请求审计先行，拒绝留痕随后
+            Assert.Equal("view", rejected.Entry.Source);
+            Assert.Equal(session.SourcePath, rejected.Entry.Target);
+            Assert.Equal(req.Entry.BeforeHash, rejected.Entry.BeforeHash);
+            Assert.Equal(rejected.Entry.BeforeHash, rejected.Entry.AfterHash); // 拒绝不改图
+            JsonElement p = Params(rejected);
+            Assert.Equal("Yellow", p.GetProperty("level").GetString());
+            Assert.Equal(2, p.GetProperty("unparsedCount").GetInt32());
+            Assert.Contains("只读审查", p.GetProperty("guidance").GetString());
+            Assert.DoesNotContain(records, x => x.Entry.Kind == "tx-start");
+            Assert.DoesNotContain(records, x => x.Entry.Kind == "step");
+            Assert.DoesNotContain(records, x => x.Entry.Kind == "tx-commit");
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(dxf);
+            if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
+        }
     }
 }

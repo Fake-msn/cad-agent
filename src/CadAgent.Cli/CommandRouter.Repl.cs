@@ -12,6 +12,9 @@ namespace CadAgent.Cli;
 /// REPL 交互会话（3b-ii，§7）：持久 DrawingSession + ModelUndoStack + StepEngine。
 /// 意图行→编排（stdin y/n 确认，--yes 自动）；:undo 步级撤回；:rollback 事务回滚；
 /// :status 状态；:quit/EOF 退出。repl-session 起止审计。
+/// 防假 Green（T3 R7）：图纸加载接 census sidecar（LoadWithCensus）；意图编排（循环内
+/// 唯一产 tx 入口）前加准入闸——Yellow/Red 拒绝留痕（run-rejected）不执行、不调 LLM；
+/// :undo/:rollback 属撤回处置语义（恢复既有快照+审计留痕），R7 豁免不设闸。
 /// </summary>
 public static partial class CommandRouter
 {
@@ -36,7 +39,9 @@ public static partial class CommandRouter
 
         using var audit = OpenAudit(agentDir);
         var op = (IdentityOverride ?? Identity(agentDir)).Current;
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath, session, audit, op, stderr, source: "repl");
+        // census sidecar 接线（T3 R7）：repl 与 run/skill/agent 同一 LoadWithCensus——
+        // 此前 census-blind Load 会把 Yellow/Red 图纸当 Green 放行（假 Green 旁路）。
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath, session, audit, op, stderr, source: "repl");
         if (drawing == null) return 1;
         string overlayPath = Path.Combine(agentDir, "semantic.json");
         var overlay = File.Exists(overlayPath)
@@ -108,6 +113,27 @@ public static partial class CommandRouter
                 continue;
             }
             // 意图行→编排
+            // 准入闸（T3 R7，spec ⑥/§9）：意图编排是 repl 循环唯一产 tx 入口——Yellow/Red
+            // 先于 LLM 调用拒绝（run-rejected 留痕，与 run/skill/agent 同口径），本条意图不执行；
+            // stderr guidance 提示后会话继续（:status 等只读命令不受影响）。Reload 不重置
+            // census（DrawingSession 约定），:rollback 后再意图仍受闸。:undo/:rollback 豁免（R7）。
+            var gateReport = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
+            if (GateRefusesRun(gateReport))
+            {
+                string gateHash = drawing.ComputeHash();
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "repl", "run-rejected", drawingPath,
+                    JsonSerializer.Serialize(new
+                    {
+                        level = gateReport.Level.ToString(),
+                        unsupportedCount = gateReport.Unsupported.Count,
+                        unparsedCount = drawing.Unparsed.TotalCount,
+                        guidance = gateReport.Guidance
+                    }),
+                    gateHash, gateHash, "", ""));
+                stderr.WriteLine(gateReport.Guidance);
+                continue;
+            }
             string summary = DrawingSummarizer.Summarize(drawing, overlay);
             var orch = new AgentOrchestrator(client, meter, egress, engine, audit,
                 IdentityOverride ?? Identity(agentDir), profile.Model, profile);

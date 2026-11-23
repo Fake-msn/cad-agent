@@ -1,3 +1,4 @@
+using CadAgent.Data;
 using CadAgent.Data.Tests;
 
 namespace CadAgent.View.Tests;
@@ -37,5 +38,44 @@ public class MainViewModelTests : IDisposable
     {
         var vm = new ViewModels.MainViewModel(_path, Path.GetTempPath(), new[] { "s1", "s2" });
         Assert.Equal(new[] { "s1", "s2" }, vm.SkillDirs);
+    }
+
+    // ---- 防假 Green 切片 T3：sidecar 接线（projectDir 已知，Load 恢复 census） ----
+
+    [Fact]
+    public void Load_WithSidecar_CensusRestored()
+    {
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-mainvm-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(projectDir);
+        try
+        {
+            UnparsedCensusStore.Save(projectDir, _path,
+                new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) }));
+            var vm = new ViewModels.MainViewModel(_path, projectDir);
+            Assert.Null(vm.ErrorMessage);
+            Assert.Equal(2, vm.Session.Unparsed.TotalCount); // sidecar census 恢复（显示不完整警示依据）
+        }
+        finally
+        {
+            Directory.Delete(projectDir, true);
+        }
+    }
+
+    [Fact]
+    public void Load_NoSidecar_CensusEmpty_Legacy()
+    {
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-mainvm-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(projectDir);
+        try
+        {
+            var vm = new ViewModels.MainViewModel(_path, projectDir);
+            Assert.Null(vm.ErrorMessage);
+            Assert.Equal(0, vm.Session.Unparsed.TotalCount); // 无 census 行为逐字保持
+            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "unparsed.json"))); // 空 census 不回写
+        }
+        finally
+        {
+            Directory.Delete(projectDir, true);
+        }
     }
 }

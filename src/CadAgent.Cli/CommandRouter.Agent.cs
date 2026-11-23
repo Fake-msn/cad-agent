@@ -33,8 +33,27 @@ public static partial class CommandRouter
 
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath, session, audit, op, stderr, source: "agent");
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath, session, audit, op, stderr, source: "agent");
         if (drawing == null) return 1;
+        // 准入闸（防假 Green T3 缺口闭合）：agent 路径此前无 GateDetector 检查——
+        // Yellow/Red 一律先于 LLM 调用拒绝（run-rejected 留痕，spec ⑥/§9；只读审查全图级拦截）。
+        var gateReport = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
+        if (GateRefusesRun(gateReport))
+        {
+            string gateHash = drawing.ComputeHash();
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "agent", "run-rejected", drawingPath,
+                JsonSerializer.Serialize(new
+                {
+                    level = gateReport.Level.ToString(),
+                    unsupportedCount = gateReport.Unsupported.Count,
+                    unparsedCount = drawing.Unparsed.TotalCount,
+                    guidance = gateReport.Guidance
+                }),
+                gateHash, gateHash, "", ""));
+            stderr.WriteLine(gateReport.Guidance);
+            return 1;
+        }
         string overlayPath = Path.Combine(agentDir, "semantic.json");
         var overlay = File.Exists(overlayPath)
             ? LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr, source: "agent")

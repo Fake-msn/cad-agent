@@ -18,21 +18,32 @@ public static class DoorArcDetector
 
     public static void Detect(DrawingSession session, SemanticOverlay overlay,
         double minRadius = 500, double maxRadius = 1500, double sweepToleranceDeg = 15)
+        => DetectWalked(BlockWalker.Walk(session.Doc, session.Sheets).ToList(), overlay,
+            minRadius, maxRadius, sweepToleranceDeg);
+
+    /// <summary>
+    /// 块遍历口径核心（扫描器复用同一次 Walk）：半径用世界值（WorldPoints[1].X，
+    /// Walk 内已按 RadiusScale 缩放）；扫角取本地 Start/EndAngle——旋转/均匀缩放不改变扫角。
+    /// </summary>
+    internal static void DetectWalked(IReadOnlyList<WalkedEntity> walked, SemanticOverlay overlay,
+        double minRadius = 500, double maxRadius = 1500, double sweepToleranceDeg = 15)
     {
-        foreach (var e in session.Doc.Entities)
+        foreach (var w in walked)
         {
-            if (e is not Arc arc) continue;
-            if (arc.Radius < minRadius || arc.Radius > maxRadius) continue;
+            if (w.Entity is not Arc arc) continue;
+            double radius = w.WorldPoints.Count >= 2 ? w.WorldPoints[1].X : arc.Radius;
+            if (radius < minRadius || radius > maxRadius) continue;
 
             double sweep = (arc.EndAngle - arc.StartAngle) * (180.0 / Math.PI);
             sweep = ((sweep % 360.0) + 360.0) % 360.0; // normalize to [0,360), wrap across 0
             if (Math.Abs(sweep - 90.0) > sweepToleranceDeg) continue;
 
-            string evidence = $"门弧 r={arc.Radius:F0} sweep={sweep:F0}°";
-            if (overlay.Annotations.Any(x => x.TargetHandle == e.Handle.ToString() && x.Confidence > Confidence))
+            string evidence = $"门弧 r={radius:F0} sweep={sweep:F0}°";
+            if (overlay.Annotations.Any(x => x.TargetHandle == w.HandlePath && x.Confidence > Confidence))
                 continue;
+            // T4：stamp 幅面归属（WalkedEntity.SheetId；框外=null legacy 全局）
             overlay.UpsertAnnotation(new SemanticAnnotation(
-                e.Handle.ToString(), SemanticClass.Door, Provenance.GeometryInference, Confidence, evidence));
+                w.HandlePath, SemanticClass.Door, Provenance.GeometryInference, Confidence, evidence, w.SheetId));
         }
     }
 }

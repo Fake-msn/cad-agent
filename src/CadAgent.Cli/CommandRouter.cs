@@ -14,6 +14,13 @@ public static partial class CommandRouter
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
+    // intake stdout census 加性（T3）：unparsed 字段仅非空 census 输出——WhenWritingNull
+    // 省略 null（无 census 图纸 stdout 逐字不变，T1 Fix Round 1 契约保持；其余字段恒非 null）。
+    private static readonly JsonSerializerOptions IntakeJsonOpts = new(JsonOpts)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
     // semantic 族 stdout 契约（Task 8 E2E 依赖）：camelCase 属性名 + 枚举字符串原样
     // （HumanConfirmed/Wall 等 PascalCase 枚举值不加命名策略）。
     // 放宽转义：中文图层名按字面输出（默认编码器会转成 \uXXXX，破坏 Contains 断言）；
@@ -69,11 +76,30 @@ public static partial class CommandRouter
     }
 
     /// <summary>
-    /// Gate-at-run policy (spec hard-req 6): Red drawings are information-incomplete
-    /// and must not be operated on. Yellow proceeds with a warning (semantic-level
-    /// interception is Plan 2 policy).
+    /// Gate-at-run policy (spec hard-req 6; 防假 Green T3 收紧): Yellow/Red 一律拒绝修改——
+    /// 未解析对象无句柄/几何，禁触区无法定位，全图级拦截（只读审查）。仅 Green 放行。
     /// </summary>
-    internal static bool GateRefusesRun(GateReport report) => report.Level == GateLevel.Red;
+    internal static bool GateRefusesRun(GateReport report) => report.Level != GateLevel.Green;
+
+    /// <summary>
+    /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent/repl/export
+    /// 修改消费点 + rollback/check/review 只读/撤回消费点共用（T5 顺手修②等价一致性）。
+    /// persisted=Store.Load → DrawingSession.Load(path, persisted) → census 非空回写（原子写）。
+    /// R9：persisted Empty/缺 + 源 .dwg 在 → Load 从源通知重建 census（此处回写 sidecar）；
+    /// 源缺失 → Load 抛 InvalidOperationException（各消费点既有 catch/LoadOrReject 留痕拒绝）。
+    /// agentDir 约定 = project/.cadagent（Run 唯一装配点），sidecar 以 projectDir 键控。
+    /// 已知限制（T1 单文件多源互斥）：第二源 Save 覆盖第一源，Load 靠 SourcePath 匹配诚实
+    /// Empty——多源场景 census 仅最近源有效（见 UnparsedCensusStore 注释）。
+    /// </summary>
+    private static DrawingSession LoadWithCensus(string drawingPath, string agentDir)
+    {
+        string projectDir = Path.GetDirectoryName(Path.GetFullPath(agentDir))!;
+        var persisted = UnparsedCensusStore.Load(projectDir, drawingPath);
+        var session = DrawingSession.Load(drawingPath, persisted);
+        if (session.Unparsed.TotalCount > 0)
+            UnparsedCensusStore.Save(projectDir, drawingPath, session.Unparsed);
+        return session;
+    }
 
     private static string[] StripOptionValues(string[] args)
     {
@@ -111,7 +137,7 @@ public static partial class CommandRouter
         GateReport report;
         try
         {
-            drawing = DrawingSession.Load(file);
+            drawing = LoadWithCensus(file, agentDir);
             summary = drawing.Summarize();
             report = GateDetector.Inspect(summary, new EmptySupportMatrix());
         }
@@ -132,8 +158,11 @@ public static partial class CommandRouter
             level = report.Level.ToString(),
             unsupported = report.Unsupported,
             guidance = report.Guidance,
-            summary
-        }, JsonOpts));
+            summary,
+            // census 数组（类×计数，T3 加性）：通知侧未解析对象普查—— Yellow/Red 判定的证据面；
+            // 空 census → null → WhenWritingNull 省略（legacy stdout 逐字不变）。
+            unparsed = drawing.Unparsed.TotalCount > 0 ? drawing.Unparsed.Classes : null
+        }, IntakeJsonOpts));
         return report.Level switch { GateLevel.Green => 0, GateLevel.Yellow => 2, _ => 3 };
     }
 
@@ -179,7 +208,7 @@ public static partial class CommandRouter
         GateReport report;
         try
         {
-            drawing = DrawingSession.Load(drawingPath);
+            drawing = LoadWithCensus(drawingPath, agentDir);
             report = GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix());
         }
         catch (Exception ex)
@@ -194,19 +223,21 @@ public static partial class CommandRouter
         }
         if (GateRefusesRun(report))
         {
-            // spec 硬要求6：信息不完整（Red）图纸禁止操作——不执行任何步骤。
+            // spec 硬要求6（T3 收紧）：信息不完整（Red）或部分未解析（Yellow）图纸禁止修改——
+            // 不执行任何步骤。Yellow=只读审查（未解析对象无句柄/几何，禁触区无法定位，全图级拦截）。
             string hash = drawing.ComputeHash();
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "run", "run-rejected", drawingPath,
-                JsonSerializer.Serialize(new { level = report.Level.ToString(), unsupportedCount = report.Unsupported.Count }),
+                JsonSerializer.Serialize(new
+                {
+                    level = report.Level.ToString(),
+                    unsupportedCount = report.Unsupported.Count,
+                    unparsedCount = drawing.Unparsed.TotalCount,
+                    guidance = report.Guidance
+                }),
                 hash, hash, "", ""));
             stderr.WriteLine(report.Guidance);
             return 1;
-        }
-        if (report.Level == GateLevel.Yellow)
-        {
-            // Yellow 放行+警示（语义级拦截属计划2的既定策略）。
-            stderr.WriteLine($"警告: 图纸含 {report.Unsupported.Count} 个未支持对象（Yellow 放行）。{report.Guidance}");
         }
         // 语义闸口接线：overlay 存在→加载注入；不存在→null（几何级流程不受影响，诚实降级）。
         // 存在但损坏→审计拒绝、不执行（最终审查裁定：不得静默降级为 null 闸口）。
@@ -325,16 +356,22 @@ public static partial class CommandRouter
     private static int Rollback(string txId, string drawingPath, string agentDir,
         string session, TextWriter stdout, TextWriter stderr)
     {
-        var drawing = DrawingSession.Load(drawingPath);
+        // R9 补留痕：此前 Load 在 try/catch 外——异常经 Run 兜底 exit 1 但无审计（spec §9 缺口）。
+        // LoadOrReject 复用 intake-rejected 模式（Source="rollback"，与 semantic/check 同一守卫）。
+        // R10 Minor#2：裸 Load → LoadWithCensus——sidecar 有效（路径+源哈希匹配）时用
+        // persisted census，避免全量重读源；Yellow 上 rollback 保持 R7 撤回豁免（不加闸）。
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath,
+            session, audit, op, stderr, source: "rollback");
+        if (drawing == null) return 1;
         // 快照必须属于当前图纸：防止把别的图纸的快照覆盖到本图纸上
         string snapshotFile = new SnapshotStore(Path.Combine(agentDir, "snapshots")).Find(txId);
         if (!string.Equals(Path.GetFileName(snapshotFile), Path.GetFileName(drawing.SourcePath),
                 StringComparison.OrdinalIgnoreCase))
         {
             // 拒绝也必须入审计（spec §9）：谁、撤哪个事务、期望/实际图纸各是什么。
-            using var rejectedAudit = OpenAudit(agentDir);
-            var op = Identity(agentDir).Current;
-            rejectedAudit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "rollback", "rollback-rejected", txId,
                 JsonSerializer.Serialize(new
                 {
@@ -345,7 +382,6 @@ public static partial class CommandRouter
             stderr.WriteLine($"事务 {txId} 的快照不属于图纸 {drawing.SourcePath}，已拒绝撤回");
             return 1;
         }
-        using var audit = OpenAudit(agentDir);
         Engine(agentDir, audit).Rollback(txId, drawing, session);
         stdout.WriteLine($"已撤回事务 {txId}");
         return 0;
@@ -432,6 +468,75 @@ public static partial class CommandRouter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// 视觉接线 T3：semantic scan --vision relay 进程拉起 seam（仅测试注入：捕获 args/返回码；
+    /// 生产 null → Process dotnet ViewDll 真启动）。与 LlmClientFactory 同口径。
+    /// </summary>
+    internal static Func<string[], int>? VisionScanSpawn;
+
+    /// <summary>
+    /// 视觉接线 T3：semantic scan --vision → 独立 View 进程 --vision-scan headless 入口
+    /// （R4 parity：ViewLaunch 进程模式镜像——Cli 不 using Avalonia；区别：relay 须等进程
+    /// 结束并转发 stdout/stderr/退出码，故 RedirectStandardOutput/Error + WaitForExit）。
+    /// 转发 --drawing/--project/--confirm-egress/--name/--max-tiles/--session；闸口/出境/审计全在 View 进程内。
+    /// View 程序集缺失→stderr + exit 1（ViewLaunch 同口径）。
+    /// </summary>
+    private static int VisionScanRelay(string[] args, string drawingPath, string agentDir,
+        TextWriter stdout, TextWriter stderr)
+    {
+        string project = Path.GetDirectoryName(Path.GetFullPath(agentDir))!;
+        var relayArgs = new List<string> { "--vision-scan", "--drawing", drawingPath, "--project", project };
+        if (args.Contains("--confirm-egress")) relayArgs.Add("--confirm-egress");
+        string? name = GetOption(args, "--name");
+        if (name is not null) { relayArgs.Add("--name"); relayArgs.Add(name); }
+        // T4 成本闸：--max-tiles 瓦片预算直通 View 进程（值非法由 View 用法拒绝，先于其副作用）。
+        string? maxTiles = GetOption(args, "--max-tiles");
+        if (maxTiles is not null) { relayArgs.Add("--max-tiles"); relayArgs.Add(maxTiles); }
+        // R11⑤：--session 直通 View 进程（View 入口读 --session；不转发则 relay 链审计会话断档）。
+        // 未给定不转发（View 侧自生成 GUID，既有契约逐字保持）。
+        string? sessionOpt = GetOption(args, "--session");
+        if (sessionOpt is not null) { relayArgs.Add("--session"); relayArgs.Add(sessionOpt); }
+        if (VisionScanSpawn is { } spawn)
+            return spawn(relayArgs.ToArray());
+        string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
+        if (!File.Exists(viewDll))
+        {
+            stderr.WriteLine($"未找到视图程序集: {viewDll}");
+            return 1;
+        }
+        var psi = new ProcessStartInfo("dotnet", BuildVisionScanArgs(viewDll, relayArgs))
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            // View 进程 --vision-scan 分支置 Console.OutputEncoding=UTF8；relay 同口径读取
+            // （Windows GBK 默认码页会损坏中文 JSON/指引）。
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8
+        };
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("View 进程启动失败");
+        // 双异步读避免经典死锁（子进程 stderr 缓冲先满时同步 ReadToEnd 互等）；输出为小 JSON/指引。
+        Task<string> outTask = proc.StandardOutput.ReadToEndAsync();
+        Task<string> errTask = proc.StandardError.ReadToEndAsync();
+        proc.WaitForExit();
+        stdout.Write(outTask.GetAwaiter().GetResult());
+        stderr.Write(errTask.GetAwaiter().GetResult());
+        return proc.ExitCode;
+    }
+
+    /// <summary>
+    /// 视觉接线 T3：relay 进程参数装配（arg-builder 单测覆盖，BuildViewArgs 同口径）——
+    /// dll/选项值加引号，flag（-- 前缀）裸追加。
+    /// </summary>
+    internal static string BuildVisionScanArgs(string viewDll, IReadOnlyList<string> relayArgs)
+    {
+        var sb = new System.Text.StringBuilder($"\"{viewDll}\"");
+        foreach (string a in relayArgs)
+            sb.Append(a.StartsWith("--") ? $" {a}" : $" \"{a}\"");
+        return sb.ToString();
+    }
+
     private static string SemanticOverlayPath(string agentDir) =>
         Path.Combine(agentDir, "semantic.json");
 
@@ -488,17 +593,34 @@ public static partial class CommandRouter
 
     /// <summary>
     /// semantic scan：Load→Scan(既有 overlay, skill 别名)→Save→审计 semantic-scan→stdout
-    /// {version, annotations, ambiguous}。Load 失败复用计划 1 intake-rejected
+    /// {version, annotations, ambiguous, sheets}（sheets=T7 加性幅面摘要 {sheetId,name,number}）。
+    /// Load 失败复用计划 1 intake-rejected
     /// 模式（错误入审计、哈希不可得→空串）+ exit 1。
     /// --skill 接线（2b-ii-a T7）：与 check/adjudicate 同一 LoadRuleSet 加载路径，
     /// MergedAliases→Scan overload（别名命中层不再不明确）；包非法/Id 冲突→用法错误
     /// 先于任何副作用（不审计，Run 兜底 stderr + exit 1）。无 --skill→空别名表，行为不变。
     /// 审计加性（最终审查裁定）：paramsJson 增 rulePackVersion=SkillSet.RulePackVersion
     /// （规则包溯源，与 check 同口径；扫描行为本身不变）。
+    /// 视觉接线 T3：--vision → relay 独立 View 进程 headless 入口（Cli 不 using Avalonia，
+    /// ViewLaunch 先例）；无 --vision 的 legacy 在进程扫描逐字不变。
+    /// R9（T4 顺带修）：--vision 与 --skill 并存 → 用法拒绝 exit 1——relay 不转发 --skill
+    /// （View headless 入口无别名通道），静默丢弃=诚实缺口；拒绝先于一切副作用（check --skill 先例）。
     /// </summary>
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
+        // --vision relay 先于一切在进程副作用（闸口/出境/审计全在 View 进程内编排）。
+        if (args.Contains("--vision"))
+        {
+            // R11④：args.Contains 判定替代 GetOptionValues 计数——裸 --skill（末位无值）
+            // 取不到值但 flag 存在本身即冲突，同样拒绝（静默丢弃=诚实缺口，R9 同口径）。
+            if (args.Contains("--skill"))
+            {
+                stderr.WriteLine("用法: semantic scan --vision 与 --skill 不能并存（视觉读图不支持 skill 别名；请去掉 --skill 或改用无 --vision 的语义扫描）");
+                return 1;
+            }
+            return VisionScanRelay(args, drawingPath, agentDir, stdout, stderr);
+        }
         var ruleSet = LoadRuleSet(args, stderr);
         string overlayPath = SemanticOverlayPath(agentDir);
         using var audit = OpenAudit(agentDir);
@@ -539,7 +661,11 @@ public static partial class CommandRouter
         {
             version = result.Overlay.Version,
             annotations = result.Overlay.Annotations,
-            ambiguous = result.Ambiguous
+            ambiguous = result.Ambiguous,
+            // T7 加性：幅面摘要数组（sheetId=图框 Insert 句柄/布局 "L"+视口句柄；
+            // 无图框 legacy 图纸=单默认幅面 S0）。agent 计划 params.sheetId 的取值依据；
+            // 既有 version/annotations/ambiguous 契约不变。
+            sheets = drawing.Sheets.Select(s => new { sheetId = s.SheetId, name = s.Name, number = s.Number })
         }, SemanticJsonOpts));
         return 0;
     }
@@ -666,7 +792,10 @@ public static partial class CommandRouter
         var ruleSet = LoadRuleSet(args, stderr);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
-        var drawing = LoadOrReject(() => DrawingSession.Load(drawingPath), drawingPath,
+        // T5 顺手修②：裸 Load → LoadWithCensus——只读审查路径享受 persisted census
+        // 直载（sidecar 有效时不重读源，与 run/rollback 等价一致性）；check 只读不改图，
+        // Yellow 不拦只读审查（built-in 无 mandatory → exit 0 行为保持）。
+        var drawing = LoadOrReject(() => LoadWithCensus(drawingPath, agentDir), drawingPath,
             session, audit, op, stderr, source: "check");
         if (drawing is null) return 1;
         string overlayPath = SemanticOverlayPath(agentDir);

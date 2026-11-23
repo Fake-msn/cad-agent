@@ -12,8 +12,18 @@ internal static class HandlerHelpers
         session as DrawingSession ?? throw new InvalidOperationException("处理器需要 DrawingSession");
 
     public static double Req(JsonElement p, string name) => p.GetProperty(name).GetDouble();
-    public static string? OptString(JsonElement p, string name) =>
-        p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+    // R12：number→decimal string 镜像 handle 先例（Find :38）强制转换——sheetId 等可选字符串参数
+    // 携数值时不再静默 null（解除 handler confinement/作用域）；string/缺失/其余非法形态行为保持。
+    public static string? OptString(JsonElement p, string name)
+    {
+        if (!p.TryGetProperty(name, out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.String => v.GetString(),
+            JsonValueKind.Number => v.GetUInt64().ToString(),
+            _ => null
+        };
+    }
 
     public static Layer ResolveLayer(DrawingSession s, string? name)
     {
