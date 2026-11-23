@@ -572,7 +572,7 @@ public static partial class CommandRouter
     {
         if (positional.Length < 2)
         {
-            stderr.WriteLine("semantic 需要子命令: scan|show|map|promote");
+            stderr.WriteLine("semantic 需要子命令: scan|show|map|map-block|promote");
             return 1;
         }
         return positional[1] switch
@@ -580,6 +580,8 @@ public static partial class CommandRouter
             "scan" => SemanticScan(args, RequireOption(args, "--drawing"), agentDir, session, stdout, stderr),
             "show" => SemanticShow(agentDir, stdout),
             "map" => SemanticMap(args, agentDir, session, stdout, stderr),
+            // BF-T4（块级纠偏切片，spec §13.3）：块→符号人工确认（复核制，overlay-only）。
+            "map-block" => SemanticMapBlock(args, agentDir, session, stdout, stderr),
             "promote" => SemanticPromote(args, agentDir, session, stdout, stderr),
             _ => UnknownSemanticSubcommand(positional[1], stderr)
         };
@@ -587,7 +589,7 @@ public static partial class CommandRouter
 
     private static int UnknownSemanticSubcommand(string sub, TextWriter stderr)
     {
-        stderr.WriteLine($"未知 semantic 子命令: {sub}（可用: scan|show|map|promote）");
+        stderr.WriteLine($"未知 semantic 子命令: {sub}（可用: scan|show|map|map-block|promote）");
         return 1;
     }
 
@@ -779,6 +781,127 @@ public static partial class CommandRouter
             version = overlay.Version
         }, SemanticJsonOpts));
         return 0;
+    }
+
+    /// <summary>
+    /// semantic map-block（BF-T4 块级纠偏切片，spec §13.3）：人工确认块→符号映射。
+    /// 复核制：确认时重提取块/符号指纹——哈希精确（exact）或 Distance(块fp,符号fp)≤
+    /// NearThreshold（固定参数序，T1 非对称口径），否则拒绝留痕 reason=指纹不符。
+    /// 成功落该块全部 walked Insert 实例（含嵌套后缀句柄）HumanConfirmed 1.0——
+    /// 每句柄先 RemoveAll 全 provenance 再 Upsert（镜像 ApplyMappingToAnnotations）。
+    /// overlay-only 不改图纸（before==after 哈希）；**不调 GateDetector**——
+    /// Yellow 豁免沿用 SemanticMap 先例（只改 overlay 不改图纸）。
+    /// 拒绝面（OpenAudit 后任何拒绝都留痕 semantic-map-block-rejected）：
+    /// 块不存在/符号不存在/块无几何/符号无几何/指纹不符/class 非法。
+    /// class 默认符号 meta.Class；--class 覆盖须 Enum.TryParse 成功（SemanticMap 同口径）。
+    /// 符号首包命中 OrdinalIgnoreCase（镜像 ImportSymbolHandler）；drawing Load 失败
+    /// 镜像 scan intake-rejected 留痕。
+    /// </summary>
+    private static int SemanticMapBlock(string[] args, string agentDir, string session,
+        TextWriter stdout, TextWriter stderr)
+    {
+        string blockName = RequireOption(args, "--block");
+        string symbolName = RequireOption(args, "--symbol");
+        string drawingPath = RequireOption(args, "--drawing");
+        // 审计先行（最终审查裁定）：drawing Load 失败也必须留痕（scan intake-rejected 镜像）。
+        using var audit = OpenAudit(agentDir);
+        var op = Identity(agentDir).Current;
+        DrawingSession drawing;
+        try
+        {
+            drawing = DrawingSession.Load(drawingPath);
+        }
+        catch (Exception ex)
+        {
+            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                session, "semantic", "intake-rejected", drawingPath,
+                JsonSerializer.Serialize(new { Error = ex.Message }), "", "", "", ""));
+            stderr.WriteLine(ex.Message);
+            return 1;
+        }
+        var packages = LoadSkillPackages(args);
+        // 符号首包命中（OrdinalIgnoreCase，镜像 ImportSymbolHandler）
+        SymbolMeta? meta = null;
+        SkillPackage? owner = null;
+        foreach (var p in packages)
+        {
+            meta = p.Symbols.FirstOrDefault(s => s.Name.Equals(symbolName, StringComparison.OrdinalIgnoreCase));
+            if (meta != null) { owner = p; break; }
+        }
+        if (meta is null)
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "符号不存在", stderr);
+        // 块名查找 OrdinalIgnoreCase（控制器裁定）
+        var block = drawing.Doc.BlockRecords.FirstOrDefault(b => b.Name.Equals(blockName, StringComparison.OrdinalIgnoreCase));
+        if (block is null)
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "块不存在", stderr);
+        var fpBlock = BlockFingerprint.Extract(block.Entities);
+        if (fpBlock is null)
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "块无几何", stderr);
+        // 符号 DXF 路径=包内 symbols/<file>（ImportSymbolHandler 同口径）；读失败=符号无几何
+        ACadSharp.CadDocument symDoc;
+        try
+        {
+            using var fs = File.OpenRead(Path.Combine(owner!.SourceDir, "symbols", meta.File));
+            symDoc = new ACadSharp.IO.DxfReader(fs).Read();
+        }
+        catch
+        {
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "符号无几何", stderr);
+        }
+        var fpSym = BlockFingerprint.Extract(symDoc.Entities);
+        if (fpSym is null)
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "符号无几何", stderr);
+        // 复核：exact=哈希相等；否则固定参数序 Distance(块fp,符号fp)，超阈拒绝
+        bool exact = fpBlock.Hash == fpSym.Hash;
+        double d = exact ? 0 : BlockFingerprint.Distance(fpBlock, fpSym);
+        if (!exact && d > BlockFingerprint.NearThreshold)
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "指纹不符", stderr);
+        // class 默认符号 meta.Class；--class 覆盖须 Enum.TryParse 成功（SemanticMap 同口径，
+        // 大小写敏感按现状）；非法→审计拒绝（OpenAudit 后任何拒绝都留痕）。
+        SemanticClass cls = meta.Class;
+        string? classOpt = GetOption(args, "--class");
+        if (classOpt is not null && !Enum.TryParse(classOpt, out cls))
+            return RejectMapBlock(audit, op, session, drawing, blockName, symbolName, "class 非法", stderr);
+        // 实例=walked Insert 且 Block.Name OrdinalIgnoreCase 匹配（含嵌套后缀句柄）
+        var walked = BlockWalker.Walk(drawing.Doc, drawing.Sheets).ToList();
+        var instances = walked.Where(w => w.Entity is ACadSharp.Entities.Insert ins
+            && string.Equals(ins.Block?.Name, blockName, StringComparison.OrdinalIgnoreCase)).ToList();
+        string overlayPath = SemanticOverlayPath(agentDir);
+        var overlay = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
+        if (overlay is null) return 1;
+        foreach (var w in instances)
+        {
+            // 每句柄先清全 provenance 再落人工确认（镜像 ApplyMappingToAnnotations）
+            overlay.Annotations.RemoveAll(a => a.TargetHandle == w.HandlePath);
+            overlay.UpsertAnnotation(new SemanticAnnotation(w.HandlePath, cls, Provenance.HumanConfirmed, 1.0,
+                $"人工确认块映射: {blockName} → {symbolName}", w.SheetId));
+        }
+        overlay.Save(overlayPath);
+        // map-block 只改叠加层不改图纸：前后哈希一致（SemanticMap 先例）。
+        string hash = drawing.ComputeHash();
+        audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            session, "semantic", "semantic-map-block", blockName,
+            JsonSerializer.Serialize(new { block = blockName, symbol = symbolName, @class = cls.ToString(), instances = instances.Count, distance = d, exact }),
+            hash, hash, "", ""));
+        stdout.WriteLine(JsonSerializer.Serialize(new { block = blockName, symbol = symbolName, @class = cls.ToString(), instances = instances.Count, distance = d, exact }, SemanticJsonOpts));
+        return 0;
+    }
+
+    /// <summary>
+    /// map-block 拒绝留痕（spec §13.3）：审计 semantic-map-block-rejected
+    /// （Source="semantic"，Target=blockName，params {block,symbol,reason}，
+    /// overlay-only 口径 before==after）+ stderr + exit 1。拒绝先于任何 overlay 写入。
+    /// </summary>
+    private static int RejectMapBlock(SqliteAuditStore audit, OperatorIdentity op, string session,
+        DrawingSession drawing, string blockName, string symbolName, string reason, TextWriter stderr)
+    {
+        string hash = drawing.ComputeHash();
+        audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+            session, "semantic", "semantic-map-block-rejected", blockName,
+            JsonSerializer.Serialize(new { block = blockName, symbol = symbolName, reason }),
+            hash, hash, "", ""));
+        stderr.WriteLine($"块映射确认拒绝: {reason}（block={blockName}, symbol={symbolName}）");
+        return 1;
     }
 
     private static string AdjudicationsPath(string agentDir) =>
