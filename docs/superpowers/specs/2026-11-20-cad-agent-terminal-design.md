@@ -634,6 +634,17 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **本轮不做（明示）**：天正运行时读取（Task B deferred）；HKLM 修正（用户未授权，HKCU 覆盖绕开）；ACadSharp DXF 写入器替代（生产含义注记沿用上条，后续切片）。
 - 证据 `outputs/autocad-verify-20261123/`（g1-g7 系列 + scripts/g2 + matrix-upgrade-report.md + MANIFEST 追加）。
 
+**天正运行时读取实证（Task B，2026-11-24 记录；AutoCAD COM × 16#1116.dwg 原生副本只读打开；追加式，旧文 0 删；不扩 scope 实现，仅注记）**：
+
+- **执行口径**：Task A 全绿收尾后（AcadLive 4/4、矩阵 Verified 19.1、TypeLib HKCU 覆盖在位），outputs/api-probe 新增 `tarch-read` 探针（裸 dynamic COM + InvokeMember，不入 sln/git）；`Documents.Open(副本, ReadOnly=true)` 1.6s 返回无模态框；ModelSpace 1958 实体全量读 ObjectName/Layer/Handle（0 失败）+ 块定义 1084 个定义级实体 24105 + 属性抽样 7 实体×6 属性（预算 ≤10×6 内）。进程纪律：前后 tasklist 0 acad，自家实例 Close(false)→Quit 正常退出未用 taskkill；CUIX 哈希与 Task A 备份逐字一致；源件/副本 SHA256 前后均 63503c2f…302c6（只读零写入）。
+- **TCH 真实名不可见（天正未加载，诚实记录）**：运行时 ObjectName 直方图 7 类=AcDbBlockReference×993 / **AcDbZombieEntity×343** / AcDbLine×278 / AcDbPolyline×158 / AcDbText×158 / AcDbCircle×17 / AcDbHatch×11。COM 自动化按默认 profile **<<未命名配置>>** 启动（ActiveProfile 实测），支持路径无 Tangent、进程 C:\Tangent 模块数=0。加载机制只读核实：天正**不经**注册表 Applications LoadCtrls autoload（HKCU 仅 AcMr/HKLM 仅 Autodesk 自带）；实际通道=**TElec20V5 profile** 支持路径首位 `c:\tangent\telect20v5\sys19x64` + 该目录 **acad.rx**（22 个 tch_*/tel_* ARX），日常经 TGStart.exe 启动。故 TCH_* 运行时呈 **AcDbZombieEntity**（僵尸类，非 AcDbProxyEntity），原 17 类类名经 ObjectName 不可分辨；「天正加载后 TCH 真实名可见」分支本轮未实证（不擅自切 profile/arxload，加载配置零改动）。
+- **census 对照精确闭合**：**343（ModelSpace 僵尸）+55（块定义僵尸）=398=文件级 census 398**；plain 六类计数（993/278/158/158/17/11）运行时与文件级逐字相等；ModelSpace.Count 1958=文件级 Entities 1615+343。**信息互补钉死**：文件级 census 有 17 类 TCH 类名但 Handle 全空；运行时僵尸有 **Handle/Layer 锚定**但类名归一、无几何——两通道合并才覆盖「类名分布+空间锚定」。块定义僵尸 55 分布：建筑-轴标 22/PUB_TEXT 23/PUB_HATCH 6/公用-图框-说明 1/预留给水点 1/A建筑-C门窗 1/TEL_TEXT 1。
+- **COM 属性可达性边界**：僵尸 ObjectName/Handle/Layer **可读**（如 Handle=321A/C公用-符号）；Coordinates/TextString/Area 等几何与 TArch 自定义属性一律 **DISP_E_UNKNOWNNAME 0x80020006**（名称级拒绝，非忙拒绝非崩溃）——天正未加载时 IDispatch 仅暴露实体基类属性。plain 实体属性全可达（Line/Polyline/Text/Circle/Insert 几何 OK，Hatch Area OK）。
+- **层内容跨核**：█HVAC█签名层 MS 顶层 **0** 实体、块定义级 11640（Line 11048 为主）——scan 递归口径 17466 的巨量内容实为块内 plain Line（签名图块），运行时可见可解析非天正盲区；0 层 MS 仅 7、块定义级 10229（Line 9559/Ellipse 231…）；天正僵尸主聚集 **0dt 层 259**（MS 672 中）+A建筑-门窗-编号 47 等。口径注记：scan 按 Insert 递归展开（实例级）vs 块定义定义级各计一次，数值不可直接相等，跨核价值在类型构成与盲区定位。
+- **探针技术核定（可复用）**：AutoCAD 集合 **Item 是 dispatch 方法**（InvokeMethod 形态），GetProperty 形态抛 DISP_E_MEMBERNOTFOUND 0x80020003（本轮实证）；Open 后再生窗口忙拒绝（0x80010001）须**全调用面**有界重试（GetVariable/ModelSpace 亦需覆盖，非仅 Open/SaveAs）。
+- **后续 native 理解路径建议（仅注记，不实现）**：①运行时 COM 读取作为 **census Yellow 件的补充理解通道**——增量价值=398 盲区对象的 Handle+Layer 锚定（只读理解层面缓解「未解析区不可定位」，不改变 Yellow 闸口语义）；②类名分辨仍依赖文件级 census；若需运行时真实 TCH 名/几何/自定义属性须天正加载会话（用户决策：TGStart/TElec20V5 profile 启动后 COM 附着，或授权切换 ActiveProfile；许可/HASP 与模态框风险须用户在场批准）；③生产接线 deferred（本轮仅实证）。
+- 证据 `outputs/tarch-elec/runtime-read/`（report.md/census-runtime-comparison.md/autoload-mechanism.txt/objectname-histogram.txt/layer-{modelspace,blockdefs}.txt/property-reachability.txt/probe-run.log+attempt{1,2,3}/session.txt/specimen-sha256-{pre,post}.txt/tasklist-{pre,post}.txt/cuix-hash-post.txt）。
+
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
 **动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。
