@@ -23,6 +23,13 @@ public sealed class AcadRuntime : ICadRuntime
     private dynamic? _doc;
     private bool _disposed;
 
+    // 重名碰撞守卫（复审微修复波）：本文档会话经 EnsureBlock 成功创建的块名集合。
+    // 重入补全只对"本方创建"的块清除重建；预存用户块（名不在集合）一律复用早退——
+    // skill 符号名与用户图纸自有块重名（如 "DOOR"）时不得删除用户内容（恢复旧非破坏行为）。
+    // AutoCAD 块名大小写不敏感（与 insert-symbol 符号匹配同口径 OrdinalIgnoreCase）；
+    // Open 换文档即清空：跨文档同名块不属于本文档会话的"本方残留"。
+    private readonly HashSet<string> _createdBlocks = new(StringComparer.OrdinalIgnoreCase);
+
     internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
 
@@ -169,6 +176,8 @@ public sealed class AcadRuntime : ICadRuntime
         {
             var app = EnsureApp();
             _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath));
+            // 换文档即失效本方创建块名集合（重名碰撞守卫按文档会话口径，防跨文档误清）。
+            _createdBlocks.Clear();
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"打开图纸失败: {ex.Message}", ex); }
@@ -287,11 +296,14 @@ public sealed class AcadRuntime : ICadRuntime
             catch { existing = null; /* 不存在→创建 */ }
             if (existing != null)
             {
+                // 重名碰撞守卫（复审微修复波）：名不在本方创建集合=预存用户块（skill 符号名
+                // 撞用户自有块）→复用早退（恢复旧非破坏行为），绝不 Delete 用户内容。
+                if (!_createdBlocks.Contains(blockName)) return;
                 // I2 重入补全（PR#24 修复波）：本方先前失败可能残留部分块（中途忙拒绝耗尽）——
                 // 静默早退会留下静默部分块（读回计数闸只数模型空间，兜不住块内容）。
                 // 比对块内实体数与期望基元数：完整→复用（幂等保持）；不一致（不足=残留）→
-                // 清除残留基元再重建。仅本方命名块（EnsureBlock 调用方=技能符号库块，
-                // 无用户内容），清除安全；块定义本身保留（origin 不变，引用不受影响）。
+                // 清除残留基元再重建。仅本方创建块（_createdBlocks 守卫）清除安全；
+                // 块定义本身保留（origin 不变，引用不受影响）。
                 int count = RetryBusy(() => (int)existing.Count);
                 if (count == primitives.Count) return;
                 for (int i = count - 1; i >= 0; i--)
@@ -307,6 +319,9 @@ public sealed class AcadRuntime : ICadRuntime
             dynamic block = RetryBusy<object?>(() => Profile.BlocksAddNameFirst
                 ? blocks.Add(blockName, Pt(0, 0))
                 : blocks.Add(Pt(0, 0), blockName))!;
+            // 创建成功即入本方集合（先于基元填充）：中途忙拒绝耗尽残留的部分块也属"本方"，
+            // 重入走补全重建通道；预存用户块永不入集合。
+            _createdBlocks.Add(blockName);
             AddBlockPrimitives(block, primitives);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)

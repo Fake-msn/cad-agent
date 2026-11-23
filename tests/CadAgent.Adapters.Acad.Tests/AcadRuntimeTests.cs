@@ -577,6 +577,63 @@ public class AcadRuntimeTests : IDisposable
     }
 
     [Fact]
+    public void EnsureBlock_PreexistingUserBlock_CountMismatch_ReusedNoDelete()
+    {
+        // 重名碰撞守卫（复审微修复波）：预存用户块（本会话未经 EnsureBlock 创建）count 与
+        // 期望不一致→复用早退（恢复旧非破坏行为），不 Delete 不重建——skill 符号名撞用户
+        // 自有块（如 "DOOR"）不得毁用户内容。
+        var blocks = new FakeBlocks(rejectAfterFirst: false);
+        var userBlock = new FakeBlock(false);
+        userBlock.AddLine(new[] { 0.0, 0.0, 0.0 }, new[] { 9.0, 9.0, 0.0 }); // 用户自有内容 1 实体
+        blocks.Map["DOOR"] = userBlock;
+        var ms = new CountingModelSpace(0, new BusyLayerEntity(0));
+        using var rt = CreateCompositeRuntime(ms, blocks);
+        var prims = new BlockPrimitive[] { new BlockLine(0, 0, 1, 1), new BlockLine(1, 1, 2, 2) };
+        rt.EnsureBlock("DOOR", prims);             // count 1≠2，但非本方创建→复用
+        Assert.Equal(1, userBlock.Entities.Count); // 用户内容原样保留
+        Assert.Equal(0, userBlock.DeleteCalls);    // 绝不 Delete
+        Assert.Equal(1, userBlock.AddLineAttempts); // 未追加基元
+        Assert.Equal(0, blocks.AddCalls);           // 未新建块定义
+        rt.EnsureBlock("door", prims);             // 块名大小写不敏感（OrdinalIgnoreCase 同口径）
+        Assert.Equal(0, userBlock.DeleteCalls);
+        Assert.Equal(1, userBlock.Entities.Count);
+    }
+
+    /// <summary>假应用：逐次 Open 返回不同假文档（钉住 Open 清空本方创建集合的文档会话口径）。</summary>
+    public sealed class SwitchingApp
+    {
+        private readonly Queue<CompositeDoc> _docs;
+        public SwitchingApp(params CompositeDoc[] docs) { _docs = new Queue<CompositeDoc>(docs); }
+        public bool Visible { get; set; }
+        public SwitchingApp Documents => this;
+        public CompositeDoc Open(string path) => _docs.Dequeue();
+        public void Quit() { }
+    }
+
+    [Fact]
+    public void EnsureBlock_DocSwitch_SameNamePreexisting_ReusedNoDelete()
+    {
+        // Open 换文档→本方创建集合清空：前一文档本方创建的 "SYM" 在新文档是预存块→复用不 Delete。
+        var doc1 = new CompositeDoc(new CountingModelSpace(0, new BusyLayerEntity(0)), new FakeBlocks(false));
+        var blocks2 = new FakeBlocks(false);
+        var preexisting = new FakeBlock(false);
+        preexisting.AddLine(new[] { 0.0, 0.0, 0.0 }, new[] { 5.0, 5.0, 0.0 });
+        blocks2.Map["SYM"] = preexisting;
+        var doc2 = new CompositeDoc(new CountingModelSpace(0, new BusyLayerEntity(0)), blocks2);
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => new SwitchingApp(doc1, doc2);
+        using var rt = new AcadRuntime();
+        rt.Open("a.dwg");
+        var prims = new BlockPrimitive[] { new BlockLine(0, 0, 1, 1), new BlockLine(1, 1, 2, 2) };
+        rt.EnsureBlock("SYM", prims);   // 文档 1 本方创建（2 基元）
+        rt.Open("b.dwg");
+        rt.EnsureBlock("SYM", prims);   // 文档 2 预存同名（1 实体≠2）→复用非破坏
+        Assert.Equal(1, preexisting.Entities.Count);
+        Assert.Equal(0, preexisting.DeleteCalls);
+        Assert.Equal(0, blocks2.AddCalls);
+    }
+
+    [Fact]
     public void Restart_QuitBusyExhaustion_ThrowsBounded()
     {
         // M3 耗尽边界：Quit 持续忙拒绝→有界重试耗尽后上抛（不得静默吞掉致进程残留无诊断）。
