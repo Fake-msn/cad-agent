@@ -299,4 +299,47 @@ public class SemanticE2ETests : IDisposable
         }
         finally { File.Delete(blockDxf); }
     }
+
+    /// <summary>
+    /// M2（--min-block-instances 合法非默认值传播）：CLI(2)→Scanner→Matcher 全链钉住——
+    /// 2 实例无匹配块默认 min=3 不歧义；--min-block-instances 2 → 入歧义（instances=2）+
+    /// 审计 blockAmbiguousCount 双通道一致。纯测试新增（产品传播链已存在，无需微调）。
+    /// </summary>
+    [Fact]
+    public void Scan_MinBlockInstancesTwo_PropagatesToMatcher()
+    {
+        string pkg = CreateSymbolPackage();
+        string blockDxf = DxfFixture.CreateTempDxf(doc =>
+        {
+            var br = new BlockRecord("边界块");
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+            doc.BlockRecords.Add(br);
+            for (int i = 0; i < 2; i++)
+                doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(i * 1000, 0, 0) });
+        });
+        try
+        {
+            // 默认 min=3：2 实例无匹配块不歧义
+            var (c1, out1, _) = Run("semantic", "scan", "--drawing", blockDxf, "--skill", pkg);
+            Assert.Equal(0, c1);
+            using (var d1 = JsonDocument.Parse(out1))
+                Assert.Empty(d1.RootElement.GetProperty("blockAmbiguous").EnumerateArray());
+            // --min-block-instances 2：传播至 Matcher → 2 实例入歧义
+            var (c2, out2, _) = Run("semantic", "scan", "--drawing", blockDxf, "--skill", pkg, "--min-block-instances", "2");
+            Assert.Equal(0, c2);
+            using var d2 = JsonDocument.Parse(out2);
+            var a = Assert.Single(d2.RootElement.GetProperty("blockAmbiguous").EnumerateArray());
+            Assert.Equal("边界块", a.GetProperty("block").GetString());
+            Assert.Equal(2, a.GetProperty("instances").GetInt32());
+            Assert.Equal("无匹配", a.GetProperty("reason").GetString());
+            // 审计双通道：第二次 scan params blockAmbiguousCount=1
+            var recs = AuditRecords().Where(r => r.Entry.Kind == "semantic-scan").ToList();
+            Assert.Equal(2, recs.Count);
+            using var p2 = JsonDocument.Parse(recs[1].Entry.ParamsJson);
+            Assert.Equal(1, p2.RootElement.GetProperty("blockAmbiguousCount").GetInt32());
+        }
+        finally { File.Delete(blockDxf); }
+    }
 }

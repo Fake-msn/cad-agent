@@ -312,4 +312,139 @@ public class BlockSymbolMatcherTests : IDisposable
         Assert.Equal("无匹配", a.Reason);
         Assert.Equal(3, a.Instances);
     }
+
+    // ---- PR#21 合并前 ISTQB 修复波 2（择要 Minor，纯测试新增）----
+
+    /// <summary>
+    /// M3（精确取首确定性）：两同哈希符号——yaml 序与包序双维度钉住"取首"，
+    /// class/evidence 随首符号（镜像 insert-symbol 首包命中先例）。
+    /// </summary>
+    [Fact]
+    public void ExactMultiSymbolSameHash_FirstWinsDeterministic()
+    {
+        // 克隆符号：与 sym.dxf 同几何（同哈希），class Lighting 区分来源
+        var clone = new CadDocument();
+        clone.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        clone.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "clone.dxf")))
+            DxfWriter.Write(fs, clone);
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+
+        // 维度一：yaml 序——测试符号在前 → 取测试符号（Device）
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n  - { name: 克隆符号, file: clone.dxf, class: Lighting, description: 克隆 }\n");
+        var ov1 = new SemanticOverlay();
+        var r1 = Run(doc, ov1);
+        Assert.Equal("测试符号", Assert.Single(r1.AutoSeeds).SymbolName);
+        Assert.All(ov1.Annotations.Where(x => x.Provenance == Provenance.GeometryInference),
+            x => { Assert.Equal(SemanticClass.Device, x.Class); Assert.Equal("几何指纹精确匹配: 测试符号", x.Evidence); });
+        // yaml 序反转 → 取克隆符号（Lighting）
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 克隆符号, file: clone.dxf, class: Lighting, description: 克隆 }\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n");
+        var ov2 = new SemanticOverlay();
+        var r2 = Run(doc, ov2);
+        Assert.Equal("克隆符号", Assert.Single(r2.AutoSeeds).SymbolName);
+        Assert.All(ov2.Annotations.Where(x => x.Provenance == Provenance.GeometryInference),
+            x => Assert.Equal(SemanticClass.Lighting, x.Class));
+
+        // 维度二：包序——两包各一符号，packages 列表序决定取首
+        string pkg2 = Path.Combine(Path.GetTempPath(), $"bfpg2-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(pkg2, "symbols"));
+            File.WriteAllText(Path.Combine(pkg2, "skill.yaml"), "name: test-pkg-2\nversion: \"1.0.0\"\n");
+            File.WriteAllText(Path.Combine(pkg2, "symbols", "symbols.yaml"),
+                "symbols:\n  - { name: 另包符号, file: sym.dxf, class: Wall, description: 另包 }\n");
+            using (var fs = File.Create(Path.Combine(pkg2, "symbols", "sym.dxf")))
+                DxfWriter.Write(fs, clone);
+            // _pkg 恢复单符号
+            File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+                "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n");
+            var p1 = SkillLoader.LoadDirectory(_pkg);
+            var p2 = SkillLoader.LoadDirectory(pkg2);
+            var walked = BlockWalker.Walk(doc, Array.Empty<SheetRecord>()).ToList();
+            var ov3 = new SemanticOverlay();
+            var r3 = BlockSymbolMatcher.MatchAndSeed(doc, walked, ov3, new[] { p1, p2 });
+            Assert.Equal("测试符号", Assert.Single(r3.AutoSeeds).SymbolName);
+            var ov4 = new SemanticOverlay();
+            var r4 = BlockSymbolMatcher.MatchAndSeed(doc, walked, ov4, new[] { p2, p1 });
+            Assert.Equal("另包符号", Assert.Single(r4.AutoSeeds).SymbolName);
+            Assert.All(ov4.Annotations.Where(x => x.Provenance == Provenance.GeometryInference),
+                x => Assert.Equal(SemanticClass.Wall, x.Class));
+        }
+        finally { try { Directory.Delete(pkg2, true); } catch (IOException) { } }
+    }
+
+    /// <summary>
+    /// M4（R6 早退守卫）：预置块级种子 + 全符号损坏 → symbols.Count==0 早退，
+    /// 既有种子不被清（RemoveAll 仅在索引非空后执行）；扫描计数全 0。
+    /// </summary>
+    [Fact]
+    public void AllSymbolsBroken_PresetSeedsPreserved_R6EarlyExit()
+    {
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var overlay = new SemanticOverlay();
+        // 预置既有块级种子（marker evidence）
+        overlay.UpsertAnnotation(new SemanticAnnotation("123", SemanticClass.Device,
+            Provenance.GeometryInference, 0.9, "几何指纹精确匹配: 测试符号"));
+        // 全符号损坏（垃圾文本 → DxfReader 抛 → 跳过计数）
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "sym.dxf"), "不是 DXF");
+        var r = Run(doc, overlay);
+        Assert.Equal(0, r.SymbolsLoaded);
+        Assert.Equal(1, r.SymbolsSkipped);
+        Assert.Empty(r.AutoSeeds);
+        Assert.Empty(r.Suggestions);
+        Assert.Empty(r.Ambiguous);
+        Assert.Equal(0, r.BlocksScanned);
+        Assert.Equal(0, r.BlocksExcluded);
+        // 既有种子原样保留（早退不清 overlay）
+        Assert.Contains(overlay.Annotations, x => x.TargetHandle == "123"
+            && x.Provenance == Provenance.GeometryInference && x.Evidence.StartsWith("几何指纹精确匹配:"));
+    }
+
+    /// <summary>M5（边界择要）：IsExcluded ATTDEF bbox 最长边恰 500 排除（&gt;= 口径）；499 不排除。</summary>
+    [Fact]
+    public void Excluded_AttdefBboxExactly500_Excluded_JustUnderNot()
+    {
+        var exact = new BlockRecord("图框恰500");
+        exact.Entities.Add(new AttributeDefinition { Tag = "图名" });
+        exact.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(500, 0, 0) });
+        Assert.True(BlockSymbolMatcher.IsExcluded(exact)); // 最长边=500 恰排除
+        var under = new BlockRecord("图框499");
+        under.Entities.Add(new AttributeDefinition { Tag = "图名" });
+        under.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(499, 0, 0) });
+        Assert.False(BlockSymbolMatcher.IsExcluded(under)); // 499<500 不排除
+    }
+
+    /// <summary>M5（边界择要）：*Paper 前缀排除（OrdinalIgnoreCase）——带几何夹具隔离前缀规则（空定义规则不干扰）。</summary>
+    [Fact]
+    public void Excluded_PaperPrefix_CaseInsensitive()
+    {
+        var paper = new BlockRecord("*Paper_Space");
+        SymbolGeometry(paper);
+        Assert.True(BlockSymbolMatcher.IsExcluded(paper));
+        var paperLower = new BlockRecord("*paper_space0");
+        SymbolGeometry(paperLower);
+        Assert.True(BlockSymbolMatcher.IsExcluded(paperLower));
+    }
+
+    /// <summary>M5（边界择要）：sampleHandles Take(5) 上限——6 实例夹具 → 样本恰 5 且为 walked 前 5 句柄。</summary>
+    [Fact]
+    public void Ambiguous_SampleHandlesCappedAtFive_SixInstances()
+    {
+        static void Triangle(BlockRecord br)
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+        }
+        var doc = DocWithBlock("自定义块", Triangle, inserts: 6);
+        var r = Run(doc);
+        var a = Assert.Single(r.Ambiguous);
+        Assert.Equal(6, a.Instances); // 实例计数全量
+        Assert.Equal(5, a.SampleHandles.Count); // 样本上限 5
+        var walked = BlockWalker.Walk(doc, Array.Empty<SheetRecord>()).ToList();
+        var expected = walked.Where(w => w.Entity is Insert).Take(5).Select(w => w.HandlePath).ToList();
+        Assert.Equal(expected, a.SampleHandles); // Take(5) 序钉住
+    }
 }

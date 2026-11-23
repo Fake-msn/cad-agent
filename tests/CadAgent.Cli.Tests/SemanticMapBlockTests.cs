@@ -266,4 +266,104 @@ public class SemanticMapBlockTests : IDisposable
             i.Block?.Name.Equals("外层块", StringComparison.OrdinalIgnoreCase) == true);
         Assert.StartsWith(outerInsert.Handle.ToString() + ":", nested.TargetHandle);
     }
+
+    // ---- PR#21 合并前 ISTQB 修复波 2（I1 安全关键拒绝面 + M5 阈值边界，纯测试新增）----
+
+    /// <summary>
+    /// I1①（块无几何拒绝面）：块定义仅 TEXT/Hatch（零白名单几何）+ 合法符号 →
+    /// Extract null → exit 1 + 审计 semantic-map-block-rejected reason="块无几何" + VerifyChain。
+    /// Hatch 矩形边界路径夹具镜像 MoveEntityTests（DxfWriter 往返已证）；路径边 Line 为
+    /// Hatch 子实体不入块顶层 Entities → Extract 仍零白名单几何。
+    /// </summary>
+    [Fact]
+    public void MapBlock_BlockNoGeometry_RejectedAudited_Exit1()
+    {
+        // 重建图纸：块定义仅 TEXT + Hatch（覆盖构造夹具的线圆几何）
+        var doc = new CadDocument();
+        var br = new BlockRecord("符号块");
+        br.Entities.Add(new TextEntity { InsertPoint = new XYZ(0, 0, 0), Height = 2.5, Value = "注记" });
+        var h = new Hatch { IsSolid = true };
+        h.Paths.Add(new Hatch.BoundaryPath(new Hatch.BoundaryPath.Edge[]
+        {
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(10, 0, 0), EndPoint = new XYZ(10, 10, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(10, 10, 0), EndPoint = new XYZ(0, 10, 0) }),
+            new Hatch.BoundaryPath.Line(new Line { StartPoint = new XYZ(0, 10, 0), EndPoint = new XYZ(0, 0, 0) }),
+        }));
+        br.Entities.Add(h);
+        doc.BlockRecords.Add(br);
+        for (int i = 0; i < 3; i++) doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(i * 100, 0, 0) });
+        using (var fs = File.Create(_drawing)) DxfWriter.Write(fs, doc);
+
+        int code = Run("--block", "符号块", "--symbol", "测试符号");
+        Assert.Equal(1, code);
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block-rejected");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.Equal("块无几何", p.RootElement.GetProperty("reason").GetString());
+        Assert.True(audit.VerifyChain(out _));
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block"); // 无成功记录
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "semantic.json"))); // 拒绝先于 overlay 写入
+    }
+
+    /// <summary>
+    /// I1②（符号无几何拒绝面）：符号 DXF 损坏（垃圾文本 → DxfReader 抛 → catch 分支）
+    /// 与仅 TEXT（合法 DXF → Extract null 分支）双分支 → reason="符号无几何" + VerifyChain。
+    /// 两次拒绝各留痕一条，块定义合法（构造夹具线圆）。
+    /// </summary>
+    [Fact]
+    public void MapBlock_SymbolNoGeometry_RejectedAudited_Exit1()
+    {
+        string symPath = Path.Combine(_pkg, "symbols", "sym.dxf");
+        // 分支一：垃圾文本（DxfReader 抛 → catch → 符号无几何）
+        File.WriteAllText(symPath, "不是 DXF");
+        Assert.Equal(1, Run("--block", "符号块", "--symbol", "测试符号"));
+        // 分支二：仅 TEXT 合法 DXF（Extract null → 符号无几何）
+        var textOnly = new CadDocument();
+        textOnly.Entities.Add(new TextEntity { InsertPoint = new XYZ(0, 0, 0), Height = 2.5, Value = "仅注记" });
+        using (var fs = File.Create(symPath)) DxfWriter.Write(fs, textOnly);
+        Assert.Equal(1, Run("--block", "符号块", "--symbol", "测试符号"));
+
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rejects = audit.ReadAll().Where(r => r.Entry.Kind == "semantic-map-block-rejected").ToList();
+        Assert.Equal(2, rejects.Count);
+        Assert.All(rejects, rec =>
+        {
+            using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+            Assert.Equal("符号无几何", p.RootElement.GetProperty("reason").GetString());
+        });
+        Assert.True(audit.VerifyChain(out _));
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block");
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "semantic.json")));
+    }
+
+    /// <summary>
+    /// M5（阈值边界 CLI 侧）：map-block 复核 d 恰=0.15 接受（&lt;= 口径）→ exit 0 +
+    /// exact=false + distance 精确 0.15 + HumanConfirmed 落 3 实例。双圆夹具同
+    /// BlockFingerprintTests.Distance_ExactlyAtNearThreshold_ValuePinned（内圆平移 3 → d=0.3/2）。
+    /// </summary>
+    [Fact]
+    public void MapBlock_DistanceExactlyAtThreshold_Accepted()
+    {
+        // 块：C1(5,5)r5 + C2(6,5)r1；符号：C1(5,5)r5 + C2(3,5)r1（bbox 同 10×10）
+        var doc = new CadDocument();
+        var br = new BlockRecord("符号块");
+        br.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 5 });
+        br.Entities.Add(new Circle { Center = new XYZ(6, 5, 0), Radius = 1 });
+        doc.BlockRecords.Add(br);
+        for (int i = 0; i < 3; i++) doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(i * 100, 0, 0) });
+        using (var fs = File.Create(_drawing)) DxfWriter.Write(fs, doc);
+        var sym = new CadDocument();
+        sym.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 5 });
+        sym.Entities.Add(new Circle { Center = new XYZ(3, 5, 0), Radius = 1 });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "sym.dxf"))) DxfWriter.Write(fs, sym);
+
+        int code = Run("--block", "符号块", "--symbol", "测试符号");
+        Assert.Equal(0, code); // 恰阈值接受
+        using var j = JsonDocument.Parse(LastStdout);
+        Assert.False(j.RootElement.GetProperty("exact").GetBoolean());
+        Assert.Equal(0.15, j.RootElement.GetProperty("distance").GetDouble()); // 精确双精度钉住
+        var overlay = SemanticOverlay.Load(Path.Combine(_project, ".cadagent", "semantic.json"));
+        Assert.Equal(3, overlay.Annotations.Count(a => a.Provenance == Provenance.HumanConfirmed));
+    }
 }
