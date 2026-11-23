@@ -13,6 +13,11 @@ public sealed class ZwcadRuntime : ICadRuntime
 {
     private const string ProgId = "ZWCAD.Application";
 
+    // COM 激活 seam（与 AcadRuntime 同款，PR#18 修复波 Important#1 回归测试注入点）：
+    // 生产默认真实反射/激活，行为不变；测试注入假 app/doc 钉住 Close 包装契约。
+    internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
+    internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
+
     private readonly BlockingCollection<Action> _queue = new();
     private readonly Thread _staThread;
     private dynamic? _app;
@@ -49,9 +54,9 @@ public sealed class ZwcadRuntime : ICadRuntime
         if (_app == null)
         {
             VendorGuard.EnsureNoForeignInstance(VendorProfiles.Zwcad);
-            var type = Type.GetTypeFromProgID(ProgId)
+            var type = ProgIdResolver(ProgId)
                 ?? throw new CadRuntimeException($"ZWCAD COM 未注册: {ProgId}");
-            _app = Activator.CreateInstance(type)
+            _app = CreateComInstance(type)
                 ?? throw new CadRuntimeException("ZWCAD COM 实例创建失败");
             _app.Visible = false;
         }
@@ -60,7 +65,7 @@ public sealed class ZwcadRuntime : ICadRuntime
 
     public RuntimeInfo GetInfo() => Run(() =>
     {
-        if (Type.GetTypeFromProgID(ProgId) == null)
+        if (ProgIdResolver(ProgId) == null)
             return new RuntimeInfo("ZWCAD", "", false);
         string version = EnsureApp().Version;
         return new RuntimeInfo("ZWCAD", version, true);

@@ -26,8 +26,11 @@ public static partial class CommandRouter
         return name;
     }
 
-    /// <summary>纯工厂（不做可用性检查；构造不激活 COM）。</summary>
-    internal static ICadRuntime CreateRuntimeInstance(string name) => name switch
+    /// <summary>
+    /// 纯工厂 seam（不做可用性检查；构造不激活 COM）；Func 化供测试注入假 runtime
+    /// （PR#18 修复波 Important#2：GetInfo 抛后 Dispose 回归钉住），调用语法不变。
+    /// </summary>
+    internal static Func<string, ICadRuntime> CreateRuntimeInstance = name => name switch
     {
         "zwcad" => new CadAgent.Adapters.Zwcad.ZwcadRuntime(),
         "acad" => new CadAgent.Adapters.Acad.AcadRuntime(),
@@ -71,9 +74,10 @@ public static partial class CommandRouter
     private static ICadRuntime? CreateRuntimeIfAvailable(TextWriter stderr)
     {
         var name = ResolveRuntimeName(); // 配置错误硬失败（用户显式选择的厂商不得静默降级）
+        ICadRuntime? rt = null;
         try
         {
-            var rt = CreateRuntimeInstance(name);
+            rt = CreateRuntimeInstance(name);
             var info = rt.GetInfo();
             if (!info.Available)
             {
@@ -85,6 +89,9 @@ public static partial class CommandRouter
         }
         catch (Exception ex)
         {
+            // 激活可能已成功但 GetInfo 抛（Visible/Version COM 失败）：必须释放已构造的 rt，
+            // 否则孤儿厂商进程残留（CUIX 竞态源，违反守卫自身不变量）。
+            rt?.Dispose();
             stderr.WriteLine($"警示: 厂商运行时初始化失败（{ex.Message}），降级 DXF 交付");
             return null;
         }

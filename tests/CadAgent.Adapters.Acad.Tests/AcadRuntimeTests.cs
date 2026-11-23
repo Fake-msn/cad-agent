@@ -84,4 +84,85 @@ public class AcadRuntimeTests : IDisposable
         }
         finally { VendorGuard.ExitWait = originalExit; }
     }
+
+    // ---- PR#18 合并前修复波 Important#1：Close COM 失败包装回归钉住 ----
+    // ExportService 只捕 CadRuntimeException（Restart 重试 + export-failed 审计依赖此类型契约）；
+    // 裸 COMException 逃逸会静默跳过重试与审计。以下测试经 COM 激活 seam 注入假 app/doc，
+    // 钉住包装类型 + 消息 + InnerException，顺带钉住 Close-before-Quit 顺序（CUIX 根因 a）。
+    // 假类型必须 public：dynamic 绑定从适配器程序集发起，internal 成员不可达。
+
+    /// <summary>假文档：Close 可配置抛 COMException（模拟厂商 COM 崩溃）；记录调用序。</summary>
+    public sealed class FakeDoc
+    {
+        private readonly List<string> _calls;
+        private readonly bool _closeThrows;
+        public FakeDoc(List<string> calls, bool closeThrows) { _calls = calls; _closeThrows = closeThrows; }
+        public void Close(bool save)
+        {
+            _calls.Add("Doc.Close");
+            if (_closeThrows) throw new COMException("文档关闭失败 (0x8000FFFF)");
+        }
+    }
+
+    /// <summary>假 Documents 集合：Open 返回假文档。</summary>
+    public sealed class FakeDocuments
+    {
+        private readonly FakeDoc _doc;
+        public FakeDocuments(FakeDoc doc) => _doc = doc;
+        public FakeDoc Open(string path) => _doc;
+    }
+
+    /// <summary>假 app：Visible 可写；Quit 记录调用序（钉住 Close-before-Quit）。</summary>
+    public sealed class FakeApp
+    {
+        private readonly List<string> _calls;
+        private readonly FakeDoc _doc;
+        public FakeApp(List<string> calls, FakeDoc doc) { _calls = calls; _doc = doc; }
+        public bool Visible { get; set; }
+        public FakeDocuments Documents => new(_doc);
+        public void Quit() => _calls.Add("App.Quit");
+    }
+
+    [Fact]
+    public void Close_ComFailure_ThrowsCadRuntimeException()
+    {
+        var calls = new List<string>();
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => new FakeApp(calls, new FakeDoc(calls, closeThrows: true));
+        using var rt = new AcadRuntime();
+        rt.Open("fake.dwg");
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.Close(false));
+        Assert.Contains("Close 失败", ex.Message);
+        var com = Assert.IsType<COMException>(ex.InnerException);
+        Assert.Contains("0x8000FFFF", com.Message);
+        // Close 失败不得清空文档引用：Restart 仍先尝试 Close 再 Quit（保留引用供重试 + 顺序不变量）。
+        rt.Restart();
+        Assert.Equal(new[] { "Doc.Close", "Doc.Close", "App.Quit" }, calls);
+    }
+
+    [Fact]
+    public void Restart_ClosesDocBeforeQuit()
+    {
+        var calls = new List<string>();
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => new FakeApp(calls, new FakeDoc(calls, closeThrows: false));
+        using var rt = new AcadRuntime();
+        rt.Open("fake.dwg");
+        rt.Restart();
+        // 带开文档 Quit 会被判异常终止→下次启动弹 CUIX 修复对话框；顺序不可回退。
+        Assert.Equal(new[] { "Doc.Close", "App.Quit" }, calls);
+    }
+
+    [Fact]
+    public void Dispose_ClosesDocBeforeQuit()
+    {
+        var calls = new List<string>();
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => new FakeApp(calls, new FakeDoc(calls, closeThrows: false));
+        using (var rt = new AcadRuntime())
+        {
+            rt.Open("fake.dwg");
+        }
+        Assert.Equal(new[] { "Doc.Close", "App.Quit" }, calls);
+    }
 }

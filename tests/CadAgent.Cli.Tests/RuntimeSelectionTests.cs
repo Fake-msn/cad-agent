@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
 using CadAgent.Data.Tests;
@@ -14,11 +15,13 @@ public class RuntimeSelectionTests : IDisposable
 {
     private readonly Func<string?> _originalSelector = CommandRouter.RuntimeSelector;
     private readonly Func<ICadRuntime?>? _originalFactory = CommandRouter.RuntimeFactory;
+    private readonly Func<string, ICadRuntime> _originalCreateInstance = CommandRouter.CreateRuntimeInstance;
 
     public void Dispose()
     {
         CommandRouter.RuntimeSelector = _originalSelector;
         CommandRouter.RuntimeFactory = _originalFactory;
+        CommandRouter.CreateRuntimeInstance = _originalCreateInstance;
     }
 
     [Fact]
@@ -101,5 +104,63 @@ public class RuntimeSelectionTests : IDisposable
             File.Delete(drawing);
         }
         // seam 还原由 Dispose 兜底（_originalSelector/_originalFactory）。
+    }
+
+    /// <summary>
+    /// 假 runtime（PR#18 修复波 Important#2）：构造（激活）成功但 GetInfo 抛 COMException
+    /// （模拟 Visible/Version 读取 COM 失败）；跟踪 Dispose 调用。其余成员不应被触达。
+    /// </summary>
+    private sealed class GetInfoThrowsRuntime : ICadRuntime
+    {
+        public bool Disposed { get; private set; }
+        public RuntimeInfo GetInfo() => throw new COMException("Visible/Version 读取失败 (0x8000FFFF)");
+        public void Dispose() => Disposed = true;
+        public void Open(string drawingPath) => throw new NotSupportedException();
+        public void SaveAs(string outputPath) => throw new NotSupportedException();
+        public void Close(bool save) => throw new NotSupportedException();
+        public void Restart() => throw new NotSupportedException();
+        public void AddLine(double x1, double y1, double x2, double y2, string? layer = null) => throw new NotSupportedException();
+        public void AddText(double x, double y, string text, double height, string? layer = null) => throw new NotSupportedException();
+        public void AddCircle(double x, double y, double radius, string? layer = null) => throw new NotSupportedException();
+        public void AddInsert(string blockName, double x, double y, double scale = 1, double rotation = 0, string? layer = null) => throw new NotSupportedException();
+        public void EnsureBlock(string blockName, IReadOnlyList<BlockPrimitive> primitives) => throw new NotSupportedException();
+        public int EntityCount() => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// PR#18 修复波 Important#2 回归钉住：CreateRuntimeIfAvailable 激活成功后 GetInfo 抛，
+    /// catch 必须 Dispose 已构造的 rt（否则孤儿 ZWCAD 进程=CUIX 竞态源，违反守卫自身不变量），
+    /// 且写警示 + 返回 null 走 DXF 降级（审计 export-degraded 佐证）。
+    /// </summary>
+    [Fact]
+    public void Export_GetInfoThrows_DisposesRuntimeAndDegrades()
+    {
+        var fake = new GetInfoThrowsRuntime();
+        CommandRouter.RuntimeSelector = () => "zwcad";
+        CommandRouter.RuntimeFactory = null; // 走生产路径（CreateRuntimeIfAvailable）
+        CommandRouter.CreateRuntimeInstance = _ => fake;
+        string project = Path.Combine(Path.GetTempPath(), $"runtime-getinfo-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(project);
+        string drawing = DxfFixture.CreateTempDxf(DxfFixture.AddSampleLine);
+        try
+        {
+            var outW = new StringWriter();
+            var errW = new StringWriter();
+            int code = CommandRouter.Run(
+                new[] { "export", "--drawing", drawing, "--out", Path.Combine(project, "out.dwg"), "--project", project },
+                outW, errW);
+            Assert.True(fake.Disposed, "GetInfo 抛后 rt 必须被 Dispose（孤儿进程=CUIX 竞态源）");
+            Assert.Contains("厂商运行时初始化失败", errW.ToString());
+            Assert.Equal(0, code); // 降级 DXF 交付成功
+            // 审计 export-degraded 佐证 CreateRuntimeIfAvailable 返回 null（降级路径）。
+            using var audit = new SqliteAuditStore(Path.Combine(project, ".cadagent", "audit.db"));
+            Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "export-degraded");
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(project, true);
+            File.Delete(drawing);
+        }
     }
 }
