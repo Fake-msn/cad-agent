@@ -48,7 +48,10 @@ public sealed class VisionReader
                 if (!e.TryGetProperty("text", out var t) || t.ValueKind != JsonValueKind.String) continue;
                 if (!e.TryGetProperty("region", out var r) || r.ValueKind != JsonValueKind.String) continue;
                 if (!e.TryGetProperty("confidence", out var c) || c.ValueKind != JsonValueKind.Number) continue;
-                list.Add(new VisionClaim(t.GetString()!, r.GetString()!, c.GetDouble()));
+                // R5：1e999 等语法合法但 double 不可表示→TryGetDouble 失败（部分运行时抛 FormatException/返回 ∞）；
+                // 越界 [0,1]（含 ∞）一律与缺字段同通道跳过——模型任意输出不抛、非法置信度不流向种子。
+                if (!c.TryGetDouble(out var conf) || conf < 0 || conf > 1) continue;
+                list.Add(new VisionClaim(t.GetString()!, r.GetString()!, conf));
             }
             return (list, null);
         }
