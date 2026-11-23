@@ -199,7 +199,27 @@ internal static class VisionScanMode
 
         // 6. 遍历/瓦片/provider/reader（密钥仅入 OpenAiClient，reader 不触密钥）
         var walked = BlockWalker.Walk(doc.Doc, doc.Sheets).ToList();
-        var tiles = doc.Sheets.SelectMany(s => SheetTiler.Tiles(s, walked)).ToList();
+        // tile-coverage T2：消费 T1 TilingResult——瓦片展平口径不变（跨幅面按产瓦顺序），
+        // 覆盖率/区域/字高口径聚合披露见下方 stdout 加性字段。
+        var tiling = doc.Sheets.Select(s => SheetTiler.Tiles(s, walked)).ToList();
+        var tiles = tiling.SelectMany(t => t.Tiles).ToList();
+        // tile-coverage T2 披露聚合（全量切瓦口径，先于 --max-tiles 截断——预算截断进一步降低
+        // 实际已读覆盖，tilesTotal/maxTiles 字段另行披露，不假装已读=全覆盖）：
+        // ① coverage=实体数加权（诚实口径）：sum(ContentCoverage_i × inSheet 实体数_i) / sum(inSheet 实体数_i)；
+        //    0 权幅面跳过（无实体无覆盖可言）；全 0 权 → coverage=0。
+        // ② regionW/heightBasis 取首幅非 none 值（多幅异 basis 时取首非 none 披露主口径；
+        //    全 none → regionW=0、heightBasis="none"）。
+        var sheetCounts = walked.Where(w => w.SheetId is not null)
+            .GroupBy(w => w.SheetId!).ToDictionary(g => g.Key, g => g.Count());
+        double weightedCoverage = 0; long weightSum = 0;
+        double regionW = 0; string heightBasis = "none";
+        foreach (var (sheet, t) in doc.Sheets.Zip(tiling))
+        {
+            int sheetCount = sheetCounts.TryGetValue(sheet.SheetId, out int c) ? c : 0;
+            if (sheetCount > 0) { weightedCoverage += t.ContentCoverage * sheetCount; weightSum += sheetCount; }
+            if (heightBasis == "none" && t.HeightBasis != "none") { regionW = t.RegionW; heightBasis = t.HeightBasis; }
+        }
+        double coverage = weightSum == 0 ? 0 : weightedCoverage / weightSum;
         // T4 成本闸：瓦片预算截断（跨幅面按产瓦顺序取前 N）——截断必须披露（stderr+stdout+审计），
         // 未读瓦片/幅面不假装已审查；无预算→全量行为逐字保持。
         int totalTiles = tiles.Count;
@@ -248,6 +268,7 @@ internal static class VisionScanMode
 
         // 10. vision-scan 留痕（扫描不改图：前后哈希一致）+ stdout JSON + exit 0
         // 预算披露（仅 --max-tiles 给定时加性输出 tilesTotal/maxTiles；无预算契约逐字不变）。
+        // tile-coverage T2：两 stdout shape 均加性披露 coverage/regionW/heightBasis（审计口径不变）。
         string hash = doc.ComputeHash();
         var usage = new { promptTokens = read.PromptTokens, completionTokens = read.CompletionTokens };
         object scanPayload = maxTiles is null
@@ -255,8 +276,8 @@ internal static class VisionScanMode
             : new { tiles = rendered.Count, tilesTotal = totalTiles, maxTiles = maxTiles.Value, claims = claimCount, seeded = seededCount, ambiguousCount = distinctAmbiguous.Count, usage };
         Append(audit, op, session, "vision-scan", drawing, scanPayload, hash, hash);
         object stdoutPayload = maxTiles is null
-            ? new { ok = true, level = gate.Level.ToString(), tiles = rendered.Count, claims = claimCount, seeded = seededCount, ambiguous = distinctAmbiguous, usage, parseErrors = read.ParseErrors }
-            : new { ok = true, level = gate.Level.ToString(), tiles = rendered.Count, tilesTotal = totalTiles, maxTiles = maxTiles.Value, claims = claimCount, seeded = seededCount, ambiguous = distinctAmbiguous, usage, parseErrors = read.ParseErrors };
+            ? new { ok = true, level = gate.Level.ToString(), tiles = rendered.Count, claims = claimCount, seeded = seededCount, ambiguous = distinctAmbiguous, usage, parseErrors = read.ParseErrors, coverage, regionW, heightBasis }
+            : new { ok = true, level = gate.Level.ToString(), tiles = rendered.Count, tilesTotal = totalTiles, maxTiles = maxTiles.Value, claims = claimCount, seeded = seededCount, ambiguous = distinctAmbiguous, usage, parseErrors = read.ParseErrors, coverage, regionW, heightBasis };
         stdout.WriteLine(JsonSerializer.Serialize(stdoutPayload, JsonOpts));
         return 0;
     }

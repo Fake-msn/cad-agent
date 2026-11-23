@@ -253,7 +253,8 @@ public class VisionScanModeTests : IDisposable
     // ===== T4：--max-tiles 瓦片预算（真实云端成本控制；截断必须披露，不静默）=====
 
     /// <summary>多瓦夹具：图框 (0,0)-(1000,700) + 小字高文字（Height=2 → regionW≈233/regionH≈146
-    /// 远小于幅面 → overview+6 tiles=7 瓦）+ 设备 Insert（A=深照型灯，GT 佐证面）。</summary>
+    /// 远小于幅面）+ 设备 Insert（A=深照型灯，GT 佐证面）。tile-coverage T1 密度格网口径：
+    /// overview+图签瓦+2 密度格瓦=4 瓦（旧偏移网格 7 瓦口径随 T1 sanctioned 同步）。</summary>
     private static string CreateMultiTileDrawing() => DxfFixture.CreateTempDxf(doc =>
     {
         var frame = new BlockRecord("院标准图框_A0");
@@ -295,18 +296,24 @@ public class VisionScanModeTests : IDisposable
             {
                 var r = doc.RootElement;
                 Assert.Equal(2, r.GetProperty("tiles").GetInt32());
-                Assert.Equal(7, r.GetProperty("tilesTotal").GetInt32()); // 截断披露：预算前总瓦数
+                Assert.Equal(4, r.GetProperty("tilesTotal").GetInt32()); // 截断披露：预算前总瓦数（T1 密度格网口径）
                 Assert.Equal(2, r.GetProperty("maxTiles").GetInt32());
                 Assert.Equal(2 * 100, r.GetProperty("usage").GetProperty("promptTokens").GetInt32());
+                // tile-coverage T2：预算 shape 同样披露 coverage/regionW/heightBasis（加性字段）。
+                // coverage=全量切瓦口径（截断前 TilingResult 聚合，非已读瓦覆盖率）；
+                // 字高单峰 2 → median 口径 regionW=2800×2/24；8 inSheet 实体 5 被覆盖=5/8。
+                Assert.Equal(5.0 / 8, r.GetProperty("coverage").GetDouble(), 6);
+                Assert.Equal(2800 * 2.0 / 24, r.GetProperty("regionW").GetDouble(), 6);
+                Assert.Equal("median", r.GetProperty("heightBasis").GetString());
             }
             Assert.Contains("--max-tiles", errW.ToString()); // 截断不静默（stderr 披露）
-            Assert.Contains("7", errW.ToString());
+            Assert.Contains("4", errW.ToString());
             // 审计 vision-scan payload 同步披露（tilesTotal/maxTiles）
             var scan = AuditRecords().Single(r => r.Entry.Kind == "vision-scan");
             using (var p = JsonDocument.Parse(scan.Entry.ParamsJson))
             {
                 Assert.Equal(2, p.RootElement.GetProperty("tiles").GetInt32());
-                Assert.Equal(7, p.RootElement.GetProperty("tilesTotal").GetInt32());
+                Assert.Equal(4, p.RootElement.GetProperty("tilesTotal").GetInt32());
                 Assert.Equal(2, p.RootElement.GetProperty("maxTiles").GetInt32());
             }
             // llm-call 恰 2 条（每瓦一次，预算外零调用）
@@ -332,15 +339,77 @@ public class VisionScanModeTests : IDisposable
     }
 
     [AvaloniaFact]
-    public void VisionScan_NoMaxTiles_StdoutShapeUnchanged()
+    public void VisionScan_NoMaxTiles_ShapeIncludesCoverage()
     {
-        // 无 --max-tiles → 生产全量行为保持：stdout 不得多出预算字段（T3 契约逐字）
+        // sanctioned 契约演进（tile-coverage T2）：无预算 shape 加性披露 coverage/regionW/heightBasis；
+        // 预算字段仍不得出现（无 --max-tiles → tilesTotal/maxTiles 缺如，T3 预算契约逐字保持）。
+        // 默认夹具字高 30 → 单视口已覆盖整幅（早返）→ 诚实披露 coverage=0/regionW=0/heightBasis="none"。
         InjectCensus();
         var client = new FakeVisionClient(MatchingClaims);
         var (code, stdout, _) = RunWith(client, "--confirm-egress");
         Assert.Equal(0, code);
         Assert.DoesNotContain("tilesTotal", stdout);
         Assert.DoesNotContain("maxTiles", stdout);
+        using var doc = JsonDocument.Parse(stdout);
+        var r = doc.RootElement;
+        Assert.Equal(0, r.GetProperty("coverage").GetDouble());
+        Assert.Equal(0, r.GetProperty("regionW").GetDouble());
+        Assert.Equal("none", r.GetProperty("heightBasis").GetString());
+    }
+
+    // ===== tile-coverage T2：TilingResult 消费 + stdout coverage/regionW/heightBasis 披露 =====
+
+    /// <summary>双峰字高夹具：图框 (0,0)-(1000,700) + 图名文字 Height=5（图框层，锚层）+
+    /// 微字 Height=0.5（DIM 层）——倍率 10≥8 判双峰 → 上峰 5 反算 regionW≈583.33&lt;幅宽
+    /// （单视口不覆盖整幅，必切瓦）；图签瓦+密度格瓦覆盖内容 → coverage&gt;0。
+    /// 设备 Insert（A=深照型灯）保持 GT 佐证面（fake claims 可种子）。</summary>
+    private static string CreateBimodalDrawing() => DxfFixture.CreateTempDxf(doc =>
+    {
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        frameIns.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+        doc.Entities.Add(frameIns);
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 5, Layer = new Layer("图框") });
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(900, 50, 0), Value = "微字标注", Height = 0.5, Layer = new Layer("DIM") });
+        var e = new BlockRecord("E");
+        e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
+        doc.BlockRecords.Add(e);
+        var layer = new Layer("EQUIP-照明");
+        doc.Layers.Add(layer);
+        var ins = new Insert(e) { InsertPoint = new XYZ(100, 100, 0), Layer = layer };
+        ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
+        doc.Entities.Add(ins);
+    });
+
+    [AvaloniaFact]
+    public void VisionScan_StdoutIncludesCoverageAndBasis()
+    {
+        // fake client + 双峰字高夹具 → stdout JSON 含 coverage>0 + heightBasis=="bimodal-upper" + regionW>0
+        string drawing = CreateBimodalDrawing();
+        try
+        {
+            InjectCensus(drawing);
+            var client = new FakeVisionClient(MatchingClaims);
+            var outW = new StringWriter(); var errW = new StringWriter();
+            int code = VisionScanMode.Run(
+                new[] { "--vision-scan", "--drawing", drawing, "--project", _project, "--confirm-egress" },
+                outW, errW, client, FakeProfile());
+
+            Assert.Equal(0, code);
+            using var doc = JsonDocument.Parse(outW.ToString());
+            var r = doc.RootElement;
+            double coverage = r.GetProperty("coverage").GetDouble();
+            Assert.True(coverage > 0 && coverage <= 1);
+            Assert.Equal(8.0 / 9, coverage, 6); // 9 inSheet 实体，8 被≥1 非 overview 瓦覆盖（角点 (1000,700) 无瓦）
+            Assert.Equal("bimodal-upper", r.GetProperty("heightBasis").GetString());
+            Assert.Equal(2800 * 5.0 / 24, r.GetProperty("regionW").GetDouble(), 6); // 上峰字高 5 反算（非微字 0.5）
+        }
+        finally { File.Delete(drawing); }
     }
 
     // ===== R11②：consent 后异常 → 终态失败审计（审计者区分崩溃与完成，§9 缺口闭合）=====
