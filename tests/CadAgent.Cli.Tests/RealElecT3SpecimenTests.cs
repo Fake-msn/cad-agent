@@ -129,6 +129,69 @@ public class RealElecT3SpecimenTests : IDisposable
         Assert.Equal(sourceBefore, File.ReadAllBytes(specimen));
     }
 
+    /// <summary>
+    /// 真实电气 T3 🟢 全闭环实证（tx 面，2026-11-24 用户批准映射后收尾）：
+    /// intake Green → scan → map（用户裁定代表层 DIM_SYMB→Annotation）→ run add-text
+    /// **Green 闸放行不再 run-rejected**（对照建筑 T3 件 Yellow run-rejected）→
+    /// tx-start/tx-commit 审计修改哈希 before≠after → 验链绿 → rollback 哈希复原。
+    /// 实现先行口径（诚实记录）：闸口/映射/事务机制已交付，本测试为真实标本 tx 闭环
+    /// 实证钉住（非驱动新实现）——镜像本类 IntakeGreen 先例。稳健口径不赌精确总数。
+    /// 标本只读：tx 改的是 working 副本不是源 .dwg（副本字节前后一致）。
+    /// </summary>
+    [SkippableFact]
+    public void RealElecT3Specimen_TxClosure_MapRunCommitRollback()
+    {
+        string specimen = CopySpecimen(T3SpecimenRelative);
+        byte[] sourceBefore = File.ReadAllBytes(specimen);
+
+        // Green 准入前提（census 0）+ scan 建叠加层。
+        var (intakeCode, _, _) = Run("intake", specimen);
+        Assert.Equal(0, intakeCode);
+        var (scanCode, _, _) = Run("semantic", "scan", "--drawing", specimen);
+        Assert.Equal(0, scanCode);
+
+        // 用户批准映射（2026-11-24 裁定 34 层之代表层；全量 34 层实战见
+        // outputs/tarch-elec/closure-report.md）——人工确认升级 HumanConfirmed。
+        var (mapCode, _, _) = Run("semantic", "map", "--layer", "DIM_SYMB",
+            "--class", "Annotation", "--drawing", specimen);
+        Assert.Equal(0, mapCode);
+        var overlay = SemanticOverlay.Load(Path.Combine(_project, ".cadagent", "semantic.json"));
+        Assert.Contains(overlay.Annotations, a => a.Provenance == Provenance.HumanConfirmed);
+
+        // Green 闸放行：run 执行 add-text（目标层=已映射 Annotation 层 DIM_SYMB）。
+        string planPath = Path.Combine(_project, "closure-plan.json");
+        File.WriteAllText(planPath, """
+            {"planId":"closure","steps":[{"kind":"add-text","params":{"x":0,"y":0,"text":"闭环实证","height":350,"layer":"DIM_SYMB"}}]}
+            """);
+        var (runCode, runOut, _) = Run("run", planPath, "--drawing", specimen);
+        Assert.Equal(0, runCode);
+        using var runDoc = JsonDocument.Parse(runOut);
+        Assert.True(runDoc.RootElement.GetProperty("ok").GetBoolean());
+        string txId = runDoc.RootElement.GetProperty("txId").GetString()!;
+
+        // 审计：tx-start/tx-commit 留痕 + 修改预期（tx 级 before≠after）+ 无 run-rejected + 验链绿。
+        string dbPath = Path.Combine(_project, ".cadagent", "audit.db");
+        using (var audit = new SqliteAuditStore(dbPath))
+        {
+            var records = audit.ReadAll();
+            Assert.Contains(records, r => r.Entry.Kind == "semantic-map");
+            Assert.DoesNotContain(records, r => r.Entry.Kind == "run-rejected");
+            var start = Assert.Single(records, r => r.Entry.Kind == "tx-start");
+            var commit = Assert.Single(records, r => r.Entry.Kind == "tx-commit");
+            Assert.NotEqual(start.Entry.BeforeHash, commit.Entry.AfterHash);
+            Assert.True(audit.VerifyChain(out _));
+
+            // rollback 可用实证：事务撤回后图纸哈希复原到 tx-start 之前。
+            var (rbCode, _, _) = Run("rollback", txId, "--drawing", specimen);
+            Assert.Equal(0, rbCode);
+            Assert.Equal(start.Entry.BeforeHash, DrawingSession.Load(specimen).ComputeHash());
+            Assert.True(audit.VerifyChain(out _));
+        }
+
+        // 标本只读：副本 .dwg 字节前后一致（tx 改的是 working 副本不是源）。
+        Assert.Equal(sourceBefore, File.ReadAllBytes(specimen));
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
