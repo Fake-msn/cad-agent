@@ -5,7 +5,9 @@ using ACadSharp.Tables;
 using Avalonia.Headless.XUnit;
 using CadAgent.Core;
 using CadAgent.Data;
+using CadAgent.Data.Semantic;
 using CadAgent.Data.Tests;
+using CadAgent.Data.Vision;
 using CSMath;
 
 namespace CadAgent.View.Tests;
@@ -408,6 +410,88 @@ public class VisionScanModeTests : IDisposable
             Assert.Equal(8.0 / 9, coverage, 6); // 9 inSheet 实体，8 被≥1 非 overview 瓦覆盖（角点 (1000,700) 无瓦）
             Assert.Equal("bimodal-upper", r.GetProperty("heightBasis").GetString());
             Assert.Equal(2800 * 5.0 / 24, r.GetProperty("regionW").GetDouble(), 6); // 上峰字高 5 反算（非微字 0.5）
+        }
+        finally { File.Delete(drawing); }
+    }
+
+    // ===== tile-coverage T3：T2 遗留 minor 闭合——多幅面加权聚合 + 首非 none basis 直接钉住 =====
+
+    /// <summary>双幅面夹具（镜像 SheetRegistryTests.TwoSheetDoc 双图框布局 + 本文件设备 Insert）：
+    /// 幅面1 (0..1000) 图名 Height=5（图框层）+ 微字 Height=0.5×3（DIM 层）→ 倍率 10≥8 判双峰
+    /// （bimodal-upper，上峰 5），inSheet 11 实体；幅面2 (2000..3000) 图名 Height=2 单峰
+    /// （median），inSheet 8 实体。两幅权重不等（11 vs 8）、basis 相异、覆盖率相异 →
+    /// 加权平均≠简单平均、首非 none≠任取，聚合公式可判别。</summary>
+    private static string CreateTwoSheetDrawing() => DxfFixture.CreateTempDxf(doc =>
+    {
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        for (int i = 0; i < 2; i++)
+        {
+            var frameIns = new Insert(frame) { InsertPoint = new XYZ(i * 2000, 0, 0) };
+            frameIns.Attributes.Add(new AttributeEntity { Tag = "图号", Value = $"Z-E0{i + 1}" });
+            doc.Entities.Add(frameIns);
+        }
+        var frameLayer = new Layer("图框");
+        var dimLayer = new Layer("DIM");
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 5, Layer = frameLayer });
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(200, 200, 0), Value = "微字甲", Height = 0.5, Layer = dimLayer });
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(400, 300, 0), Value = "微字乙", Height = 0.5, Layer = dimLayer });
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(600, 200, 0), Value = "微字丙", Height = 0.5, Layer = dimLayer });
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(2500, 650, 0), Value = "二层电力平面图", Height = 2, Layer = frameLayer });
+        var e = new BlockRecord("E");
+        e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
+        doc.BlockRecords.Add(e);
+        var layer = new Layer("EQUIP-照明");
+        doc.Layers.Add(layer);
+        foreach (double x in new[] { 100.0, 2100.0 })
+        {
+            var ins = new Insert(e) { InsertPoint = new XYZ(x, 100, 0), Layer = layer };
+            ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
+            doc.Entities.Add(ins);
+        }
+    });
+
+    [AvaloniaFact]
+    public void VisionScan_TwoSheets_WeightedCoverage_FirstNonNoneBasis()
+    {
+        // T2 聚合路径直接钉住（fake client 不触网）：coverage=实体数加权平均（非简单平均），
+        // regionW/heightBasis=首幅非 none 值（幅面1 bimodal-upper 先于幅面2 median）。
+        // 期望值独立重算：逐幅直调 SheetTiler.Tiles + walked 实体数加权（钉聚合公式，
+        // 不硬编码几何脆值；T1/T2 实现先行，本测试钉住非驱动）。
+        string drawing = CreateTwoSheetDrawing();
+        try
+        {
+            var client = new FakeVisionClient(MatchingClaims);
+            var outW = new StringWriter(); var errW = new StringWriter();
+            int code = VisionScanMode.Run(
+                new[] { "--vision-scan", "--drawing", drawing, "--project", _project, "--confirm-egress" },
+                outW, errW, client, FakeProfile());
+            Assert.Equal(0, code);
+
+            var session = DrawingSession.Load(drawing);
+            Assert.Equal(2, session.Sheets.Count);
+            var walked = BlockWalker.Walk(session.Doc, session.Sheets).ToList();
+            var tilings = session.Sheets.Select(s => SheetTiler.Tiles(s, walked)).ToList();
+            var counts = session.Sheets.Select(s => walked.Count(w => w.SheetId == s.SheetId)).ToList();
+            Assert.Equal(11, counts[0]); // 权重可判别：11 vs 8（属性不 walk，T2 探针口径）
+            Assert.Equal(8, counts[1]);
+            Assert.Equal("bimodal-upper", tilings[0].HeightBasis);
+            Assert.Equal("median", tilings[1].HeightBasis); // 两幅 basis 相异→首非 none 可判别
+            Assert.True(tilings[0].ContentCoverage > 0 && tilings[1].ContentCoverage > 0);
+            double weighted = (tilings[0].ContentCoverage * counts[0] + tilings[1].ContentCoverage * counts[1])
+                / (counts[0] + counts[1]);
+            double simple = (tilings[0].ContentCoverage + tilings[1].ContentCoverage) / 2;
+            Assert.True(Math.Abs(weighted - simple) > 1e-9, "夹具须使加权≠简单平均（权重可判别）");
+
+            using var doc = JsonDocument.Parse(outW.ToString());
+            var r = doc.RootElement;
+            Assert.Equal(weighted, r.GetProperty("coverage").GetDouble(), 6); // 实体数加权聚合
+            Assert.Equal("bimodal-upper", r.GetProperty("heightBasis").GetString()); // 首非 none=幅面1
+            Assert.Equal(2800 * 5.0 / 24, r.GetProperty("regionW").GetDouble(), 6); // 首非 none 幅面区域宽
         }
         finally { File.Delete(drawing); }
     }

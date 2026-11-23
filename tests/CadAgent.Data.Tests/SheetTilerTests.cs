@@ -337,6 +337,56 @@ public class SheetTilerTests
             && t.Rect.MinY <= 35000 && t.Rect.MaxY >= 35000);
     }
 
+    // ===== T3：真实标本覆盖率实证（skip-gated；T1 实现先行、本测试实证钉住非驱动）=====
+
+    /// <summary>仓库根（测试输出目录向上找 CadAgent.sln；镜像 RealVisionScanE2ETests 口径）。</summary>
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CadAgent.sln")))
+            dir = dir.Parent;
+        Assert.NotNull(dir);
+        return dir!.FullName;
+    }
+
+    [SkippableFact]
+    public void RealSpecimen_TileCoverage_ContentCovered()
+    {
+        // 1#配套用房0928（12 幅面）：before 基线 coverage≈0.003（6 瓦×0.27% 幅宽，
+        // outputs/api-probe/tile-coverage-out.txt 实证 5/6 瓦空）→ T1 修复后首幅
+        // ContentCoverage>0.5 且空瓦（内容实体=0；内容=非锚层实体，镜像探针口径）数≤1。
+        // 标本只读：副本落临时目录（working/sidecar 全在副本侧物化），源目录零触碰。
+        string specimenSrc = Path.Combine(RepoRoot(), "outputs", "tarch-native2", "1#配套用房0928.dwg");
+        Skip.If(!File.Exists(specimenSrc), "真实标本不在本机（仓库不携带），跳过");
+        string tempDir = Path.Combine(Path.GetTempPath(), $"tiler-real-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            string specimen = Path.Combine(tempDir, Path.GetFileName(specimenSrc));
+            File.Copy(specimenSrc, specimen);
+            byte[] before = File.ReadAllBytes(specimen);
+            var session = DrawingSession.Load(specimen); // 首载物化 working 到临时目录（源 .dwg 永不写）
+            Assert.Equal(12, session.Sheets.Count); // 真实标本 12 幅面（vision-wiring 实战钉住）
+            var walked = BlockWalker.Walk(session.Doc, session.Sheets).ToList();
+            var sheet = session.Sheets[0];
+
+            var result = SheetTiler.Tiles(sheet, walked);
+
+            Assert.True(result.ContentCoverage > 0.5,
+                $"首幅覆盖率 {result.ContentCoverage:F4} 应 >0.5（before 基线≈0.003）");
+            var inSheet = walked.Where(w => w.SheetId == sheet.SheetId).ToList();
+            // 空瓦 = 内容实体（非锚层：说明/图框/图名/符号/TITLE）为 0 的非 overview 瓦
+            var anchorKeywords = new[] { "说明", "图框", "图名", "符号", "TITLE" };
+            int emptyTiles = result.Tiles.Skip(1).Count(t =>
+                !inSheet.Any(w => w.WorldX >= t.Rect.MinX && w.WorldX <= t.Rect.MaxX
+                    && w.WorldY >= t.Rect.MinY && w.WorldY <= t.Rect.MaxY
+                    && !anchorKeywords.Any(k => (w.Entity.Layer?.Name ?? "").Contains(k, StringComparison.OrdinalIgnoreCase))));
+            Assert.True(emptyTiles <= 1, $"空瓦数 {emptyTiles} 应 ≤1（before 5/6 瓦空）");
+            Assert.Equal(before, File.ReadAllBytes(specimen)); // 副本只读（切瓦零变更）
+        }
+        finally { try { Directory.Delete(tempDir, true); } catch (IOException) { } }
+    }
+
     [Fact]
     public void Tiles_EqualScore_TieBreak_CxThenCyAscending()
     {
