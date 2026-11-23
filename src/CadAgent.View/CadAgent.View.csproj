@@ -12,6 +12,8 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.3.2" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.2" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.2" />
+    <!-- 视觉接线 T2：RenderSnapshotProvider 生产 headless 入口（离屏 Skia PNG）平台初始化 -->
+    <PackageReference Include="Avalonia.Headless" Version="11.3.2" />
   </ItemGroup>
 
   <ItemGroup>
