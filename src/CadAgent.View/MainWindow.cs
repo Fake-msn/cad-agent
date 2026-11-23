@@ -1942,7 +1942,13 @@ public sealed class MainWindow : Window
     /// 返回 false=写入失败（错误已入行内通道，调用方中止填充——不崩 UI）。</summary>
     private bool TryAppendRuleAdoptedAudit(List<IssueEntry> adopted)
     {
-        if (_writeAudit is null || _auditIdentity is null) return true; // 加载失败短路分支不可达（防御）
+        if (_writeAudit is null || _auditIdentity is null)
+        {
+            // 防御方向=失败口径：加载失败短路当前不可达，但未来重构若使其可达，
+            // 必须中止填充并入行内错误——绝不静默跳过审计继续填充（审计旁路）。
+            SetPlanError("采纳审计不可用：写审计或身份未加载");
+            return false;
+        }
         try
         {
             OperatorIdentity op = _auditIdentity.Current;

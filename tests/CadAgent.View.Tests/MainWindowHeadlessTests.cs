@@ -678,7 +678,7 @@ public class MainWindowHeadlessTests
         Assert.Equal(expected, window.PlanIntentInput!.Text);
         Assert.Contains($"R-50001-5.0.2 [Mandatory]: {mandatory.Suggestion}", window.PlanIntentInput.Text);
         Assert.Contains($"R-50001-13.0.1 [Recommended]: {recommended.Suggestion}", window.PlanIntentInput.Text);
-        Assert.Equal(2, window.PlanIntentInput.Text!.Split('\n').Length);
+        Assert.Equal(2, window.PlanIntentInput!.Text!.Split('\n').Length);
     }
 
     [AvaloniaFact]
@@ -770,6 +770,26 @@ public class MainWindowHeadlessTests
         ClickFillIntent(f.Window);
         Assert.Equal(2, f.Audit.ReadAll().Count(r => r.Entry.Kind == "rule-adopted"));
         Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_AuditWriteFails_AbortsFillWithInlineError()
+    {
+        // 审计写失败路径（严格中止口径）：刷新后清连接池并把 audit.db 换成同名目录
+        // → Append 开库失败抛 SqliteException → 行内错误 + 意图框不变 + 不崩 UI。
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        window.PlanIntentInput!.Text = "既有意图哨兵"; // 钉住"不填充"：失败后哨兵须逐字保留
+        string auditDbPath = Path.Combine(f.ProjectDir, ".cadagent", "audit.db");
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); // 连接池持文件句柄，Windows 下删库前须清池
+        File.Delete(auditDbPath);
+        Directory.CreateDirectory(auditDbPath); // 目录占位 → SQLite CANTOPEN（非 BUSY/LOCKED 重试路径）
+        window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1").IsChecked = true;
+        ClickFillIntent(window); // 异常吞入行内通道，不崩 UI
+        Assert.True(window.PlanError!.IsVisible);
+        Assert.Contains("采纳审计写入失败", window.PlanError.Text);
+        Assert.Equal("既有意图哨兵", window.PlanIntentInput.Text); // 严格中止：审计先行无旁路
     }
 
     [AvaloniaFact]
