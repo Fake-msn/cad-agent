@@ -222,4 +222,94 @@ public class BlockSymbolMatcherTests : IDisposable
         Assert.Empty(r.AutoSeeds); Assert.Empty(r.Suggestions); Assert.Empty(r.Ambiguous);
         Assert.Equal(0, r.SymbolsLoaded);
     }
+
+    // ---- BF-T3 顺带补 T2 遗留测试缺口（审查建议，sanctioned）----
+
+    [Fact]
+    public void ExactClone_EvidenceCarriesSymbolNameSuffix()
+    {
+        // evidence 全文钉住：前缀 + 空格 + 符号名（T4 map-block 与人工审查都消费该后缀）。
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var overlay = new SemanticOverlay();
+        Run(doc, overlay);
+        var seeded = overlay.Annotations.Where(a => a.Provenance == Provenance.GeometryInference).ToList();
+        Assert.Equal(4, seeded.Count);
+        Assert.All(seeded, a => Assert.Equal("几何指纹精确匹配: 测试符号", a.Evidence));
+    }
+
+    [Fact]
+    public void ExactClone_SeedsCarrySheetId_WhenFramePresent()
+    {
+        // 幅面夹具（镜像 SheetTilerTests.TilerSetup）：1000×700 图框 → 幅面非 null；
+        // 符号块实例落框内 → 种子 SheetId 与幅面一致（幅面作用域闸口消费）。
+        var doc = new CadDocument();
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        doc.Entities.Add(new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) });
+        var br = new BlockRecord("符号块");
+        SymbolGeometry(br);
+        doc.BlockRecords.Add(br);
+        for (int i = 0; i < 4; i++)
+            doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(100 + i * 100, 100, 0) });
+        var sheets = SheetRegistryBuilder.Build(doc);
+        var sheet = Assert.Single(sheets);
+        Assert.NotNull(sheet.SheetId);
+        var walked = BlockWalker.Walk(doc, sheets).ToList();
+        var overlay = new SemanticOverlay();
+        var r = BlockSymbolMatcher.MatchAndSeed(doc, walked, overlay, new[] { SkillLoader.LoadDirectory(_pkg) });
+        Assert.Single(r.AutoSeeds);
+        var seeded = overlay.Annotations.Where(a => a.Provenance == Provenance.GeometryInference
+            && a.Evidence.StartsWith("几何指纹精确匹配:")).ToList();
+        Assert.Equal(4, seeded.Count);
+        Assert.All(seeded, a => Assert.Equal(sheet.SheetId, a.SheetId));
+    }
+
+    [Fact]
+    public void MultiCandidate_SuggestionsSortedByDistanceAscending()
+    {
+        // 第二符号线端点 14（far.dxf）：块端点 12 → d(远)≈0.047 < d(测)≈0.065，
+        // yaml 序测试符号在前——升序披露必须远符号居首（钉住排序键=d 而非包序/yaml 序）。
+        var far = new CadDocument();
+        far.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(14, 0, 0) });
+        far.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "far.dxf")))
+            DxfWriter.Write(fs, far);
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n  - { name: 远符号, file: far.dxf, class: Device, description: 远 }\n");
+        var doc = DocWithBlock("近似块", br =>
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(12, 0, 0) });
+            br.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        });
+        var r = Run(doc);
+        Assert.Empty(r.AutoSeeds);
+        var s = Assert.Single(r.Suggestions);
+        Assert.Equal(2, s.Candidates.Count);
+        Assert.Equal("远符号", s.Candidates[0].SymbolName);
+        Assert.Equal("测试符号", s.Candidates[1].SymbolName);
+        Assert.True(s.Candidates[0].Distance < s.Candidates[1].Distance);
+        Assert.True(s.Candidates[0].Confidence > s.Candidates[1].Confidence);
+    }
+
+    [Fact]
+    public void MinInstancesBoundary_TwoNotAmbiguous_ThreeAmbiguous()
+    {
+        // minInstances 默认 3 的边界钉住：无匹配块 2 实例不歧义 / 3 实例歧义。
+        static void Triangle(BlockRecord br)
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+        }
+        var two = Run(DocWithBlock("边界块", Triangle, inserts: 2));
+        Assert.Empty(two.Ambiguous);
+        var three = Run(DocWithBlock("边界块", Triangle, inserts: 3));
+        var a = Assert.Single(three.Ambiguous);
+        Assert.Equal("无匹配", a.Reason);
+        Assert.Equal(3, a.Instances);
+    }
 }

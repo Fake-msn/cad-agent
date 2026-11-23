@@ -605,10 +605,30 @@ public static partial class CommandRouter
     /// ViewLaunch 先例）；无 --vision 的 legacy 在进程扫描逐字不变。
     /// R9（T4 顺带修）：--vision 与 --skill 并存 → 用法拒绝 exit 1——relay 不转发 --skill
     /// （View headless 入口无别名通道），静默丢弃=诚实缺口；拒绝先于一切副作用（check --skill 先例）。
+    /// BF-T3（块级纠偏切片，spec §13.3）：--skill 包符号库→Scan symbolPackages 通道；
+    /// stdout 加性四键恒在 blockAutoSeeded/blockSuggestions/blockAmbiguous(+guidance)/symbolsSkipped
+    /// （无包→零/空；旧键 version/annotations/ambiguous/sheets 逐字不变）；审计 params 加性
+    /// blockAutoSeeded/blockSuggestionCount/blockAmbiguousCount/symbolsSkipped。
+    /// --min-block-instances 正整数旗标（镜像 --max-tiles 先例）：非法值→stderr + exit 1，
+    /// 先于一切副作用（含 --vision relay——新旗标无 legacy 行为可破）。
     /// </summary>
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
+        // BF-T3：--min-block-instances 用法解析先于一切副作用（不建 .cadagent/审计——
+        // --max-tiles 正整数先例；置于 --vision relay 之前，非法值任何路径都拒绝）。
+        int minBlockInstances = 3;
+        string? minRaw = GetOption(args, "--min-block-instances");
+        if (minRaw is not null)
+        {
+            if (!int.TryParse(minRaw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out int n) || n < 1)
+            {
+                stderr.WriteLine($"用法: --min-block-instances 须为正整数（收到: {minRaw}）");
+                return 1;
+            }
+            minBlockInstances = n;
+        }
         // --vision relay 先于一切在进程副作用（闸口/出境/审计全在 View 进程内编排）。
         if (args.Contains("--vision"))
         {
@@ -622,6 +642,8 @@ public static partial class CommandRouter
             return VisionScanRelay(args, drawingPath, agentDir, stdout, stderr);
         }
         var ruleSet = LoadRuleSet(args, stderr);
+        // BF-T3：符号库包列表（与 LoadRuleSet 同一 --skill 加载路径；包非法先于副作用拒绝）。
+        var packages = LoadSkillPackages(args);
         string overlayPath = SemanticOverlayPath(agentDir);
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
@@ -640,10 +662,14 @@ public static partial class CommandRouter
         }
         var existing = LoadOrReject(() => SemanticOverlay.Load(overlayPath), overlayPath, session, audit, op, stderr);
         if (existing is null) return 1;
-        var result = SemanticScanner.Scan(drawing, existing, ruleSet.MergedAliases);
+        var result = SemanticScanner.Scan(drawing, existing, ruleSet.MergedAliases,
+            symbolPackages: packages, minBlockInstances: minBlockInstances);
         result.Overlay.Save(overlayPath);
         // 扫描不改图纸：前后哈希一致（沿用 intake 的诚实留痕）。
         string hash = drawing.ComputeHash();
+        // BF-T3 加性披露口径（审计与 stdout 共用）：无包→BlockMatch null→零/空恒在。
+        int blockAutoSeeded = result.BlockMatch?.AutoSeeds.Sum(s => s.Handles.Count) ?? 0;
+        int symbolsSkipped = result.BlockMatch?.SymbolsSkipped ?? 0;
         audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             session, "semantic", "semantic-scan", drawingPath,
             JsonSerializer.Serialize(new
@@ -654,7 +680,12 @@ public static partial class CommandRouter
                 // 规则包溯源（最终审查裁定 Important #2，加性）：别名命中改变 overlay，
                 // 审计员须能分辨哪个 skill 版本产生——与 check/run-regression 同口径
                 // （无 --skill→builtin 常量 "gb50001-2017.r1"）。
-                rulePackVersion = ruleSet.RulePackVersion
+                rulePackVersion = ruleSet.RulePackVersion,
+                // BF-T3 审计加性（spec §13.3）：块级信号计数——自动种子标注数/建议数/歧义数/跳过符号数。
+                blockAutoSeeded,
+                blockSuggestionCount = result.BlockMatch?.Suggestions.Count ?? 0,
+                blockAmbiguousCount = result.BlockMatch?.Ambiguous.Count ?? 0,
+                symbolsSkipped
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -665,7 +696,18 @@ public static partial class CommandRouter
             // T7 加性：幅面摘要数组（sheetId=图框 Insert 句柄/布局 "L"+视口句柄；
             // 无图框 legacy 图纸=单默认幅面 S0）。agent 计划 params.sheetId 的取值依据；
             // 既有 version/annotations/ambiguous 契约不变。
-            sheets = drawing.Sheets.Select(s => new { sheetId = s.SheetId, name = s.Name, number = s.Number })
+            sheets = drawing.Sheets.Select(s => new { sheetId = s.SheetId, name = s.Name, number = s.Number }),
+            // BF-T3 stdout 加性四键恒在（spec §13.3）：块级自动种子标注数/近似建议/高频歧义/跳过符号数。
+            // guidance 仅"代理图形不可读"项给 T3 转换指引（披露侧拼接，不入 record）；其余 null。
+            blockAutoSeeded,
+            blockSuggestions = (result.BlockMatch?.Suggestions ?? Array.Empty<BlockSuggestion>())
+                .Select(s => new { block = s.BlockName, instances = s.Instances,
+                    candidates = s.Candidates.Select(c => new { symbol = c.SymbolName, distance = c.Distance, confidence = c.Confidence }) }),
+            blockAmbiguous = (result.BlockMatch?.Ambiguous ?? Array.Empty<BlockAmbiguous>())
+                .Select(a => new { block = a.BlockName, instances = a.Instances, reason = a.Reason,
+                    sampleHandles = a.SampleHandles,
+                    guidance = a.Reason == "代理图形不可读" ? "建议天正 T3 转换后重扫" : null }),
+            symbolsSkipped
         }, SemanticJsonOpts));
         return 0;
     }

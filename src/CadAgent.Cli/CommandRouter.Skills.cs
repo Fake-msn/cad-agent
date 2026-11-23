@@ -379,6 +379,14 @@ public static partial class CommandRouter
     }
 
     /// <summary>
+    /// BF-T3：--skill 包列表（可重复，按出现序）→符号库索引供块级指纹匹配消费。
+    /// 与 LoadRuleSet 同一加载路径（SkillLoader.LoadDirectory）；包非法→异常由 Run 兜底
+    /// stderr + exit 1（用法错误先于任何副作用，LoadRuleSet 先例）。无 --skill→空列表。
+    /// </summary>
+    internal static IReadOnlyList<SkillPackage> LoadSkillPackages(string[] args) =>
+        GetOptionValues(args, "--skill").Select(SkillLoader.LoadDirectory).ToList();
+
+    /// <summary>
     /// 结构化跳过 stderr 通道（2b-ii-a T5，check/run-regression 共用）：
     /// "跳过: [{Category}] {RuleId}: {Message}"——保留旧 "跳过: " 前缀与规则 Id
     /// （既有测试子串兼容）；Message 保留旧 reason 文案子串。

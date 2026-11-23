@@ -9,9 +9,11 @@ namespace CadAgent.Data.Semantic;
 /// the convention library, a human mapping nor a skill alias can classify.
 /// T6：末尾可选 VisionAmbiguous（视觉声称歧义清单）——legacy 两参构造默认空列表，
 /// 既有调用点/消费端全兼容（null 归一为空，消费端无需判空）。
+/// BF-T3：末尾可选 BlockMatch（块级三级匹配披露，spec §13.3）——无符号包时 null，
+/// 旧构造/消费端全兼容（加性字段，不改既有口径）。
 /// </summary>
 public sealed record ScanResult(SemanticOverlay Overlay, IReadOnlyList<AmbiguousLayer> Ambiguous,
-    IReadOnlyList<VisionAmbiguous>? VisionAmbiguous = null)
+    IReadOnlyList<VisionAmbiguous>? VisionAmbiguous = null, BlockMatchResult? BlockMatch = null)
 {
     // 位置 record 允许手写属性接管合成：构造参数喂入，属性把 null 归一为空清单。
     public IReadOnlyList<VisionAmbiguous> VisionAmbiguous { get; init; } =
@@ -36,7 +38,8 @@ public static class SemanticScanner
         Scan(session, existing, skillAliases: null);
 
     public static ScanResult Scan(DrawingSession session, SemanticOverlay? existing = null,
-        IReadOnlyDictionary<string, SemanticClass>? skillAliases = null, VisionReadResult? vision = null)
+        IReadOnlyDictionary<string, SemanticClass>? skillAliases = null, VisionReadResult? vision = null,
+        IReadOnlyList<SkillPackage>? symbolPackages = null, int minBlockInstances = 3)
     {
         var overlay = existing ?? new SemanticOverlay();
 
@@ -45,6 +48,12 @@ public static class SemanticScanner
         // T3：块属性种子先于图层推断（NativeObject 0.95 确定性原生数据优先；
         // Upsert 键=handle+provenance，与 LayerInference 0.8 共存，闸口 Any(conf≥min) 取高置信）
         BlockAttributeSeeder.SeedWalked(walked, overlay);
+        // BF-T3：块级几何指纹三级匹配（spec §13.3）——精确种子 GeometryInference 0.9
+        // 先于图层推断落 overlay（Upsert 取高置信，0.8 不降级）；建议/歧义只披露不落。
+        // 无包/空包→null（不动 overlay，防误清既有种子）；旧调用逐字兼容（末位可选参）。
+        BlockMatchResult? blockMatch = null;
+        if (symbolPackages is { Count: > 0 })
+            blockMatch = BlockSymbolMatcher.MatchAndSeed(session.Doc, walked, overlay, symbolPackages, minBlockInstances);
         LayerInference.AnnotateWalked(walked, overlay, skillAliases);
         WallPairDetector.DetectWalked(walked, overlay);
         AxisDetector.DetectWalked(walked, overlay);
@@ -79,7 +88,7 @@ public static class SemanticScanner
         }
 
         return new ScanResult(overlay, CollectAmbiguousLayers(walked, overlay, skillAliases),
-            visionAmbiguous.Distinct().ToList());
+            visionAmbiguous.Distinct().ToList(), blockMatch);
     }
 
     /// <summary>
