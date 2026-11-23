@@ -782,6 +782,75 @@ public class IssuesViewModelTests
         Assert.False(vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2").IsChecked);
     }
 
+    /// <summary>标高规则 mode 省略的最小 skill 包（params 空 → 全查：小数位+符号，I1 碰撞夹具）。</summary>
+    private static string MakeElevationSkillDir()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cadagent-skill-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(dir, "rules"));
+        File.WriteAllText(Path.Combine(dir, "skill.yaml"),
+            "name: elevation-skill\nversion: \"1.0.0\"\ndiscipline: architecture\ndrawingType: any\n");
+        File.WriteAllText(Path.Combine(dir, "rules", "r1.yaml"), """
+            id: R-TEST-ELEV
+            source: { standard: "院标", clause: "1.0", excerpt: "标高注写格式测试条款", verification: source-text }
+            modal: "应"
+            force: recommended
+            severity: high
+            scope: { discipline: any, drawingType: any }
+            check: { type: elevation-format, params: {} }
+            suggestion: "按 11.8.4/11.8.5 修正标高注写"
+            """);
+        return dir;
+    }
+
+    [Fact]
+    public async Task Refresh_SameRuleSameTargets_DifferentMessage_CheckKeysIndependent()
+    {
+        // I1（合并前 ISTQB fixwave2）：skill 标高规则 mode 省略 → 同一 "+3.50" 文本产
+        // 两条 issue（小数位 2 位 + 正数带 "+"），同 RuleId 同 Targets 异 Message。
+        // 旧 key=RuleId|Targets 碰撞：勾其一刷新后两条全勾 / 取消其一两条全丢。
+        // 修复后 key 加 Message 区分因子，两条勾选态互不牵连。
+        string skillDir = MakeElevationSkillDir();
+        string dxf = DxfFixture.CreateTempDxf(doc =>
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(10, 10, 0), Value = "+3.50", Height = 3 }));
+        string proj = Path.Combine(Path.GetTempPath(), "cadagent-elev-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(proj, ".cadagent"));
+        try
+        {
+            var session = DrawingSession.Load(dxf);
+            string handle = session.Doc.Entities.OfType<TextEntity>().Single().Handle.ToString();
+            var overlay = new SemanticOverlay();
+            overlay.UpsertAnnotation(new SemanticAnnotation(handle, SemanticClass.Annotation,
+                Provenance.HumanConfirmed, 0.9, "测试标注"));
+            overlay.Save(Path.Combine(proj, ".cadagent", "semantic.json"));
+            var vm = new IssuesViewModel(session, proj, new[] { skillDir });
+            await vm.RefreshAsync();
+            Assert.Null(vm.ErrorMessage);
+            List<IssueEntry> two = vm.Issues.Where(i => i.RuleId == "R-TEST-ELEV").ToList();
+            Assert.Equal(2, two.Count);
+            Assert.Equal(two[0].Targets, two[1].Targets); // 同目标句柄
+            Assert.NotEqual(two[0].Message, two[1].Message); // 异消息（小数位 vs 符号）
+
+            // 勾其一（符号条）→ 刷新 → 仅该条保持勾选（小数位条不混入）。
+            two.Single(i => i.Message.Contains("正数")).IsChecked = true;
+            await vm.RefreshAsync();
+            Assert.True(vm.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("正数")).IsChecked);
+            Assert.False(vm.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("小数位")).IsChecked);
+
+            // 两条皆勾后取消其一 → 刷新 → 另一条仍在（不漏记）。
+            vm.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("小数位")).IsChecked = true;
+            vm.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("正数")).IsChecked = false;
+            await vm.RefreshAsync();
+            Assert.True(vm.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("小数位")).IsChecked);
+            Assert.False(vm.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("正数")).IsChecked);
+        }
+        finally
+        {
+            Directory.Delete(proj, true);
+            Directory.Delete(skillDir, true);
+            File.Delete(dxf);
+        }
+    }
+
     [Fact]
     public async Task Refresh_RoomNameRule_Evaluated_ParityWithCli()
     {

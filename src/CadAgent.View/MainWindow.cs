@@ -1781,6 +1781,9 @@ public sealed class MainWindow : Window
         _editBusy = busy; // T10：结构性硬闸（画布点击/工具栏事件均检查）
         if (EditToolbar is not null) EditToolbar.IsEnabled = !busy;
         if (DiffToggle is not null) DiffToggle.IsEnabled = !busy;
+        // I2（fixwave2）：编辑在途时填充按钮同步禁用（镜像 EditToolbar/DiffToggle；
+        // 恢复时仍须让位于 diff 在途/计划编排 busy——与 UpdatePlanPanel 口径一致）。
+        if (FillIntentButton is not null) FillIntentButton.IsEnabled = !busy && !_diffBusy && !(PlanPreview?.IsBusy ?? false);
     }
 
     /// <summary>T5：幅面下拉选择 → 刷新画布为该幅面图元（用户交互触发，重新 Fit 到新内容）。
@@ -1905,10 +1908,15 @@ public sealed class MainWindow : Window
     /// 仅 Recommended——Mandatory 是义务非采纳；每次填充各留一条，append-only 不去重）。
     /// 零勾选 → 保持既有 mandatory 自动填充兜底（旧格式 "{RuleId}: {Suggestion}"
     /// 逐字不变）+ 状态栏提示；无 mandatory 项 → 行内引导（先 Refresh 或手动输入）。
-    /// 忽略=未勾选正常决策（spec §6.2），不留痕。</summary>
+    /// 忽略=未勾选正常决策（spec §6.2），不留痕。
+    /// I2（合并前 ISTQB fixwave2）：_editBusy/_diffBusy/IsBusy 结构闸（镜像
+    /// OnGeneratePlanClick）——执行在途时 RaiseEvent 可绕过按钮禁用态，而
+    /// TryAppendRuleAdoptedAudit 的 ComputeHash 是无会话闸读点，busy 一律拒绝
+    /// （不填充不审计），防 torn read。</summary>
     private void OnFillIntentFromIssues(object? sender, RoutedEventArgs e)
     {
         if (PlanPreview is null || PlanIntentInput is null) return;
+        if (_editBusy || _diffBusy || PlanPreview.IsBusy) return; // 结构硬闸：在途一律忽略
         SetFillIntentNote(""); // 新填充动作先清旧兜底提示（镜像 SetEditWarning 口径）
         List<IssueEntry> all = Issues?.Issues.ToList() ?? new List<IssueEntry>();
         List<IssueEntry> checkedIssues = all.Where(i => i.IsChecked).ToList();
@@ -1939,6 +1947,8 @@ public sealed class MainWindow : Window
     /// （镜像 rule-adjudicated 先例）、Target=图纸路径、Session="view" 常量口径
     /// （镜像 IssuesVM check-run）；params={adopted:[{ruleId,clause,standard}],count}；
     /// 填充不改图纸 → BeforeHash==AfterHash==drawing.ComputeHash()。
+    /// I2（fixwave2）：ComputeHash 为无会话闸读点，由 OnFillIntentFromIssues 首行
+    /// busy 结构闸（_editBusy/_diffBusy/IsBusy）保护——在途编辑/编排期间不可达。
     /// 返回 false=写入失败（错误已入行内通道，调用方中止填充——不崩 UI）。</summary>
     private bool TryAppendRuleAdoptedAudit(List<IssueEntry> adopted)
     {
@@ -2012,6 +2022,9 @@ public sealed class MainWindow : Window
         if (EgressConsentSection is not null) EgressConsentSection.IsVisible = PlanPreview.IsEgressConsentVisible;
         if (EgressPromptText is not null) EgressPromptText.Text = PlanPreview.EgressPrompt;
         if (GeneratePlanButton is not null) GeneratePlanButton.IsEnabled = !PlanPreview.IsBusy;
+        // I2（fixwave2）：填充按钮 busy 同步禁用（镜像 GeneratePlanButton；结构闸在
+        // OnFillIntentFromIssues 首行，IsEnabled 只是视觉提示）。
+        if (FillIntentButton is not null) FillIntentButton.IsEnabled = !(_editBusy || _diffBusy || PlanPreview.IsBusy);
         // 最终审查顺手修（T10）：确认/拒绝按钮仅在 PreviewReady 处理后启用（_planConfirmPending），
         // 点击应答后立即禁用至下一轮 PreviewReady——防纠正循环确认到尚未显示的计划。
         if (ConfirmPlanButton is not null) ConfirmPlanButton.IsEnabled = _planConfirmPending;

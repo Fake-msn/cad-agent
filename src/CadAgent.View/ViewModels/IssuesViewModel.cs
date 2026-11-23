@@ -107,7 +107,7 @@ public sealed class IssuesViewModel
     /// <summary>in-flight 硬闸（视图闭环 T6）：并发刷新第二次立即返回——结构性守卫，不依赖按钮 IsEnabled UI 态。</summary>
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
-    /// <summary>§4.1④ 勾选 key 集（会话级，不持久化）：key=RuleId+"|"+Targets 逗号连接。
+    /// <summary>§4.1④ 勾选 key 集（会话级，不持久化）：key=RuleId+"|"+Targets 逗号连接+"|"+Message。
     /// Refresh 重建 IssueEntry 时按 key 恢复 IsChecked（跨刷新保持）；勾选变更经
     /// PropertyChanged 订阅同步增删（取消勾选即移除——忽略是正常决策，不留痕）。</summary>
     private readonly HashSet<string> _checkedKeys = new();
@@ -232,8 +232,14 @@ public sealed class IssuesViewModel
         _canvas.CenterOn(issue.Targets);
     }
 
-    /// <summary>§4.1④ 勾选 key：RuleId+"|"+Targets 逗号连接（同规则不同目标=不同问题）。</summary>
-    private static string CheckKey(IssueEntry entry) => entry.RuleId + "|" + string.Join(",", entry.Targets);
+    /// <summary>§4.1④ 勾选 key：RuleId+"|"+Targets 逗号连接+"|"+Message（同规则不同目标=不同问题）。
+    /// I1（合并前 ISTQB fixwave2）：Message 为区分因子——标高规则 mode 省略时同一文本
+    /// 产两条 issue（小数位 vs 符号），同 RuleId 同 Targets 异 Message，旧 key 碰撞导致
+    /// 勾其一刷新后两条全勾（意图混入未采纳 + adopted 重复/count 失真）/取消其一两条全丢。
+    /// 同 rule+targets+message 的真重复视为同一条（去重语义，可接受——内容完全相同的问题
+    /// 勾选态本就不应分裂）。</summary>
+    private static string CheckKey(IssueEntry entry) =>
+        entry.RuleId + "|" + string.Join(",", entry.Targets) + "|" + entry.Message;
 
     /// <summary>勾选变更 → key 集同步（勾选加入/取消移除；跨刷新保持的权威存储）。</summary>
     private void OnEntryCheckedChanged(object? sender, PropertyChangedEventArgs e)

@@ -554,6 +554,11 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **忽略=未勾选正常决策不留痕**（§6.2 recommended 采纳/忽略/修改后采纳口径）：未勾选问题不产生任何审计条目；修改后采纳经意图框自由文本编辑承载（既有能力）。
 - **跨刷新勾选保持（会话级，不持久化）**：IssuesViewModel 持勾选 key 集（key=RuleId+"|"+Targets 逗号连接），Refresh 重建条目按 key 恢复 IsChecked；取消勾选同步移除 key；关闭窗口即清（不落盘）。
 - **门禁**：View.Tests 全量 376 绿 + 全 sln **1214**/0 失败/4 跳过（基线 main 1203 + 本切片 11 新测试；TDD 先红后绿，证据 outputs/issue-check-intent/）。
+- **修复注记（fixwave2，2026-11-23 合并前 ISTQB 修复波，追加式更正）**：
+  - **I1 CheckKey 碰撞修复**：勾选 key 加 Message 区分因子——key=RuleId+"|"+Targets 逗号连接+"|"+Message。标高规则 mode 省略（skill 自定义规则）时同一标高文本产两条 issue（小数位 vs 符号），同 RuleId 同 Targets，旧 key 碰撞致「勾其一刷新后两条全勾（意图混入未采纳 + adopted 重复/count 失真）/取消其一两条全丢（漏记采纳）」。同 rule+targets+message 的真重复视为同一条（去重语义，代码注释明示）。覆盖：IssuesViewModelTests.Refresh_SameRuleSameTargets_DifferentMessage_CheckKeysIndependent + MainWindowHeadlessTests.FillIntent_SameRuleTargetsCollision_CheckedOne_AdoptedCountOne_CheckPreserved。
+  - **I2 填充入口结构闸 + 措辞更正**：OnFillIntentFromIssues 首行加 `_editBusy/_diffBusy/PlanPreview.IsBusy` 结构闸（镜像 OnGeneratePlanClick；busy→不填充不审计）；UpdatePlanPanel/SetEditBusy busy 时 FillIntentButton 同步禁用。**措辞更正**：implement-report §6.1 原「未新增防护也未恶化」类表述更正为——**新增读点（TryAppendRuleAdoptedAudit 的 ComputeHash）已加结构闸（_editBusy/_diffBusy/IsBusy）**，在途编辑/计划编排期间填充入口一律拒绝、该读点不可达（读点本身仍无会话闸，与 I4 同边界，入口结构闸闭合在途竞态窗）。覆盖：FillIntent_DuringInFlightEdit_BusyGate_NoFillNoAudit（持闸制造在途编辑 + RaiseEvent 绕过禁用态 → 哨兵不变 + 无 rule-adopted）。
+  - **M1/M2**：指针点击测试改点第二行复选框并断言第二条目翻转（闭合「绑定正确条目」透镜，含有界布局确定性等待）；新增 Informational-only 勾选测试（入意图带 [Informational] 标签 + 不入采纳审计，第三分支钉住）。
+  - **M3 门禁数字更正**：上门禁注记 376/1214/11 为 feature 提交（4f6f136）时点口径；Minor 修复提交（34072c9）后终态为 **377/1215/12**。fixwave2 终态：View.Tests **381**/0/0 + 全 sln **1219**/0 失败/4 跳过（+4 新测试：I1 VM 碰撞/I1 采纳 count/I2 busy 闸/M2 Informational；ZWCAD 前后 tasklist 无残留；证据 outputs/issue-check-intent/fixwave2-*.log）。
 
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
