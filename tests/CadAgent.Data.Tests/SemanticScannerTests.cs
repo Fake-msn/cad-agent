@@ -1,7 +1,9 @@
 using CadAgent.Core;
 using CadAgent.Data.Semantic;
 using CSMath;
+using ACadSharp;
 using ACadSharp.Entities;
+using ACadSharp.IO;
 using ACadSharp.Tables;
 
 namespace CadAgent.Data.Tests;
@@ -87,5 +89,75 @@ public class SemanticScannerTests : IDisposable
             Assert.False(gate.Check(new[] { SemanticClass.Wall }).Allowed);
         }
         finally { File.Delete(plain); }
+    }
+
+    // ---- BF-T3：Scanner 集成（块级纠偏切片第三任务，spec §13.3）----
+
+    /// <summary>临时 skill 包（镜像 BlockSymbolMatcherTests._pkg 构造）：symbols.yaml 根键 symbols:。</summary>
+    private static string CreateSymbolPackage()
+    {
+        string pkg = Path.Combine(Path.GetTempPath(), $"bfscan-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(pkg, "symbols"));
+        File.WriteAllText(Path.Combine(pkg, "skill.yaml"), "name: test-pkg\nversion: \"1.0.0\"\n");
+        File.WriteAllText(Path.Combine(pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n");
+        var sym = new CadDocument();
+        sym.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        sym.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        using (var fs = File.Create(Path.Combine(pkg, "symbols", "sym.dxf")))
+            DxfWriter.Write(fs, sym);
+        return pkg;
+    }
+
+    [Fact]
+    public void Scan_WithSymbolPackages_BlockMatchPopulated_AutoSeedInOverlay()
+    {
+        // 夹具：临时 skill 包 + 含克隆块文档（符号几何逐字克隆 ×4 实例，DXF 往返后指纹仍精确）。
+        string pkg = CreateSymbolPackage();
+        string blockDxf = DxfFixture.CreateTempDxf(doc =>
+        {
+            var br = new BlockRecord("符号块");
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            br.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+            doc.BlockRecords.Add(br);
+            for (int i = 0; i < 4; i++)
+                doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(i * 1000, 0, 0) });
+        });
+        try
+        {
+            var packages = new[] { SkillLoader.LoadDirectory(pkg) };
+            var result = SemanticScanner.Scan(DrawingSession.Load(blockDxf), symbolPackages: packages);
+            Assert.NotNull(result.BlockMatch);
+            var match = result.BlockMatch!;
+            var seed = Assert.Single(match.AutoSeeds);
+            Assert.Equal("测试符号", seed.SymbolName);
+            Assert.Equal(4, seed.Handles.Count);
+            // 自动种子落 overlay：GeometryInference 0.9 + marker evidence；剪枝后句柄存活。
+            var seeded = result.Overlay.Annotations.Where(a => a.Provenance == Provenance.GeometryInference
+                && a.Evidence.StartsWith("几何指纹精确匹配:")).ToList();
+            Assert.Equal(4, seeded.Count);
+            Assert.All(seeded, a => Assert.Equal(0.9, a.Confidence));
+            Assert.All(seed.Handles, h => Assert.Contains(result.Overlay.Annotations, a => a.TargetHandle == h));
+            Assert.Empty(match.Suggestions);
+        }
+        finally { Directory.Delete(pkg, true); File.Delete(blockDxf); }
+    }
+
+    [Fact]
+    public void Scan_WithoutPackages_BlockMatchNull_BehaviorUnchanged()
+    {
+        // 既有夹具：无包 → BlockMatch null；annotations/ambiguous 与旧口径逐字一致。
+        var result = SemanticScanner.Scan(DrawingSession.Load(_path));
+        Assert.Null(result.BlockMatch);
+        Assert.Contains(result.Overlay.Annotations, a => a.Class == SemanticClass.Wall && a.Provenance == Provenance.LayerInference);
+        Assert.Contains(result.Overlay.Annotations, a => a.Class == SemanticClass.Wall && a.Provenance == Provenance.GeometryInference);
+        var names = result.Ambiguous.Select(a => a.LayerName).ToList();
+        Assert.Contains("W-新墙", names);
+        Assert.Contains("随便", names);
+        Assert.DoesNotContain("WALL", names);
+        Assert.Equal(1, result.Ambiguous.First(a => a.LayerName == "随便").EntityCount);
+        // 空包列表与无包等价（Count>0 守卫——无索引不得误清既有种子）。
+        var empty = SemanticScanner.Scan(DrawingSession.Load(_path), symbolPackages: Array.Empty<SkillPackage>());
+        Assert.Null(empty.BlockMatch);
     }
 }

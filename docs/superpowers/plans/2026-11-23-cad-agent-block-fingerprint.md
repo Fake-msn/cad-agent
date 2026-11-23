@@ -1218,3 +1218,33 @@ public class RealBlockFingerprintTests
 - **占位符扫描**：T3/T4 测试骨架注释处已明示"展开完整代码镜像 X 模式"——实现者按指定夹具模式展开（BlockSymbolMatcherTests._pkg/DxfFixture/ImportSymbolTests 现成）；算法/命令主体完整代码给出。
 - **类型一致性**：BlockMatchResult/BlockSuggestion/BlockCandidate/BlockAmbiguous/BlockAutoSeed T2 定义（namespace 级 public）T3 ScanResult 引用 T4 不直接消费；EvidencePrefix T2 定义 T3 清理测试引用；NearThreshold/Confidence T1 定义 T2/T4/T5 消费；Scan 加性参末位可选旧调用兼容。
 - **已知取舍**：贪心匹配 O(n²)（符号≤143 实体，块同量级，可接受）；Aspect 容差 0.2（量化 0.1 网格两倍裕度）；弧角差权重 0.5（角度量纲与长度折中，钉住测试判别）；符号首包命中同 insert-symbol 先例（重名跨包取首）。
+---
+
+## 执行记录（SDD 2026-11-23）
+
+- T1 指纹算法：b7b4b65（Data 339；R1 定型 XYZ/弧度/when 守卫）。
+- T2 三级匹配器：379c78b（Data 351；R2 宽 catch DxfException 实证；R5 夹具 12.0 修正 brief 数学矛盾；R6 空包早退保种子；弧测试闭合 T1 缺口）。
+- T3 Scanner+CLI 集成：91f0982（Data 357/Cli 226；T2 四测试缺口补；加性纪律逐项核实）。
+- T4 map-block：5ea99d7（Cli 235；复核制/六 reason/overlay-only/Yellow 豁免镜像逐字核实）。
+- T5 真实实证：be95adf+ebb8a00（门禁 1246/0/4×2；**三级分布 102 自动种子/16 建议块 30 候选/68 歧义（无匹配 33+代理 35）**；map-block 真实确认 $equip$00002501→双联单控开关 122 实例 HumanConfirmed+re-scan 保留+验链绿；R7 闸下措辞更正/R8 $equip$00002832 占位几何 reason=无匹配更正；阈值 0.15 不动 R3）。
+- 最终全分支审查：1 Important（map-block 用法校验顺序）→修复波 6ff1c71（+注释三处+§12 窄化披露 R9+测试四补；Cli 238/Data 358）；scoped 复审全 ADDRESSED。
+- Rulings R1-R9 入 ledger（R1 API 定型/R2 宽 catch/R3 阈值不静默改/R4 首命中+Hatch 代代理/R5 夹具矛盾修正/R6 空包早退/R7 闸下措辞/R8 占位几何更正/R9 spec 三窄化披露 deferred）。
+- 遗留 deferred（整支 triage 可留）：量化 ToEven 抖动/弧角绕回入哈希（Distance 兜底）；贪心非对称（消费固定序）；裸旗标静默默认/数字 class（SemanticMap 同病后续统一）；零实例 instances=0；歧义 histogram/bbox 诊断字段；NaN 剔除披露计数；半径比签名；map-block Load 失败 CLI 测试；存量警告。
+- spec §12 闭环注记（ebb8a00）+窄化披露（6ff1c71）；§13 设计权威。
+
+---
+
+## 修复波 2（PR#21 合并前 ISTQB 审查，2026-11-23，追加式）
+
+用户裁定"先修后合"。本波纯测试新增（M2 传播链已存在，无需产品微调），覆盖 2 Important + 6 择要 Minor；deferred（M7-M11）在案不做。
+
+- **I1（安全关键拒绝面零测试）**：SemanticMapBlockTests 补 2 测——`MapBlock_BlockNoGeometry_RejectedAudited_Exit1`（块定义仅 TEXT+Hatch 矩形边界路径，零白名单几何 + 合法符号 → exit1 + reason="块无几何" + VerifyChain + 无成功记录 + overlay 不落）；`MapBlock_SymbolNoGeometry_RejectedAudited_Exit1`（垃圾文本 → DxfReader 抛 catch 分支 / 仅 TEXT 合法 DXF → Extract null 分支，双分支各留痕 reason="符号无几何" + VerifyChain）。Hatch 夹具镜像 MoveEntityTests 往返先例。
+- **I2（哈希顺序无关无条件守卫）**：BlockFingerprintTests 补 `Extract_EntityOrderPermuted_SameHash`——Symbol() 反转 + 多实体（2 线 2 圆 1 弧）固定置换 → 哈希逐位相等，不依赖标本。
+- **M1 点状退化**：`Extract_PointDegenerate_Null`（零长线 / 重合微半径圆 → scale<1e-9 → null）。实证修正：ACadSharp `Circle.Radius` 要求 >0（零半径抛 ArgumentOutOfRangeException），故"重合圆"用微半径 1e-12（bbox 2e-12）构造退化，非零半径。
+- **M2 --min-block-instances 传播**：SemanticE2ETests 补 `Scan_MinBlockInstancesTwo_PropagatesToMatcher`（2 实例无匹配块默认 min=3 不歧义 / --min-block-instances 2 → 入歧义 instances=2 + 审计 blockAmbiguousCount=1 双通道）。
+- **M3 同哈希取首确定性**：BlockSymbolMatcherTests 补 `ExactMultiSymbolSameHash_FirstWinsDeterministic`（yaml 序 + 包序双维度，class/evidence 随首符号）。
+- **M4 R6 早退守卫**：`AllSymbolsBroken_PresetSeedsPreserved_R6EarlyExit`（预置 marker 种子 + 全符号损坏 → symbols.Count==0 早退，既有种子不清，扫描计数全 0）。
+- **M5 边界择要**：`Compatible_AspectDeltaExactly02_Accepted_JustOverRejected`（|ΔAspect|=0.2 恰接受 / 0.2001 拒绝）；`Excluded_AttdefBboxExactly500_Excluded_JustUnderNot`（最长边 500 恰排除 / 499 不排除）；`Distance_ExactlyAtNearThreshold_ValuePinned` + `MapBlock_DistanceExactlyAtThreshold_Accepted`（双圆夹具内圆平移 3 → d=0.3/2=0.15 精确双精度，算法侧 + CLI 侧 <= 恰接受）；`Excluded_PaperPrefix_CaseInsensitive`（*Paper 前缀 OrdinalIgnoreCase，带几何隔离前缀规则）；`Ambiguous_SampleHandlesCappedAtFive_SixInstances`（6 实例 → 样本恰 5 且 walked 前 5 序）。
+- **M6 贪心占用**：`Distance_GreedyMultiEntity_UsedOccupancyPinned`（两线两圆交叉最近邻，有占用 d=0.15 / 无占用回归判别 0.05）。
+- **门禁**：Data.Tests 368（358+10）/ Cli.Tests 242（238+4）全绿；全 sln 一次 1262 通过 +4 跳过（基线 1248+14）；ZWCAD 真机前后 tasklist 无 CAD 进程残留。日志 outputs/block-fingerprint/fixwave2-*.log。
+- **不做（deferred 在案）**：M7 DxfReader 释放 / M8 垂直 AttDef / M9 map-block 不复用 IsExcluded / M10 硬编 324 / M11 reason 语义宽——留后续。
