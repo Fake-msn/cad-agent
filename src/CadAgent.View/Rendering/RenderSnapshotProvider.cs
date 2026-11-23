@@ -65,10 +65,10 @@ public sealed class RenderSnapshotProvider : IRenderSnapshot
         var sheet = _session.Sheets.FirstOrDefault(s => s.SheetId == sheetId)
             ?? throw new ArgumentException($"未知幅面: {sheetId}", nameof(sheetId));
         EnsurePlatform();
-        IReadOnlyList<RenderItem> items;
+        IReadOnlyList<RenderItem> source;
         if (sheet.LayoutName == null)
         {
-            items = RenderModelBuilder.CropToFrame(_modelItems, rect);
+            source = _modelItems;
         }
         else
         {
@@ -78,8 +78,14 @@ public sealed class RenderSnapshotProvider : IRenderSnapshot
                 .OfType<ACadSharp.Entities.Viewport>()
                 .FirstOrDefault(v => v.Handle.ToString() == vpHandle)
                 ?? throw new ArgumentException($"布局幅面缺视口: {sheetId}", nameof(sheetId));
-            items = RenderModelBuilder.CropToFrame(RenderModelBuilder.BuildViewport(_session.Doc, vp), rect);
+            source = RenderModelBuilder.BuildViewport(_session.Doc, vp);
         }
+        // R6（视觉接线 T3）：瓦片级（rect≠幅面 bounds）用几何相交裁剪——穿越瓦片的长导线
+        // 锚点在瓦片外，锚点裁剪会整体缺失（电缆可见性缺口）；幅面级（rect==FrameBounds，
+        // overview/整幅）保持锚点语义（与幅面归属同口径）。
+        IReadOnlyList<RenderItem> items = rect == sheet.FrameBounds
+            ? RenderModelBuilder.CropToFrame(source, rect)
+            : RenderModelBuilder.CropToFrameIntersect(source, rect);
         var vm = new CanvasViewModel(items);
         var control = new DrawingCanvas(vm);
         control.Measure(new Size(w, h));

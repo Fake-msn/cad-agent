@@ -468,6 +468,68 @@ public static partial class CommandRouter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// 视觉接线 T3：semantic scan --vision relay 进程拉起 seam（仅测试注入：捕获 args/返回码；
+    /// 生产 null → Process dotnet ViewDll 真启动）。与 LlmClientFactory 同口径。
+    /// </summary>
+    internal static Func<string[], int>? VisionScanSpawn;
+
+    /// <summary>
+    /// 视觉接线 T3：semantic scan --vision → 独立 View 进程 --vision-scan headless 入口
+    /// （R4 parity：ViewLaunch 进程模式镜像——Cli 不 using Avalonia；区别：relay 须等进程
+    /// 结束并转发 stdout/stderr/退出码，故 RedirectStandardOutput/Error + WaitForExit）。
+    /// 转发 --drawing/--project/--confirm-egress/--name；闸口/出境/审计全在 View 进程内。
+    /// View 程序集缺失→stderr + exit 1（ViewLaunch 同口径）。
+    /// </summary>
+    private static int VisionScanRelay(string[] args, string drawingPath, string agentDir,
+        TextWriter stdout, TextWriter stderr)
+    {
+        string project = Path.GetDirectoryName(Path.GetFullPath(agentDir))!;
+        var relayArgs = new List<string> { "--vision-scan", "--drawing", drawingPath, "--project", project };
+        if (args.Contains("--confirm-egress")) relayArgs.Add("--confirm-egress");
+        string? name = GetOption(args, "--name");
+        if (name is not null) { relayArgs.Add("--name"); relayArgs.Add(name); }
+        if (VisionScanSpawn is { } spawn)
+            return spawn(relayArgs.ToArray());
+        string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
+        if (!File.Exists(viewDll))
+        {
+            stderr.WriteLine($"未找到视图程序集: {viewDll}");
+            return 1;
+        }
+        var psi = new ProcessStartInfo("dotnet", BuildVisionScanArgs(viewDll, relayArgs))
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            // View 进程 --vision-scan 分支置 Console.OutputEncoding=UTF8；relay 同口径读取
+            // （Windows GBK 默认码页会损坏中文 JSON/指引）。
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8
+        };
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("View 进程启动失败");
+        // 双异步读避免经典死锁（子进程 stderr 缓冲先满时同步 ReadToEnd 互等）；输出为小 JSON/指引。
+        Task<string> outTask = proc.StandardOutput.ReadToEndAsync();
+        Task<string> errTask = proc.StandardError.ReadToEndAsync();
+        proc.WaitForExit();
+        stdout.Write(outTask.GetAwaiter().GetResult());
+        stderr.Write(errTask.GetAwaiter().GetResult());
+        return proc.ExitCode;
+    }
+
+    /// <summary>
+    /// 视觉接线 T3：relay 进程参数装配（arg-builder 单测覆盖，BuildViewArgs 同口径）——
+    /// dll/选项值加引号，flag（-- 前缀）裸追加。
+    /// </summary>
+    internal static string BuildVisionScanArgs(string viewDll, IReadOnlyList<string> relayArgs)
+    {
+        var sb = new System.Text.StringBuilder($"\"{viewDll}\"");
+        foreach (string a in relayArgs)
+            sb.Append(a.StartsWith("--") ? $" {a}" : $" \"{a}\"");
+        return sb.ToString();
+    }
+
     private static string SemanticOverlayPath(string agentDir) =>
         Path.Combine(agentDir, "semantic.json");
 
@@ -532,10 +594,15 @@ public static partial class CommandRouter
     /// 先于任何副作用（不审计，Run 兜底 stderr + exit 1）。无 --skill→空别名表，行为不变。
     /// 审计加性（最终审查裁定）：paramsJson 增 rulePackVersion=SkillSet.RulePackVersion
     /// （规则包溯源，与 check 同口径；扫描行为本身不变）。
+    /// 视觉接线 T3：--vision → relay 独立 View 进程 headless 入口（Cli 不 using Avalonia，
+    /// ViewLaunch 先例）；无 --vision 的 legacy 在进程扫描逐字不变。
     /// </summary>
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
+        // --vision relay 先于一切在进程副作用（闸口/出境/审计全在 View 进程内编排）。
+        if (args.Contains("--vision"))
+            return VisionScanRelay(args, drawingPath, agentDir, stdout, stderr);
         var ruleSet = LoadRuleSet(args, stderr);
         string overlayPath = SemanticOverlayPath(agentDir);
         using var audit = OpenAudit(agentDir);

@@ -151,6 +151,33 @@ public class RenderSnapshotProviderTests
         finally { File.Delete(path); }
     }
 
+    [AvaloniaFact]
+    public void RenderPng_TileCrossedByLongWire_WireVisible()
+    {
+        // R6 钉住：长导线 (-100,400)-(2000,400) 锚点在瓦片 (400,300)-(600,500) 外——
+        // 锚点裁剪整体缺失（中心像素暗）；瓦片路径改几何相交裁剪后导线保留（中心像素亮）。
+        // 无图框单幅面 S0，rect≠FrameBounds → 瓦片级 Intersect 路径。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            doc.Entities.Add(new Line
+            {
+                StartPoint = new XYZ(-100, 400, 0),
+                EndPoint = new XYZ(2000, 400, 0),
+                Layer = new Layer("E-WIRE") { Color = new Color(7) }
+            });
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            var provider = new RenderSnapshotProvider(session);
+            byte[] png = provider.RenderPng(session.Sheets[0].SheetId, (400, 300, 600, 500), 100, 100);
+            // Fit(rect) 映射：y=400 → 屏幕 y=50（中心行）；白色 ACI 7 描边。
+            Assert.True(NeighborhoodBrightness(png, 50, 50) > 100,
+                "穿越瓦片的长导线须被相交裁剪保留（R6：锚点裁剪会整体缺失）");
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>PNG 解码 → 中心像素 RGB（WriteableBitmap Bgra8888 承接 Bitmap.CopyPixels）。</summary>
     private static (int R, int G, int B) CenterPixel(byte[] png)
     {

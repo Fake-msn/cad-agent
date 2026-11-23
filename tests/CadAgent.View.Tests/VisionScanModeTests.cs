@@ -1,0 +1,252 @@
+using System.Text.Json;
+using ACadSharp;
+using ACadSharp.Entities;
+using ACadSharp.Tables;
+using Avalonia.Headless.XUnit;
+using CadAgent.Core;
+using CadAgent.Data;
+using CadAgent.Data.Tests;
+using CSMath;
+
+namespace CadAgent.View.Tests;
+
+/// <summary>
+/// 视觉接线 T3：--vision-scan headless 入口编排（fake ILlmClient/profile 注入 seam，不触网）。
+/// 夹具镜像 VisionCrossCheckerTests（图框块+设备属性 Insert A=深照型灯）；census 经 sidecar
+/// 注入（普通 DXF + .cadagent/unparsed.json 源哈希匹配）→ Yellow（有原生+未解析，只读审查继续）；
+/// 空文档+census → Red（拒绝留痕，零渲染零 llm）。
+/// 闸口/出境/审计契约：Red→run-rejected+exit 1；NeedsFirstCloudConsent 无 --confirm-egress→
+/// egress-blocked+exit 1（不静默发送）；有→ConfirmCloudConsent+egress-consent 留痕；
+/// llm-call 每 tile（镜像 AgentOrchestrator.AuditLlmCall payload：model/usage/attempt）；
+/// 无 seeded 不写 overlay（防空覆盖）。
+/// R3：测试内 --confirm-egress=行使显式确认通道（用户先前授权云端测试）；生产须人工 flag（T4 协议注记）。
+/// </summary>
+public class VisionScanModeTests : IDisposable
+{
+    private readonly string _project = Path.Combine(Path.GetTempPath(), $"visionscan-{Guid.NewGuid():N}");
+    private readonly string _drawing;
+
+    public VisionScanModeTests()
+    {
+        Directory.CreateDirectory(_project);
+        // 单幅面视觉夹具：图框 (0,0)-(1000,700) + 图号属性 + 幅面名文字 + 设备 Insert（A=深照型灯）。
+        _drawing = DxfFixture.CreateTempDxf(doc =>
+        {
+            var frame = new BlockRecord("院标准图框_A0");
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+            doc.BlockRecords.Add(frame);
+            var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+            frameIns.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+            doc.Entities.Add(frameIns);
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 30, Layer = new Layer("图框") });
+            var e = new BlockRecord("E");
+            e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
+            doc.BlockRecords.Add(e);
+            var layer = new Layer("EQUIP-照明");
+            doc.Layers.Add(layer);
+            var ins = new Insert(e) { InsertPoint = new XYZ(100, 100, 0), Layer = layer };
+            ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
+            doc.Entities.Add(ins);
+        });
+    }
+
+    public void Dispose()
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        Directory.Delete(_project, true);
+        File.Delete(_drawing);
+    }
+
+    /// <summary>sidecar 注入 census（TCH_WALL×2，源哈希匹配）→ Yellow（有原生+未解析）。</summary>
+    private void InjectCensus(string? drawing = null) =>
+        UnparsedCensusStore.Save(_project, drawing ?? _drawing,
+            new UnparsedCensus(new[] { new UnparsedClassBrief("TCH_WALL", 2) }));
+
+    private static ProviderProfile FakeProfile() =>
+        new("fake-vl", "https://api.test/v1", "fake-vl", VisionCapable: true, DataPolicy.CloudAllowed, new ProfileLimits());
+
+    private (int code, string stdout, string stderr) RunWith(ILlmClient client, params string[] extraArgs)
+    {
+        var outW = new StringWriter(); var errW = new StringWriter();
+        var args = new List<string> { "--vision-scan", "--drawing", _drawing, "--project", _project };
+        args.AddRange(extraArgs);
+        int code = VisionScanMode.Run(args.ToArray(), outW, errW, client, FakeProfile());
+        return (code, outW.ToString(), errW.ToString());
+    }
+
+    private List<AuditRecord> AuditRecords()
+    {
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        return audit.ReadAll().ToList();
+    }
+
+    /// <summary>fake VL 客户端：同步完成（Task.FromResult，仓库既有 fake 口径）；计次供"零 llm"断言。</summary>
+    private sealed class FakeVisionClient : ILlmClient
+    {
+        private readonly string _content;
+        public int Calls;
+        public FakeVisionClient(string content) => _content = content;
+        public Task<ChatResponse> ChatAsync(ChatRequest request, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(new ChatResponse(_content, new TokenUsage(100, 50), "fake-vl"));
+        }
+        public Task<IReadOnlyList<string>> ListModelsAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<string>>(new[] { "fake-vl" });
+    }
+
+    private const string MatchingClaims = """{"claims":[{"text":"深照型灯","region":"tile-1","confidence":0.8}]}""";
+
+    [AvaloniaFact]
+    public void VisionScan_YellowSpecimen_FakeClient_SeedsAndAudits()
+    {
+        InjectCensus();
+        var client = new FakeVisionClient(MatchingClaims);
+
+        var (code, stdout, stderr) = RunWith(client, "--confirm-egress");
+
+        Assert.Equal(0, code);
+        using (var doc = JsonDocument.Parse(stdout))
+        {
+            var r = doc.RootElement;
+            Assert.True(r.GetProperty("ok").GetBoolean());
+            Assert.Equal("Yellow", r.GetProperty("level").GetString()); // Yellow 只读审查继续（不拒）
+            int tiles = r.GetProperty("tiles").GetInt32();
+            Assert.True(tiles >= 1);
+            Assert.True(r.GetProperty("claims").GetInt32() >= 1);
+            Assert.True(r.GetProperty("seeded").GetInt32() >= 1);
+            // usage 合计 = tiles × (100,50)
+            Assert.Equal(tiles * 100, r.GetProperty("usage").GetProperty("promptTokens").GetInt32());
+            Assert.Equal(tiles * 50, r.GetProperty("usage").GetProperty("completionTokens").GetInt32());
+            Assert.Equal(tiles, client.Calls); // 每 tile 一次读图
+        }
+        // overlay semantic.json 含 LlmInference 标注（视觉声称经矢量佐证种子）
+        var overlay = SemanticOverlay.Load(Path.Combine(_project, ".cadagent", "semantic.json"));
+        Assert.Contains(overlay.Annotations, a => a.Provenance == Provenance.LlmInference && a.Class == SemanticClass.Lighting);
+        // 审计：llm-call/egress-consent/vision-scan + 链完整
+        var records = AuditRecords();
+        Assert.Contains(records, x => x.Entry.Kind == "llm-call" && x.Entry.Source == "llm");
+        Assert.Contains(records, x => x.Entry.Kind == "egress-consent");
+        Assert.Contains(records, x => x.Entry.Kind == "vision-scan");
+        Assert.True(File.Exists(Path.Combine(_project, ".cadagent", "cloud-consent.json")));
+        // llm-call payload 镜像 AuditLlmCall：model/usage/attempt（无图纸内容/密钥）
+        var llm = records.First(x => x.Entry.Kind == "llm-call");
+        using (var p = JsonDocument.Parse(llm.Entry.ParamsJson))
+        {
+            Assert.Equal("fake-vl", p.RootElement.GetProperty("model").GetString());
+            Assert.Equal(100, p.RootElement.GetProperty("PromptTokens").GetInt32());
+            Assert.Equal(50, p.RootElement.GetProperty("CompletionTokens").GetInt32());
+            Assert.True(p.RootElement.GetProperty("attempt").GetInt32() >= 1);
+        }
+        Assert.DoesNotContain("api.test", stdout); // stdout 不含 endpoint/密钥面
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_NoConsentFlag_RefusesEgress()
+    {
+        // Green 标本 + CloudAllowed 云端 profile + 无 --confirm-egress → NeedsFirstCloudConsent 拒绝
+        var client = new FakeVisionClient(MatchingClaims);
+
+        var (code, stdout, stderr) = RunWith(client); // 无 --confirm-egress
+
+        Assert.Equal(1, code);
+        Assert.Contains("--confirm-egress", stderr); // 指引明确确认通道
+        Assert.Equal(0, client.Calls); // 零 llm（不静默发送）
+        var records = AuditRecords();
+        Assert.Contains(records, x => x.Entry.Kind == "egress-blocked");
+        Assert.DoesNotContain(records, x => x.Entry.Kind == "llm-call");
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "cloud-consent.json")));
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_RedSpecimen_Refused()
+    {
+        // proxy-only Red：空文档（零原生实体）+ census sidecar → Red 拒绝（零渲染零 llm）
+        string redDrawing = DxfFixture.CreateTempDxf(_ => { });
+        try
+        {
+            InjectCensus(redDrawing);
+            var client = new FakeVisionClient(MatchingClaims);
+            var outW = new StringWriter(); var errW = new StringWriter();
+            int code = VisionScanMode.Run(
+                new[] { "--vision-scan", "--drawing", redDrawing, "--project", _project, "--confirm-egress" },
+                outW, errW, client, FakeProfile());
+
+            Assert.Equal(1, code);
+            Assert.Contains("图形导出", errW.ToString()); // T3Guidance
+            Assert.Equal(0, client.Calls);
+            var records = AuditRecords();
+            var rejected = Assert.Single(records, r => r.Entry.Kind == "run-rejected");
+            using (var p = JsonDocument.Parse(rejected.Entry.ParamsJson))
+                Assert.Equal("Red", p.RootElement.GetProperty("level").GetString());
+            Assert.DoesNotContain(records, r => r.Entry.Kind == "llm-call");
+            Assert.DoesNotContain(records, r => r.Entry.Kind == "vision-scan");
+            Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "semantic.json")));
+        }
+        finally { File.Delete(redDrawing); }
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_NoSeeded_DoesNotWriteOverlay()
+    {
+        // 无矢量佐证 claim → seeded=0 → 既有 overlay 逐字不动（防空覆盖，Version 不++）
+        string overlayPath = Path.Combine(_project, ".cadagent", "semantic.json");
+        var pre = new SemanticOverlay();
+        pre.UpsertAnnotation(new SemanticAnnotation("H1", SemanticClass.Wall, Provenance.HumanConfirmed, 1.0, "人工确认"));
+        pre.Save(overlayPath);
+        byte[] before = File.ReadAllBytes(overlayPath);
+        var client = new FakeVisionClient("""{"claims":[{"text":"碳素波纹管","region":"说明区","confidence":0.9}]}""");
+
+        var (code, stdout, _) = RunWith(client, "--confirm-egress");
+
+        Assert.Equal(0, code);
+        using (var doc = JsonDocument.Parse(stdout))
+        {
+            Assert.Equal(0, doc.RootElement.GetProperty("seeded").GetInt32());
+            Assert.True(doc.RootElement.GetProperty("ambiguous").GetArrayLength() >= 1); // 歧义不静默
+        }
+        Assert.Equal(before, File.ReadAllBytes(overlayPath));
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_LocalOnlyProject_Refused()
+    {
+        // local-only.txt 硬约束（.cadagent 内，与 agent/llm 命令同口径）→ BlockedLocalOnly 拒绝
+        Directory.CreateDirectory(Path.Combine(_project, ".cadagent"));
+        File.WriteAllText(Path.Combine(_project, ".cadagent", "local-only.txt"), "");
+        var client = new FakeVisionClient(MatchingClaims);
+
+        var (code, _, stderr) = RunWith(client, "--confirm-egress");
+
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        Assert.Equal(0, client.Calls);
+        Assert.Contains(AuditRecords(), x => x.Entry.Kind == "egress-blocked");
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_NoProfile_GuidanceExit1()
+    {
+        // 生产解析路径：无 override + 无 llm-profiles.json → stderr 指引 exit 1（零 llm）
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = VisionScanMode.Run(
+            new[] { "--vision-scan", "--drawing", _drawing, "--project", _project }, outW, errW);
+        Assert.Equal(1, code);
+        Assert.Contains("profile", errW.ToString());
+        Assert.DoesNotContain(AuditRecords(), x => x.Entry.Kind == "llm-call");
+    }
+
+    [Fact]
+    public void VisionScan_MissingDrawing_UsageExit1()
+    {
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = VisionScanMode.Run(new[] { "--vision-scan" }, outW, errW);
+        Assert.Equal(1, code);
+        Assert.Contains("--drawing", errW.ToString());
+    }
+}

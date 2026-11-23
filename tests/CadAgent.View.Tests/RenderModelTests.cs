@@ -635,4 +635,34 @@ public class RenderModelTests
         };
         Assert.Equal((8.0, 8.0, 12.0, 12.0), RenderModelBuilder.Bounds(items));
     }
+
+    // ---- 视觉接线 T3（R6）：CropToFrameIntersect 几何 bounds 相交裁剪（加性，不改锚点语义）----
+
+    [Fact]
+    public void CropToFrameIntersect_CrossingLongWire_Kept_AnchorCropDrops()
+    {
+        // 长导线 (-100,400)-(2000,400) 穿越瓦片 (400,300)-(600,500)：锚点 (-100,400) 在瓦片外
+        // → CropToFrame 整体缺失（vision 电缆可见性缺口）；Intersect 几何相交保留。
+        var wire = new RenderItem(RenderKind.Line,
+            new (double, double)[] { (-100, 400), (2000, 400) }, "E-WIRE", 0xFFFFFF, null, 0, 0, "W1");
+        var items = new[] { wire };
+        var rect = (MinX: 400.0, MinY: 300.0, MaxX: 600.0, MaxY: 500.0);
+        Assert.Empty(RenderModelBuilder.CropToFrame(items, rect)); // 锚点语义对照（保持不变）
+        Assert.Single(RenderModelBuilder.CropToFrameIntersect(items, rect)); // 相交保留
+    }
+
+    [Fact]
+    public void CropToFrameIntersect_DisjointDropped_CircleUsesExtentNotAnchor()
+    {
+        // 远端圆 → 丢弃；圆心在瓦片外但半径伸入瓦片 → 保留
+        //（Points[1] 是半径元数据非坐标，与 Bounds 同口径，不得当坐标 hull）。
+        var far = new RenderItem(RenderKind.Circle,
+            new (double, double)[] { (5000, 5000), (10, 0) }, "0", 0xFFFFFF, null, 0, 0, "C1");
+        var crossing = new RenderItem(RenderKind.Circle,
+            new (double, double)[] { (390, 400), (20, 0) }, "0", 0xFFFFFF, null, 0, 0, "C2");
+        var rect = (MinX: 400.0, MinY: 300.0, MaxX: 600.0, MaxY: 500.0);
+        var kept = RenderModelBuilder.CropToFrameIntersect(new[] { far, crossing }, rect);
+        Assert.Single(kept);
+        Assert.Equal("C2", kept[0].Handle);
+    }
 }

@@ -129,6 +129,44 @@ public static class RenderModelBuilder
         return result;
     }
 
+    /// <summary>
+    /// 瓦片级几何相交裁剪（视觉接线 T3，R6）：保留几何 bounds 与 rect 相交的图元——
+    /// 穿越瓦片的长导线锚点在瓦片外但几何穿过，锚点裁剪（CropToFrame）会整体缺失
+    /// （vision 电缆可见性缺口），相交裁剪保留。加性 public，不改 CropToFrame 锚点语义
+    /// （幅面级裁剪/幅面归属仍锚点口径）。Circle/Arc bounds=圆心±半径（Points[1..] 是
+    /// 半径/角度元数据非坐标，与 Bounds 同口径）；Text 仅插入点（无字形度量）。
+    /// 边界相接算相交（闭区间，与 CropToFrame 含边界同口径）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> CropToFrameIntersect(
+        IReadOnlyList<RenderItem> items, (double MinX, double MinY, double MaxX, double MaxY) rect)
+    {
+        var result = new List<RenderItem>();
+        foreach (RenderItem item in items)
+        {
+            if (item.Points.Count == 0) continue;
+            double minX, minY, maxX, maxY;
+            if (item.Kind is RenderKind.Circle or RenderKind.Arc)
+            {
+                if (item.Points.Count < 2) continue;
+                (double cx, double cy) = item.Points[0];
+                double r = Math.Abs(item.Points[1].X);
+                minX = cx - r; maxX = cx + r; minY = cy - r; maxY = cy + r;
+            }
+            else
+            {
+                minX = minY = double.MaxValue; maxX = maxY = double.MinValue;
+                foreach ((double x, double y) in item.Points)
+                {
+                    if (x < minX) minX = x; if (x > maxX) maxX = x;
+                    if (y < minY) minY = y; if (y > maxY) maxY = y;
+                }
+            }
+            if (maxX >= rect.MinX && minX <= rect.MaxX && maxY >= rect.MinY && minY <= rect.MaxY)
+                result.Add(item);
+        }
+        return result;
+    }
+
     /// <summary>实体锚点（模型空间首点）：Line=起点，Polyline=首顶点，Text/MText=插入点，
     /// Circle/Arc=圆心，Insert=插入点（与 BlockWalker.AnchorOf 同口径）。</summary>
     private static (double X, double Y) AnchorOf(Entity e) => e switch
