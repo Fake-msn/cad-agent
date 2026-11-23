@@ -1218,3 +1218,16 @@ public class RealBlockFingerprintTests
 - **占位符扫描**：T3/T4 测试骨架注释处已明示"展开完整代码镜像 X 模式"——实现者按指定夹具模式展开（BlockSymbolMatcherTests._pkg/DxfFixture/ImportSymbolTests 现成）；算法/命令主体完整代码给出。
 - **类型一致性**：BlockMatchResult/BlockSuggestion/BlockCandidate/BlockAmbiguous/BlockAutoSeed T2 定义（namespace 级 public）T3 ScanResult 引用 T4 不直接消费；EvidencePrefix T2 定义 T3 清理测试引用；NearThreshold/Confidence T1 定义 T2/T4/T5 消费；Scan 加性参末位可选旧调用兼容。
 - **已知取舍**：贪心匹配 O(n²)（符号≤143 实体，块同量级，可接受）；Aspect 容差 0.2（量化 0.1 网格两倍裕度）；弧角差权重 0.5（角度量纲与长度折中，钉住测试判别）；符号首包命中同 insert-symbol 先例（重名跨包取首）。
+---
+
+## 执行记录（SDD 2026-11-23）
+
+- T1 指纹算法：b7b4b65（Data 339；R1 定型 XYZ/弧度/when 守卫）。
+- T2 三级匹配器：379c78b（Data 351；R2 宽 catch DxfException 实证；R5 夹具 12.0 修正 brief 数学矛盾；R6 空包早退保种子；弧测试闭合 T1 缺口）。
+- T3 Scanner+CLI 集成：91f0982（Data 357/Cli 226；T2 四测试缺口补；加性纪律逐项核实）。
+- T4 map-block：5ea99d7（Cli 235；复核制/六 reason/overlay-only/Yellow 豁免镜像逐字核实）。
+- T5 真实实证：be95adf+ebb8a00（门禁 1246/0/4×2；**三级分布 102 自动种子/16 建议块 30 候选/68 歧义（无匹配 33+代理 35）**；map-block 真实确认 $equip$00002501→双联单控开关 122 实例 HumanConfirmed+re-scan 保留+验链绿；R7 闸下措辞更正/R8 $equip$00002832 占位几何 reason=无匹配更正；阈值 0.15 不动 R3）。
+- 最终全分支审查：1 Important（map-block 用法校验顺序）→修复波 6ff1c71（+注释三处+§12 窄化披露 R9+测试四补；Cli 238/Data 358）；scoped 复审全 ADDRESSED。
+- Rulings R1-R9 入 ledger（R1 API 定型/R2 宽 catch/R3 阈值不静默改/R4 首命中+Hatch 代代理/R5 夹具矛盾修正/R6 空包早退/R7 闸下措辞/R8 占位几何更正/R9 spec 三窄化披露 deferred）。
+- 遗留 deferred（整支 triage 可留）：量化 ToEven 抖动/弧角绕回入哈希（Distance 兜底）；贪心非对称（消费固定序）；裸旗标静默默认/数字 class（SemanticMap 同病后续统一）；零实例 instances=0；歧义 histogram/bbox 诊断字段；NaN 剔除披露计数；半径比签名；map-block Load 失败 CLI 测试；存量警告。
+- spec §12 闭环注记（ebb8a00）+窄化披露（6ff1c71）；§13 设计权威。
