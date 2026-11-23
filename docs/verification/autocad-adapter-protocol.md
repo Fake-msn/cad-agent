@@ -19,6 +19,24 @@
 > 本次执行证据：outputs/autocad-verify-20261123/（3 真机测试显式跳过，矩阵不升级，
 > Blocks.Add 签名序仍未核定）。
 
+> **更正注记（2026-11-24 续轮，追加式，上文旧状态保留存档）**：RUNASADMIN 兼容层与
+> 前代理 HKCU TypeLib 覆盖键均已由用户移除；COM 激活可用（非提升宿主直接激活成功）。
+> 本轮真机 **3 绿/1 环境败**：GetInfo（Version=19.1s (LMS Tech)）/OpenSaveAs（R12→DWG
+> 往返实体数保持）/CUIX 金丝雀绿；DrawingOps 败于 **TYPE_E_CANTLOADLIBRARY 0x80029C4A**
+> （ModelSpace dispatch）。新核定环境根因：HKLM TypeLib {AB513495-C0DC-4E03-AD6E-E851E08428D1}
+> 全部 lcid 路径指向 `Autodesk Sync\RealDwg\axdb19*.tlb`（该目录无 tlb 文件，仅 tbb.dll）；
+> 真实 tlb 在 `Common Files\Autodesk Shared\`。前代理 HKCU 覆盖正是修此缺陷，移除后复现。
+> **修复需用户授权**（重建 HKCU 覆盖或修正 HKLM 注册），本轮零触碰。
+> DXF 夹具口径更正：Open 败因非版本标签——ACadSharp 3.8.35 DxfWriter 内容被 AutoCAD 2014
+> 一律拒绝（AC1015 降级/手写最小 AC1015 均拒）；AcadLive 夹具改**手写最小 R12 DXF**
+> （仅本地，共享 DxfFixture 默认不变）。适配器增 Run 层忙拒绝有界重试 + Dispose/Restart
+> 忙拒绝上抛重试（Quit 残留修复）。Blocks.Add 探针被 TypeLib 缺陷阻断**仍未核定**
+> （BlocksAddNameFirst=true 原值保持）。SaveAs 锚部分（COM 产出 ops-anchor.dwg + DwgReader
+> 读回绿；COM 计数锚被阻）；人工目视 deferred。CUIX 哈希与备份逐字一致。
+> 逐套件回归 1296 绿/1 环境败/0 跳过。**矩阵不升级**（AutoCAD 维持 CompatibleUnverified）。
+> 解锁：用户授权 TypeLib 修复 → 重跑 DrawingOps + 步骤 4 探针 → 全绿后升级。
+> 证据：outputs/autocad-verify-20261123/（f1-f23 + final-verify-report.md）。
+
 ## 前置约束（CUIX 竞态根因 b，PR#17 事故教训）
 
 1. 验证期间**禁止**并行运行任何 AutoCAD 自动化或人工会话——并发实例共享用户
