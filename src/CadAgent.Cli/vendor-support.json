@@ -11,10 +11,10 @@
     {
       "vendor": "AutoCAD",
       "versionRange": "2024-2026",
-      "adapterVersion": "0.0",
+      "adapterVersion": "1.0",
       "status": "CompatibleUnverified",
       "verifiedAt": null,
-      "testCoverage": "适配器未实现；COM 接口族与中望同源（调查证据），待真机验证"
+      "testCoverage": "AcadRuntime COM 全接口实现 + seam 单元测试 + 条件真机测试（RequiresAutoCAD，无 AutoCAD 环境显式跳过）；Blocks.Add 按 Autodesk 文档序待真机探针核定；真机协议 docs/verification/autocad-adapter-protocol.md"
     },
     {
       "vendor": "TArch",

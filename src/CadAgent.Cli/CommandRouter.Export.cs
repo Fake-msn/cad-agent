@@ -11,8 +11,31 @@ namespace CadAgent.Cli;
 /// </summary>
 public static partial class CommandRouter
 {
-    /// <summary>测试注入运行时工厂；null→生产 ZwcadRuntime（Available 检查）。</summary>
+    /// <summary>测试注入运行时工厂；null→生产运行时（CADAGENT_RUNTIME 选择，Available 检查）。</summary>
     internal static Func<ICadRuntime?>? RuntimeFactory;
+
+    /// <summary>运行时选择 seam（默认读 CADAGENT_RUNTIME 环境变量；null→zwcad；空白/未知→硬错误）。</summary>
+    internal static Func<string?> RuntimeSelector =
+        () => Environment.GetEnvironmentVariable("CADAGENT_RUNTIME");
+
+    internal static string ResolveRuntimeName()
+    {
+        var name = (RuntimeSelector() ?? "zwcad").Trim().ToLowerInvariant();
+        if (name is not ("zwcad" or "acad"))
+            throw new CadRuntimeException($"未知 CADAGENT_RUNTIME: {name}（支持: zwcad, acad）");
+        return name;
+    }
+
+    /// <summary>
+    /// 纯工厂 seam（不做可用性检查；构造不激活 COM）；Func 化供测试注入假 runtime
+    /// （PR#18 修复波 Important#2：GetInfo 抛后 Dispose 回归钉住），调用语法不变。
+    /// </summary>
+    internal static Func<string, ICadRuntime> CreateRuntimeInstance = name => name switch
+    {
+        "zwcad" => new CadAgent.Adapters.Zwcad.ZwcadRuntime(),
+        "acad" => new CadAgent.Adapters.Acad.AcadRuntime(),
+        _ => throw new CadRuntimeException($"未知运行时: {name}")
+    };
 
     private static int Export(string[] args, string agentDir, string session, TextWriter stdout, TextWriter stderr)
     {
@@ -25,7 +48,7 @@ public static partial class CommandRouter
 
         ICadRuntime? runtime = RuntimeFactory != null
             ? RuntimeFactory()
-            : CreateZwcadIfAvailable(stderr);
+            : CreateRuntimeIfAvailable(stderr);
         try
         {
             if (runtime != null)
@@ -48,15 +71,17 @@ public static partial class CommandRouter
         }
     }
 
-    private static ICadRuntime? CreateZwcadIfAvailable(TextWriter stderr)
+    private static ICadRuntime? CreateRuntimeIfAvailable(TextWriter stderr)
     {
+        var name = ResolveRuntimeName(); // 配置错误硬失败（用户显式选择的厂商不得静默降级）
+        ICadRuntime? rt = null;
         try
         {
-            var rt = new CadAgent.Adapters.Zwcad.ZwcadRuntime();
+            rt = CreateRuntimeInstance(name);
             var info = rt.GetInfo();
             if (!info.Available)
             {
-                stderr.WriteLine("警示: 无可用厂商运行时，降级 DXF 交付（保真度未验证）");
+                stderr.WriteLine($"警示: 无可用厂商运行时（{name}），降级 DXF 交付（保真度未验证）");
                 rt.Dispose();
                 return null;
             }
@@ -64,6 +89,9 @@ public static partial class CommandRouter
         }
         catch (Exception ex)
         {
+            // 激活可能已成功但 GetInfo 抛（Visible/Version COM 失败）：必须释放已构造的 rt，
+            // 否则孤儿厂商进程残留（CUIX 竞态源，违反守卫自身不变量）。
+            rt?.Dispose();
             stderr.WriteLine($"警示: 厂商运行时初始化失败（{ex.Message}），降级 DXF 交付");
             return null;
         }
