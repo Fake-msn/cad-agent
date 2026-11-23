@@ -156,6 +156,67 @@ public class MoveEntityTests
         finally { File.Delete(path); }
     }
 
+    // ---- 合并前 ISTQB I5：倾斜/退化法向代表钉住（近似口径钉住，非精确数学） ----
+    // 既有测试仅覆盖镜像 (0,0,-1)+默认 (0,0,1)；此处补倾斜 (1,0,1)/√2 与退化 (0,0,0)
+    // 代表，钉住 OcsDelta 当前披露口径（面内投影近似，丢弃法向分量——spec §12 明示，
+    // 与 View RenderModel.OcsMapper 倾斜椭圆投影近似同口径，注释互指防双处漂移）。
+
+    [Fact]
+    public void Move_TiltedNormalCircle_InPlaneProjectionApproximation()
+    {
+        // N=(1,0,1)/√2：Ax=(0,1,0), Ay=(-1/√2,0,1/√2) →
+        // odx = Ax·d = dy = 4；ody = Ay·d = -dx/√2 = -3/√2 ≈ -2.121320。
+        // WCS delta (3,4) 的法向分量 (1.5,0,-1.5) 被丢弃——实际 WCS 位移 (1.5,4)≠(3,4)，
+        // 为面内投影近似口径钉住（非精确数学；真修复=Core 共享 OCS 数学，I1 deferred）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(1, 0, 1) }));
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var circle = s.Doc.Entities.OfType<Circle>().Single();
+            // 倾斜法向经 DXF 往返保持原值 (1,0,1)（探针核定：不归一——OcsDelta 内部
+            // Normalize 归一为 (1/√2,0,1/√2)）；Center 为 OCS 原值。
+            Assert.Equal(1, circle.Normal.X, 3);
+            Assert.Equal(0, circle.Normal.Y, 3);
+            Assert.Equal(1, circle.Normal.Z, 3);
+            var r = new MoveEntityHandler().Apply(s, P($"{{\"handle\":\"{circle.Handle}\",\"dx\":3,\"dy\":4}}"));
+            Assert.True(r.Ok);
+            var after = s.Doc.Entities.OfType<Circle>().Single();
+            // OCS 原值施加 (4, -3/√2)：Center=(9, 5-3/√2, 0)；Z（OCS 高程）不动。
+            Assert.Equal(9, after.Center.X, 3);
+            Assert.Equal(5 - 3 / Math.Sqrt(2), after.Center.Y, 3);
+            Assert.Equal(0, after.Center.Z, 3);
+            // WCS XY 投影核验：X=-oy/√2, Y=ox → 位移 (1.5,4)：X 少 1.5（法向分量被丢弃，
+            // 披露口径——若误为精确逆映射会得位移 (3,4)，本断言即失败）。
+            double wcsX = -after.Center.Y / Math.Sqrt(2), wcsY = after.Center.X;
+            Assert.Equal(-5 / Math.Sqrt(2) + 1.5, wcsX, 3);
+            Assert.Equal(9, wcsY, 3);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Move_ZeroNormalCircle_NormalizeFallsBackToIdentityDelta()
+    {
+        // 退化法向 (0,0,0)：Normalize len<1e-12 → 回落 (0,0,1) → identity 快路径：
+        // dx/dy 直施（与 View OcsMapper 回落双侧同款钉住）。探针核定：ACadSharp
+        // DxfWriter 对零法向圆整体不落盘（DXF 无 CIRCLE）——故经内存实体钉住
+        // Normalize 防御路径（内存构造/编辑管线仍可达），不走 DXF 往返。
+        string path = DxfFixture.CreateTempDxf(_ => { });
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var circle = new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(0, 0, 0) };
+            s.Doc.Entities.Add(circle);
+            var r = new MoveEntityHandler().Apply(s, P($"{{\"handle\":\"{circle.Handle}\",\"dx\":3,\"dy\":4}}"));
+            Assert.True(r.Ok);
+            Assert.Equal(8, circle.Center.X, 3);
+            Assert.Equal(9, circle.Center.Y, 3);
+            Assert.Equal(0, circle.Center.Z, 3);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Move_UnsupportedEntity_StillHonestStepFailed()
     {

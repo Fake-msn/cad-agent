@@ -1717,3 +1717,18 @@ GIT_AUTHOR_NAME=Fake-msn GIT_AUTHOR_EMAIL=Fake-msn@users.noreply.github.com GIT_
 - 最终审查修复波（5 Important+2 顺手修）：Move OCS 逆映射（镜像精确/倾斜投影近似）/PlanPreview 前奏 try-catch/子图元句柄剥后缀（父实体语义）/PlanExecuted 释闸后触发/IsFinite 三守卫/预览按钮轮次禁用/spec §4.1④ 部分交付+边界注记。
 - **剩余 deferred（post-merge）**：§4.1④ 问题清单勾选→意图（含 recommended）后续切片；Polyline2D OCS 渲染缺口（重新定性为代码非仅措辞）；Hatch 命中/选择；子图元独立编辑；RefreshAfterEdit 刷新侧取闸（残余窄窗口 park）；SignoffTxSelector/Rebuild 标签+视觉选中/Issues refresh 后 rebuild+失败口径；egress 正向专测；LlmProbe OCE/llm test --vision 退出码；T10 窗口关闭 Cancel/_cts Dispose/OpenAiClient 缓存；KindDocs 按 allowedKinds 过滤；其余见 ledger triage。
 - 真机限制（诚实标注）：中键注入受限/150% DPI 权限阻断（125%/100% 已验）/MARK 旋转自对称/副屏标题栏关闭未定论。
+
+### 合并前 ISTQB 修复波（PR#19，2026-11-22，用户裁定"先修后合"）
+
+- 本波修 I3/I5/I2 三项（I1/I4 转 tracked deferred 见下节）：
+  - **I3 过度声明措辞更正（追加式，旧文不删）**：PlanPreviewViewModel Imp#4 注释"不再与并发手动编辑的 Doc 枚举竞态"为过度声明——Imp#4 仅重排序（释闸先于事件）；PlanPreview 执行不置 _editBusy，释闸后 RefreshAfterEdit 仍在 UI 线程无闸枚举 Doc，窄窗竞态仍在。更正口径：**释闸先于事件；刷新侧取闸仍 deferred（窄窗竞态跟踪）**。同步更正 spec §12 Imp#4 子条 + EditViewModel 会话闸注释边界注记。
+  - **I5 倾斜/退化 OCS 法向代表测试（双侧，近似口径钉住非精确数学）**：RenderModelTests 补 Circle_TiltedNormal_TessellatesEllipseProjectionApproximation（(1,0,1)/√2：Ax=(0,1,0),Ay=(-1/√2,0,1/√2)→投影 (-y/√2,x)；72 段、中心 (-5/√2,5)、半轴 3/√2 与 3、首点探针）+ Circle_ZeroNormal_NormalizeFallsBackToDefaultExactCircle；MoveEntityTests 补 Move_TiltedNormalCircle_InPlaneProjectionApproximation（odx=4,ody=-3/√2；WCS 位移 (1.5,4)≠(3,4)——法向分量丢弃口径钉住）+ Move_ZeroNormalCircle_NormalizeFallsBackToIdentityDelta。探针核定二则：ACadSharp DxfWriter 对零法向圆整体不落盘（DXF 无 CIRCLE）→退化回落经内存实体钉住；倾斜法向 DXF 往返保持原值 (1,0,1) 不归一（OcsDelta/OcsMapper 内部 Normalize）。
+  - **I2 Issues 失败路径审计 parity（controller 裁定：实现，spec §9 权威）**：IssuesViewModel.Evaluate 失败路径镜像 EditViewModel.RunRegressionCheck 写 check-run 审计（Source="view-check"/Session="view"/params{Error,overlayPresent} 逐字一致/前后哈希空串/嵌套守卫/留痕后 rethrow 降级不变）。TDD：损坏 adjudications/semantic 夹具测试先红（无审计条目）→实现后绿（Error 非空+VerifyChain 绿）；成功路径 parity 既有测试保持绿；无审计注入行为保持。
+- 门禁：dotnet test CadAgent.sln 连绿两次（数字见 outputs/premerge-fix/gate{1,2}.log 与 fix-report.md；基线 908/0/0+新增 7 测试）。
+
+### 合并前 ISTQB 审查 tracked deferred（post-merge 优先序）
+
+1. **I1 OCS 数学双源**：RenderModel.OcsMapper（View）与 EditHandlers.OcsDelta（Data）两份私有任意轴算法实现（注释互指防漂移，I5 已双侧钉住倾斜/退化代表）——建议提取 Core 共享单源（GeometryKit 先例），消除双处漂移根因；提取时须同步审读 I5 数值钉住断言。
+2. **I4 出境同意正向无自动化测试（安全关键）**：confirmCloudEgress 同意→放行路径无 headless 自动化覆盖（既有测试仅拒绝/无 profile 路径；真机 B1 已人工补位，见 view-closure-plan-preview-02 截图）——post-merge 补 fake-client 正向同意专测（不触真实云端）。
+3. **刷新侧取闸（I3 真修复）**：RefreshAfterEdit（含 PlanExecuted 触发的全视图刷新）在 UI 线程无闸枚举 Doc，与并发手动编辑窄窗竞态——真修复=刷新侧取会话闸（需评估 UI 线程持闸阻塞风险），窄窗竞态跟踪。
+4. **Cancel 接线**：T10 窗口关闭时 PlanPreview.Cancel()/_cts Dispose 未接线（在途编排不随窗口关闭取消）——post-merge 与 OpenAiClient 缓存等 Llm 收尾项同批。

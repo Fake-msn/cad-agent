@@ -771,6 +771,58 @@ public class RenderModelTests
         });
     }
 
+    // ---- 合并前 ISTQB I5：倾斜/退化法向代表钉住（近似口径钉住，非精确数学） ----
+    // 既有测试仅覆盖镜像 (0,0,-1)+默认 (0,0,1)；此处补倾斜 (1,0,1)/√2 与退化 (0,0,0)
+    // 代表，钉住当前披露口径（spec §12：倾斜法向 tessellation 投影近似）——
+    // 若未来改为精确椭圆数学或提取 Core 共享实现（I1 deferred），这些数值断言须同步审读。
+
+    [Fact]
+    public void Circle_TiltedNormal_TessellatesEllipseProjectionApproximation()
+    {
+        // N=(1,0,1)/√2（绕 Y 轴倾斜 45°）：任意轴算法 Ax=Wz×N 归一=(0,1,0)，
+        // Ay=N×Ax 归一=(-1/√2,0,1/√2) → OCS(x,y) 投影 WCS XY=(-y/√2, x)（丢弃 WCS Z）。
+        // 圆心 (5,5) r=3 → 投影椭圆中心 (-5/√2,5)、X 半轴 3/√2≈2.1213、Y 半轴 3，
+        // 72 段 tessellation 多边形近似（近似口径钉住，非精确椭圆数学）。
+        WithSession(doc =>
+        {
+            doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(1, 0, 1) });
+        }, s =>
+        {
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Polyline, item.Kind); // 非默认法向→tessellation
+            Assert.Equal(72, item.Points.Count); // 整圆 72 采样、不重复首点
+            Assert.True(item.Closed);
+            double cx = item.Points.Average(p => p.X);
+            double cy = item.Points.Average(p => p.Y);
+            Assert.Equal(-5 / Math.Sqrt(2), cx, 3);
+            Assert.Equal(5, cy, 3);
+            // 像素探针口径（镜像既有测试）：θ=0/90/180/270 均被 5° 步长采样 → 最大偏移=半轴。
+            Assert.Equal(3 / Math.Sqrt(2), item.Points.Max(p => Math.Abs(p.X - cx)), 3);
+            Assert.Equal(3, item.Points.Max(p => Math.Abs(p.Y - cy)), 3);
+            // 首点 θ=0：OCS(8,5) → WCS XY=(-5/√2, 8)。
+            Assert.Equal(-5 / Math.Sqrt(2), item.Points[0].X, 3);
+            Assert.Equal(8, item.Points[0].Y, 3);
+        });
+    }
+
+    [Fact]
+    public void Circle_ZeroNormal_NormalizeFallsBackToDefaultExactCircle()
+    {
+        // 退化法向 (0,0,0)：Normalize len<1e-12 → 回落 (0,0,1)（默认法向快路径）
+        // → 精确 Circle 元数据（非 tessellation）。OcsMapper 侧回落口径钉住
+        // （与 Data 侧 OcsDelta 回落双侧同款）。探针核定：ACadSharp DxfWriter 对
+        // 零法向圆整体不落盘（DXF 无 CIRCLE）——故经内存实体钉住 Normalize 防御路径
+        // （内存构造/编辑管线仍可达），不走 DXF 往返。
+        WithSession(_ => { }, s =>
+        {
+            s.Doc.Entities.Add(new Circle { Center = new XYZ(5, 5, 0), Radius = 3, Normal = new XYZ(0, 0, 0) });
+            var item = Assert.Single(RenderModelBuilder.Build(s));
+            Assert.Equal(RenderKind.Circle, item.Kind);
+            Assert.Equal((5.0, 5.0), item.Points[0]);
+            Assert.Equal(3, item.Points[1].X, 6); // (radius,0) 元数据
+        });
+    }
+
     // ---- 计划4 视图延迟项 Task 2：Dimension 匿名块展开 + Hatch 边界/实心填充 ----
     // 夹具沿用既有 WithSession/DxfFixture 模式：经真实 DXF 写/读往返。探针核定：
     // Dimension.Block 可设且往返保留匿名块（*Dnn，AssignDocument 重命名为 *D{handle}）；

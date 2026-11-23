@@ -159,6 +159,10 @@ public sealed class PlanPreviewViewModel
             // Imp#4：PlanExecuted 移到会话闸 Release 之后触发——MainWindow 经 Dispatcher.Post
             // 的全视图刷新（RefreshAfterEdit/Issues/Audit）不再与并发手动编辑的 Doc 枚举竞态
             // （此前持闸内触发，Post 排队到 UI 线程执行时闸可能已被另一编辑持有/释放，刷新绕闸）。
+            // [合并前 ISTQB I3 更正] 上行"不再竞态"为过度声明：本修复仅重排序（释闸先于事件）。
+            // PlanPreview 执行不置 _editBusy，释闸后 RefreshAfterEdit 仍在 UI 线程无闸枚举 Doc，
+            // 与并发手动编辑的窄窗竞态仍在。真修复=刷新侧取闸，仍 deferred（窄窗竞态跟踪，
+            // 见 view-closure 计划执行记录"合并前 ISTQB 审查 tracked deferred"小节）。
             if (executed) PlanExecuted?.Invoke();
         }
         catch (OperationCanceledException)

@@ -36,6 +36,10 @@ public sealed record EditResult(bool Ok, string TxId, string Error, string Warni
 /// AuditViewModel/IssuesViewModel/SemanticViewModel 的后台 session 读）——
 /// 编辑/撤销整段持闸，杜绝 off-thread diff/check/scan 读到被编辑撕扯的 Doc；
 /// 未提供时自建私有闸（编辑/撤销之间仍串行）。
+/// [合并前 ISTQB I3 边界注记] 上述"杜绝"仅限取闸的 off-thread 消费者；
+/// UI 线程 RefreshAfterEdit（含 PlanExecuted 释闸后触发的全视图刷新）不取闸枚举 Doc，
+/// 与并发编辑的窄窗竞态仍在——刷新侧取闸仍 deferred（窄窗竞态跟踪，
+/// 见 view-closure 计划执行记录"合并前 ISTQB 审查 tracked deferred"小节）。
 /// </summary>
 public sealed class EditViewModel
 {

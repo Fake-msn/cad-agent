@@ -68,6 +68,8 @@ public sealed class IssueEntry
 /// 只读不改图纸；加载/评估异常一律降级为 ErrorMessage（不崩 UI）。
 /// 视图闭环 T6：注入 audit+identity 时成功评估留 check-run 审计（parity CLI check，
 /// Source="view-check"，前后哈希一致）；审计写入失败=检查失败（spec §9 无审计旁路）。
+/// 合并前 ISTQB I2：评估失败（裁定/overlay 损坏等）也留 check-run 审计（Error 字段，
+/// 镜像 EditViewModel.RunRegressionCheck 失败路径口径）——观察性检查故障也入审计（spec §9）。
 /// RefreshAsync 后台评估、回到调用方上下文发布结果并触发 <see cref="IssuesChanged"/>。
 /// 定位：LocateIssue → canvas SelectHandles(Targets) 高亮 + CenterOn(Targets) 居中；
 /// 未接 canvas 或句柄无命中图元（如图层句柄）→ 视图不动。
@@ -205,26 +207,52 @@ public sealed class IssuesViewModel
 
     private EvalResult Evaluate()
     {
-        // 与 CLI LoadRuleSet 同一路径：包加载 + builtin 合成（Id 冲突抛 InvalidSkillException）。
-        var packages = _skillDirs.Select(SkillLoader.LoadDirectory).ToList();
-        SkillSet ruleSet = SkillSet.Compose(BuiltinRules.Load(), packages);
-
-        string agentDir = Path.Combine(_projectDir, ".cadagent");
-        var adjudications = AdjudicationSet.Load(Path.Combine(agentDir, "adjudications.json"));
-        string overlayPath = Path.Combine(agentDir, "semantic.json");
-        var overlay = File.Exists(overlayPath) ? SemanticOverlay.Load(overlayPath) : new SemanticOverlay();
-
-        // 会话闸（T9，T5/T6 承接）：评估读 session 与 EditViewModel 编辑/撤销互斥。
-        _sessionGate?.Wait();
+        // 合并前 ISTQB I2（spec §9 观察性检查故障也入审计）：失败路径镜像
+        // EditViewModel.RunRegressionCheck——check-run + params{Error,overlayPresent}
+        // 字段逐字一致，前后哈希空串（故障时口径）；嵌套守卫：审计再失败不重抛。
+        // 留痕后 rethrow → RefreshAsync 外层 catch 降级 ErrorMessage（行为保持）。
+        bool overlayPresent = false;
         try
         {
-            CheckSummary summary = ViewRuleEngine.Create().Evaluate(ruleSet.AllRules, _session, overlay, adjudications);
-            // 哈希与 Evaluate 同闸段（修复轮1）：_refreshGate 只挡刷新自身，刷新与编辑可并发——
-            // 若在释闸后取哈希，审计哈希会反映评估后被并发编辑改动的状态（复现证据失真），
-            // 并发枚举还可能抛集合修改异常。临界区内取哈希保证 hash == 被评估的图纸状态。
-            string hash = _session.ComputeHash();
-            return new EvalResult(summary, ruleSet.RulePackVersion, adjudications.Fingerprint(), overlay.Annotations.Count > 0, hash);
+            // 与 CLI LoadRuleSet 同一路径：包加载 + builtin 合成（Id 冲突抛 InvalidSkillException）。
+            var packages = _skillDirs.Select(SkillLoader.LoadDirectory).ToList();
+            SkillSet ruleSet = SkillSet.Compose(BuiltinRules.Load(), packages);
+
+            string agentDir = Path.Combine(_projectDir, ".cadagent");
+            var adjudications = AdjudicationSet.Load(Path.Combine(agentDir, "adjudications.json"));
+            string overlayPath = Path.Combine(agentDir, "semantic.json");
+            var overlay = File.Exists(overlayPath) ? SemanticOverlay.Load(overlayPath) : new SemanticOverlay();
+            overlayPresent = overlay.Annotations.Count > 0;
+
+            // 会话闸（T9，T5/T6 承接）：评估读 session 与 EditViewModel 编辑/撤销互斥。
+            _sessionGate?.Wait();
+            try
+            {
+                CheckSummary summary = ViewRuleEngine.Create().Evaluate(ruleSet.AllRules, _session, overlay, adjudications);
+                // 哈希与 Evaluate 同闸段（修复轮1）：_refreshGate 只挡刷新自身，刷新与编辑可并发——
+                // 若在释闸后取哈希，审计哈希会反映评估后被并发编辑改动的状态（复现证据失真），
+                // 并发枚举还可能抛集合修改异常。临界区内取哈希保证 hash == 被评估的图纸状态。
+                string hash = _session.ComputeHash();
+                return new EvalResult(summary, ruleSet.RulePackVersion, adjudications.Fingerprint(), overlayPresent, hash);
+            }
+            finally { _sessionGate?.Release(); }
         }
-        finally { _sessionGate?.Release(); }
+        catch (Exception ex)
+        {
+            if (_audit is not null && _identity is not null)
+            {
+                try
+                {
+                    var op = _identity.Current;
+                    // sessionId "view" 常量口径同成功路径；Source/Kind/target 与成功路径一致。
+                    _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                        "view", "view-check", "check-run", _session.SourcePath,
+                        JsonSerializer.Serialize(new { Error = ex.Message, overlayPresent }),
+                        "", "", "", ""));
+                }
+                catch { /* 嵌套守卫：审计再失败不重抛（镜像 RunRegressionCheck/CLI 最终审查裁定） */ }
+            }
+            throw; // ErrorMessage 降级仍由 RefreshAsync 外层 catch 统一处理（不崩 UI）
+        }
     }
 }

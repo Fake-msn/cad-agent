@@ -506,6 +506,100 @@ public class IssuesViewModelTests
         Assert.False(File.Exists(Path.Combine(f.AgentDir, "audit.db")));
     }
 
+    // ---- 合并前 ISTQB I2：Evaluate 失败路径审计 parity（spec §9 观察性检查故障也入审计） ----
+    // 镜像 EditViewModel.RunRegressionCheck 失败路径口径：check-run + params{Error,overlayPresent}
+    // 字段逐字一致；前后哈希空串（故障时口径，与 view-regression 失败审计同款）；链可验。
+
+    [Fact]
+    public async Task RefreshAsync_CorruptAdjudications_WritesFailedCheckRunAudit()
+    {
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.AgentDir);
+        // 损坏裁定文件：AdjudicationSet.Load 抛 JsonException → Evaluate 失败。
+        File.WriteAllText(Path.Combine(f.AgentDir, "adjudications.json"), "{ 损坏的 JSON !!!");
+        var audit = new SqliteAuditStore(Path.Combine(f.AgentDir, "audit.db"));
+        try
+        {
+            var vm = new IssuesViewModel(f.Session, f.ProjectDir, Array.Empty<string>(),
+                audit: audit, identity: new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+            await vm.RefreshAsync(); // 不抛（不崩 UI）
+            Assert.NotNull(vm.ErrorMessage);
+            Assert.Empty(vm.Issues);
+
+            // 失败也留 check-run 审计（I2：此前仅 ErrorMessage 无留痕，违反 §9）。
+            AuditRecord rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "check-run");
+            AuditEntry e = rec.Entry;
+            Assert.Equal("view-check", e.Source);
+            Assert.Equal("view", e.Session);
+            Assert.Equal("tester", e.Operator);
+            Assert.Equal("Draw", e.Role);
+            Assert.Equal(f.Session.SourcePath, e.Target);
+            // 故障时前后哈希空串（逐字镜像 RunRegressionCheck 失败路径），链仍绿。
+            Assert.Equal("", e.BeforeHash);
+            Assert.Equal("", e.AfterHash);
+            using var doc = JsonDocument.Parse(e.ParamsJson);
+            JsonElement p = doc.RootElement;
+            Assert.False(string.IsNullOrEmpty(p.GetProperty("Error").GetString()));
+            Assert.False(p.GetProperty("overlayPresent").GetBoolean());
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            audit.Dispose();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    [Fact]
+    public async Task RefreshAsync_CorruptOverlay_WritesFailedCheckRunAudit()
+    {
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.AgentDir);
+        // 损坏 overlay：SemanticOverlay.Load 抛 JsonException → Evaluate 失败。
+        File.WriteAllText(Path.Combine(f.AgentDir, "semantic.json"), "not-json-at-all");
+        var audit = new SqliteAuditStore(Path.Combine(f.AgentDir, "audit.db"));
+        try
+        {
+            var vm = new IssuesViewModel(f.Session, f.ProjectDir, Array.Empty<string>(),
+                audit: audit, identity: new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+            await vm.RefreshAsync();
+            Assert.NotNull(vm.ErrorMessage);
+            Assert.Empty(vm.Issues);
+
+            AuditRecord rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "check-run");
+            AuditEntry e = rec.Entry;
+            Assert.Equal("view-check", e.Source);
+            Assert.Equal("check-run", e.Kind);
+            Assert.Equal("", e.BeforeHash);
+            Assert.Equal("", e.AfterHash);
+            using var doc = JsonDocument.Parse(e.ParamsJson);
+            JsonElement p = doc.RootElement;
+            Assert.False(string.IsNullOrEmpty(p.GetProperty("Error").GetString()));
+            // overlay Load 失败发生在 overlayPresent 赋值之前 → false（镜像 RunRegressionCheck 口径）。
+            Assert.False(p.GetProperty("overlayPresent").GetBoolean());
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally
+        {
+            audit.Dispose();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    [Fact]
+    public async Task RefreshAsync_CorruptOverlay_NoAuditInjected_StillDegradesQuietly()
+    {
+        // 无审计注入（既有口径）：失败仅 ErrorMessage，不建库（行为保持）。
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.AgentDir);
+        File.WriteAllText(Path.Combine(f.AgentDir, "semantic.json"), "not-json-at-all");
+        IssuesViewModel vm = f.MakeVm();
+        await vm.RefreshAsync();
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.Empty(vm.Issues);
+        Assert.False(File.Exists(Path.Combine(f.AgentDir, "audit.db")));
+    }
+
     // ---- 修复轮1：哈希临界区 + RoomNameChecker parity ----
 
     /// <summary>
