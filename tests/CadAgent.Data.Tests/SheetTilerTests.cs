@@ -310,4 +310,63 @@ public class SheetTilerTests
         Assert.True(result.Tiles.Count - 1 <= SheetTiler.MaxTiles);
         Assert.Equal(sheet.FrameBounds, result.Tiles[0].Rect);
     }
+
+    // ===== R5 修复钉住测试（单遍实体分桶：格网维度溢出路径 + 同分排序）=====
+
+    [Fact]
+    public void Tiles_HugeGridDimensions_LongBuckets_CoverRightContent()
+    {
+        // 溢出路径：medianH=1 + targetTextPx=1e12 → regionW=2.8e-9（>1e-9 守卫放行）；
+        // frameW=100000 → nx≈3.6e13 超 int：旧 (int)Ceiling 溢出为负 → Math.Max(1,·)=1
+        // 静默只铺第一条带 → 右侧内容无瓦（coverage=0）；新 long 分桶 → 内容格命中。
+        // 内容 10 实体聚幅面右侧远处：6 点 (90000,30000) + 4 点 (95000,35000)（各占一格）。
+        var (sheet, walked) = DirectSetup((0, 0, 100000, 60000),
+            (90000, 30000, 1, "0"), (90000, 30000, 1, "0"), (90000, 30000, 1, "0"),
+            (90000, 30000, 1, "0"), (90000, 30000, 1, "0"), (90000, 30000, 1, "0"),
+            (95000, 35000, 1, "0"), (95000, 35000, 1, "0"),
+            (95000, 35000, 1, "0"), (95000, 35000, 1, "0"));
+
+        var result = SheetTiler.Tiles(sheet, walked, targetTextPx: 1e12);
+
+        var tiles = result.Tiles.Skip(1).ToList(); // 除 overview
+        Assert.True(result.ContentCoverage > 0.5);
+        // 右侧两簇内容均被瓦覆盖（旧溢出实现只铺 (0,0) 第一条带 → 两断言皆红）
+        Assert.Contains(tiles, t => t.Rect.MinX <= 90000 && t.Rect.MaxX >= 90000
+            && t.Rect.MinY <= 30000 && t.Rect.MaxY >= 30000);
+        Assert.Contains(tiles, t => t.Rect.MinX <= 95000 && t.Rect.MaxX >= 95000
+            && t.Rect.MinY <= 35000 && t.Rect.MaxY >= 35000);
+    }
+
+    [Fact]
+    public void Tiles_EqualScore_TieBreak_CxThenCyAscending()
+    {
+        // 同分排序钉住：7 孤立点各占一格（score 全 1），实体喂入顺序故意打乱（(2,2) 最先）；
+        // MaxTiles=6 截断可判别：选瓦须按 (cx,cy) 升序——前 6 格入选、(2,2) 格被截断。
+        // regionW=2800×3.5/24≈408.33、regionH≈255.21 → 幅面 1000×700 划 3×3 格。
+        var (sheet, walked) = DirectSetup((0, 0, 1000, 700),
+            (900, 600, 3.5, "0"), // (2,2)——最先喂入，同分排序下必须被截断
+            (900, 300, 3.5, "0"), // (2,1)
+            (900, 10, 3.5, "0"),  // (2,0)
+            (500, 300, 3.5, "0"), // (1,1)
+            (500, 10, 3.5, "0"),  // (1,0)
+            (10, 300, 3.5, "0"),  // (0,1)
+            (10, 10, 3.5, "0"));  // (0,0)
+
+        var result = SheetTiler.Tiles(sheet, walked);
+
+        var tiles = result.Tiles.Skip(1).ToList();
+        Assert.Equal(SheetTiler.MaxTiles, tiles.Count);
+        // 选瓦顺序 = (cx,cy) 升序：(0,0),(0,1),(1,0),(1,1),(2,0),(2,1)；
+        // 各点仅落自身格扩边 rect 内（10% 边距不足以跨格），逐瓦断言即钉住顺序。
+        var expected = new[] { (10.0, 10.0), (10.0, 300.0), (500.0, 10.0), (500.0, 300.0), (900.0, 10.0), (900.0, 300.0) };
+        for (int i = 0; i < expected.Length; i++)
+        {
+            var (x, y) = expected[i];
+            Assert.True(x >= tiles[i].Rect.MinX && x <= tiles[i].Rect.MaxX
+                && y >= tiles[i].Rect.MinY && y <= tiles[i].Rect.MaxY);
+        }
+        // (2,2) 格点 (900,600) 被 MaxTiles 截断：不被任何非 overview 瓦覆盖
+        Assert.DoesNotContain(tiles, t => 900 >= t.Rect.MinX && 900 <= t.Rect.MaxX
+            && 600 >= t.Rect.MinY && 600 <= t.Rect.MaxY);
+    }
 }

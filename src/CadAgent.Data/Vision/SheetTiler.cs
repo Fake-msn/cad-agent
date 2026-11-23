@@ -10,7 +10,8 @@ namespace CadAgent.Data.Vision;
 /// ① 微字峰（尺寸/轴号 2.4 世界单位）主导字高中位数→regionW≈幅宽 0.27%：
 ///    字高间隙分割（distinct 排序相邻倍率≥8 判双峰→上峰计数加权中位数；单峰保持旧中位数口径）；
 /// ② 锚点 X/Y 独立中位数合成幻影点（L 形锚簇落空区）：图签瓦改锚层实体真实 bbox 中心；
-/// ③ 单锚偏移网格不覆盖大幅面：密度格网选瓦（瓦落内容实体密集格，空格不选）。
+/// ③ 单锚偏移网格不覆盖大幅面：密度格网选瓦（瓦落内容实体密集格，空格不选；
+///    单遍实体分桶 O(N+命中格数)，格网维度 long 运算防整型溢出）。
 /// 以可读字高反算单视口世界区域（regionW = viewportW × readableH / targetTextPx，默认目标字高 24px），
 /// 产 1 overview（rect=FrameBounds，全局定位，恒首）+ 图签瓦 + 密度格瓦（10% 骑缝重叠边距，
 /// 上限 6 非 overview 瓦防爆炸）。TilingResult 披露覆盖率/区域/字高口径（诚实：不假装全幅已读）。
@@ -70,24 +71,36 @@ public static class SheetTiler
         // 单视口已覆盖整幅（文字足够大）→无需切瓦
         if (regionW >= frameW && regionH >= frameH) return new TilingResult(result, 0, 0, 0, "none");
 
-        // 根因②③：密度格网——瓦落在内容实体密集格，非幻影锚偏移
+        // 根因②③：密度格网——瓦落在内容实体密集格，非幻影锚偏移。
+        // R5：单遍实体分桶 O(N+命中格数)——不铺全格网（旧逐格全量 Count 为 O(nx·ny·N)，
+        // 单峰微字+大幅面下分钟级）；nx/ny 用 long 运算，杜绝旧 (int)Ceiling 极端比值
+        // 溢出为负 → Math.Max(1,·)=1 静默只铺第一条带。
         double margin = 0.10; // 骑缝重叠边距（spec §12⑥闭合）
         double cellW = regionW, cellH = regionH;
-        var cells = new List<(int Cx, int Cy, int Score, (double MinX, double MinY, double MaxX, double MaxY) Rect)>();
-        int nx = Math.Max(1, (int)Math.Ceiling(frameW / cellW));
-        int ny = Math.Max(1, (int)Math.Ceiling(frameH / cellH));
-        for (int cx = 0; cx < nx; cx++)
-        for (int cy = 0; cy < ny; cy++)
+        long nx = Math.Max(1L, (long)Math.Ceiling(frameW / cellW));
+        long ny = Math.Max(1L, (long)Math.Ceiling(frameH / cellH));
+        var scores = new Dictionary<(long Cx, long Cy), int>();
+        foreach (var w in inSheet)
         {
-            double minX = frame.MinX + cx * cellW, minY = frame.MinY + cy * cellH;
+            // 半开 [min,max) 语义逐字保持：恰在 frame.Max 边界的实体不入任何格（与旧逐格评分一致）
+            if (w.WorldX >= frame.MaxX || w.WorldY >= frame.MaxY) continue;
+            long cx = (long)Math.Floor((w.WorldX - frame.MinX) / cellW);
+            long cy = (long)Math.Floor((w.WorldY - frame.MinY) / cellH);
+            if (cx < 0 || cx >= nx || cy < 0 || cy >= ny) continue; // 幅面外实体不入格
+            var key = (cx, cy);
+            scores[key] = scores.TryGetValue(key, out int s) ? s + 1 : 1;
+        }
+        // 仅对命中格（score>0）构造 rect；空格不选（根因：空瓦）
+        var cells = new List<(long Cx, long Cy, int Score, (double MinX, double MinY, double MaxX, double MaxY) Rect)>();
+        foreach (var (key, score) in scores)
+        {
+            double minX = frame.MinX + key.Cx * cellW, minY = frame.MinY + key.Cy * cellH;
             double maxX = Math.Min(frame.MaxX, minX + cellW), maxY = Math.Min(frame.MaxY, minY + cellH);
-            int score = inSheet.Count(w => w.WorldX >= minX && w.WorldX < maxX && w.WorldY >= minY && w.WorldY < maxY);
-            if (score == 0) continue; // 空格不选（根因：空瓦）
             // 重叠边距扩 rect（夹取幅面）
             double ex = (maxX - minX) * margin, ey = (maxY - minY) * margin;
             var rect = (MinX: Math.Max(frame.MinX, minX - ex), MinY: Math.Max(frame.MinY, minY - ey),
                         MaxX: Math.Min(frame.MaxX, maxX + ex), MaxY: Math.Min(frame.MaxY, maxY + ey));
-            cells.Add((cx, cy, score, rect));
+            cells.Add((key.Cx, key.Cy, score, rect));
         }
 
         // 图签瓦：锚层实体真实 bbox 中心（根因②幻影锚修复），含锚实体才产
@@ -104,7 +117,9 @@ public static class SheetTiler
         var seen = new HashSet<(double, double, double, double)>();
         if (titleRect is { } tr && tr.MaxX - tr.MinX > 1e-9 && tr.MaxY - tr.MinY > 1e-9 && tr != frame && seen.Add(tr))
             result.Add((sheet.SheetId, tr));
-        foreach (var cell in cells.OrderByDescending(c => c.Score))
+        // 同分钉住 (cx,cy) 升序（旧格网 cx 外/cy 内插入序 + LINQ 稳定排序语义；
+        // 分桶字典枚举序不定，须显式 ThenBy 保序）
+        foreach (var cell in cells.OrderByDescending(c => c.Score).ThenBy(c => c.Cx).ThenBy(c => c.Cy))
         {
             if (result.Count - 1 >= MaxTiles) break;
             if (cell.Rect == frame || !seen.Add(cell.Rect)) continue;
