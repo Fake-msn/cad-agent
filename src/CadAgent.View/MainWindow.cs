@@ -1,8 +1,10 @@
 using System.Globalization;
+using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
+using Avalonia.Data;
 using Avalonia.Interactivity;
 using Avalonia.Input;
 using Avalonia.Layout;
@@ -75,6 +77,10 @@ namespace CadAgent.View;
 /// 工具激活/画布点击/删除/撤销/改层一律拒绝，纸面坐标绝不进模型空间；状态栏只读
 /// 注记 + EditError 引导；不做纸→模型逆映射，deferred）；②OnSheetSelected 补
 /// _editBusy 硬闸（在途编辑期间幅面不切换，selector 索引恢复，防 torn read）。
+/// §4.1④ 勾选→意图补全（Imp#5 deferred 闭合）：问题行 CheckBox（TwoWay IsChecked）
+/// → 填充意图勾选项优先（"{RuleId} [{Force}]: {Suggestion}"）+ 零勾选 mandatory
+/// 兜底（旧格式保持）+ recommended 采纳审计 rule-adopted（Source=rule，经既有
+/// writeAudit/signoffIdentity 同源实例，无旁路）；忽略=未勾选正常决策不留痕。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -150,6 +156,17 @@ public sealed class MainWindow : Window
     private const string LayoutReadOnlyMessage = "布局幅面为只读视图，编辑请切回模型幅面";
     /// <summary>窗口标题图纸名（状态栏 _baseStatus 重建用）。</summary>
     private string _title = "";
+
+    /// <summary>§4.1④ 采纳审计存储（构造期 writeAudit 同源实例：Issues/Edit/Adjudication
+    /// 共用的 T8 写审计——audit.db 存在复用/缺失惰性建库）；加载失败短路分支为 null。</summary>
+    private readonly IAuditStore? _writeAudit;
+
+    /// <summary>§4.1④ 采纳审计身份（构造期 signoffIdentity 同源：签认/编辑/裁定共用）。</summary>
+    private readonly IIdentityProvider? _auditIdentity;
+
+    /// <summary>§4.1④ 零勾选兜底状态栏提示（镜像 _editWarning 机制：OnCanvasInvalidated
+    /// 拼接待显文本；checked 路径/新填充动作清除，避免陈旧提示误导）。</summary>
+    private string _fillIntentNote = "";
 
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null,
         PlanPreviewViewModel? planPreview = null)
@@ -450,6 +467,9 @@ public sealed class MainWindow : Window
         IAuditStore writeAudit = auditStore is SqliteAuditStore or LazyWriteAuditStore
             ? auditStore
             : new LazyWriteAuditStore(auditDbPath);
+        // §4.1④：采纳审计（rule-adopted）经同一写审计实例 + 同一身份（无第二存储/旁路）。
+        _writeAudit = writeAudit;
+        _auditIdentity = signoffIdentity;
 
         // T5：右栏问题清单 VM（in-process check；T10：--skill 目录经 MainViewModel 接线）。
         // 视图闭环 T6：刷新留 check-run 审计（parity CLI check）——写审计复用 T8 存储，
@@ -1028,7 +1048,8 @@ public sealed class MainWindow : Window
     /// <summary>纠偏意图输入框（视图闭环 T10；headless 测试可达）。</summary>
     internal TextBox? PlanIntentInput { get; }
 
-    /// <summary>从问题填充按钮（视图闭环 T10：mandatory 项 ruleId+建议拼接入意图）。</summary>
+    /// <summary>从问题填充按钮（视图闭环 T10；§4.1④：勾选项优先（force 标签）+
+    /// 零勾选 mandatory 兜底 + recommended 采纳审计）。</summary>
     internal Button? FillIntentButton { get; }
 
     /// <summary>生成计划按钮（视图闭环 T10；IsBusy 期间禁用 + 硬闸守卫）。</summary>
@@ -1108,8 +1129,11 @@ public sealed class MainWindow : Window
     /// 展开 = 标准引用 + 原文摘录 + 整改建议 + 检测依据 + 目标句柄。
     /// 行级 PointerPressed（handledEventsToo）→ 定位：Expander 头部 ToggleButton
     /// 会标记指针事件已处理，ListBoxItem 选中不一定触发，故在行根上兜底。
+    /// §4.1④：行首加勾选 CheckBox（content 空，徽章/RuleId 仍在 Expander）——
+    /// IsChecked TwoWay 绑定 IssueEntry.IsChecked（INPC），勾选→填充意图优先取勾选项；
+    /// 复选框在 Expander 之外，点击不触发行级定位（镜像 BuildLayerRow 结构教训）。
     /// </summary>
-    private Expander BuildIssueRow(IssueEntry entry)
+    private Control BuildIssueRow(IssueEntry entry)
     {
         var badge = new Border
         {
@@ -1182,7 +1206,22 @@ public sealed class MainWindow : Window
         expander.AddHandler(PointerPressedEvent,
             new EventHandler<PointerPressedEventArgs>((_, _) => Issues!.LocateIssue(entry)),
             RoutingStrategies.Bubble, handledEventsToo: true);
-        return expander;
+
+        // §4.1④ 勾选框：DataContext=entry → TwoWay 绑定 IsChecked（勾选态跨刷新由
+        // IssuesViewModel key 集恢复，UI 只反映条目状态）。
+        var check = new CheckBox
+        {
+            DataContext = entry,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(2, 6, 0, 0),
+            [!ToggleButton.IsCheckedProperty] = new Binding(nameof(IssueEntry.IsChecked), BindingMode.TwoWay)
+        };
+        var row = new DockPanel();
+        DockPanel.SetDock(check, Dock.Left);
+        row.Children.Add(check);
+        row.Children.Add(expander); // LastChildFill：Expander 占满行其余区域
+        return row;
     }
 
     /// <summary>T5：选中问题行（键盘导航等）→ 画布高亮 Targets 句柄并居中。</summary>
@@ -1234,6 +1273,8 @@ public sealed class MainWindow : Window
             if (_diffSummary.Length > 0) status += $" | {_diffSummary}";
             // T7：编辑警示（Yellow 闸口 / run-regression 回归警告）入状态栏尾部。
             if (_editWarning.Length > 0) status += $" | {_editWarning}";
+            // §4.1④：零勾选兜底填充提示（checked 路径/新填充动作清除）。
+            if (_fillIntentNote.Length > 0) status += $" | {_fillIntentNote}";
             Status.Text = status;
         }
         if (LayerList is not null)
@@ -1857,13 +1898,33 @@ public sealed class MainWindow : Window
         EditError.IsVisible = message is not null;
     }
 
-    /// <summary>视图闭环 T10：从问题填充意图——Issues 中 mandatory 项拼接
-    /// ruleId+建议文本入意图框；无 mandatory 项 → 行内引导（先 Refresh 或手动输入）。</summary>
+    /// <summary>§4.1④ 从问题填充意图（勾选优先）：
+    /// 有勾选 → intent=勾选项（mandatory+recommended 混合），行格式
+    /// "{RuleId} [{Force}]: {Suggestion}"（Force 枚举名原文）；勾选项含 Recommended
+    /// → 追加 rule-adopted 采纳审计（Source="rule"，镜像 rule-adjudicated 先例；
+    /// 仅 Recommended——Mandatory 是义务非采纳；每次填充各留一条，append-only 不去重）。
+    /// 零勾选 → 保持既有 mandatory 自动填充兜底（旧格式 "{RuleId}: {Suggestion}"
+    /// 逐字不变）+ 状态栏提示；无 mandatory 项 → 行内引导（先 Refresh 或手动输入）。
+    /// 忽略=未勾选正常决策（spec §6.2），不留痕。</summary>
     private void OnFillIntentFromIssues(object? sender, RoutedEventArgs e)
     {
         if (PlanPreview is null || PlanIntentInput is null) return;
-        List<IssueEntry> mandatory = Issues?.Issues
-            .Where(i => i.Force == RuleForce.Mandatory).ToList() ?? new List<IssueEntry>();
+        SetFillIntentNote(""); // 新填充动作先清旧兜底提示（镜像 SetEditWarning 口径）
+        List<IssueEntry> all = Issues?.Issues.ToList() ?? new List<IssueEntry>();
+        List<IssueEntry> checkedIssues = all.Where(i => i.IsChecked).ToList();
+        if (checkedIssues.Count > 0)
+        {
+            // 采纳审计先行（镜像 AdjudicationViewModel Append 先于 Save）：写失败 →
+            // 行内错误、不填充（不崩 UI，无审计旁路）。
+            List<IssueEntry> adopted = checkedIssues.Where(i => i.Force == RuleForce.Recommended).ToList();
+            if (adopted.Count > 0 && !TryAppendRuleAdoptedAudit(adopted)) return;
+            SetPlanError(null);
+            PlanIntentInput.Text = string.Join("\n",
+                checkedIssues.Select(i => $"{i.RuleId} [{i.Force}]: {i.Suggestion}"));
+            return;
+        }
+        // 零勾选兜底：既有 mandatory 自动填充行为逐字保持。
+        List<IssueEntry> mandatory = all.Where(i => i.Force == RuleForce.Mandatory).ToList();
         if (mandatory.Count == 0)
         {
             SetPlanError("问题清单无 mandatory 项——先 Refresh 问题清单或手动输入纠偏意图");
@@ -1871,6 +1932,44 @@ public sealed class MainWindow : Window
         }
         SetPlanError(null);
         PlanIntentInput.Text = string.Join("\n", mandatory.Select(i => $"{i.RuleId}: {i.Suggestion}"));
+        SetFillIntentNote("未勾选问题，已按 mandatory 自动填充");
+    }
+
+    /// <summary>§4.1④ recommended 采纳审计：Kind="rule-adopted"、Source="rule"
+    /// （镜像 rule-adjudicated 先例）、Target=图纸路径、Session="view" 常量口径
+    /// （镜像 IssuesVM check-run）；params={adopted:[{ruleId,clause,standard}],count}；
+    /// 填充不改图纸 → BeforeHash==AfterHash==drawing.ComputeHash()。
+    /// 返回 false=写入失败（错误已入行内通道，调用方中止填充——不崩 UI）。</summary>
+    private bool TryAppendRuleAdoptedAudit(List<IssueEntry> adopted)
+    {
+        if (_writeAudit is null || _auditIdentity is null) return true; // 加载失败短路分支不可达（防御）
+        try
+        {
+            OperatorIdentity op = _auditIdentity.Current;
+            string hash = _session.ComputeHash();
+            _writeAudit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                "view", "rule", "rule-adopted", _session.SourcePath,
+                JsonSerializer.Serialize(new
+                {
+                    adopted = adopted.Select(i => new { ruleId = i.RuleId, clause = i.Clause, standard = i.Standard }).ToArray(),
+                    count = adopted.Count
+                }),
+                hash, hash, "", ""));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // 镜像现状降级（AdjudicationViewModel 审计先行 + UI 行内错误）：不崩 UI。
+            SetPlanError($"采纳审计写入失败: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>§4.1④ 兜底提示入状态栏（OnCanvasInvalidated 拼接待显文本；空串=清除）。</summary>
+    private void SetFillIntentNote(string note)
+    {
+        _fillIntentNote = note;
+        Canvas?.Invalidate(); // 状态栏重建（镜像 SetEditWarning）
     }
 
     /// <summary>视图闭环 T10：生成计划（async void 包装 GenerateAsync）。

@@ -714,6 +714,74 @@ public class IssuesViewModelTests
         return dir;
     }
 
+    // ---- §4.1④ 勾选→意图：IsChecked INPC + 跨刷新勾选保持（key=RuleId+Targets） ----
+
+    [Fact]
+    public async Task IsChecked_Set_RaisesPropertyChanged()
+    {
+        using var f = new Fixture();
+        IssuesViewModel vm = f.MakeVm();
+        await vm.RefreshAsync();
+        IssueEntry entry = vm.Issues[0];
+        Assert.False(entry.IsChecked); // 默认未勾选（忽略=正常决策，spec §6.2）
+        var raised = new List<string?>();
+        entry.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+        entry.IsChecked = true;
+        Assert.Equal(new[] { nameof(IssueEntry.IsChecked) }, raised);
+        entry.IsChecked = true; // 同值幂等，不重复通知
+        Assert.Single(raised);
+        entry.IsChecked = false;
+        Assert.Equal(2, raised.Count);
+    }
+
+    [Fact]
+    public async Task Refresh_SameKey_CheckPreservedAcrossRefresh()
+    {
+        using var f = new Fixture();
+        IssuesViewModel vm = f.MakeVm();
+        await vm.RefreshAsync();
+        IssueEntry height = vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2");
+        height.IsChecked = true;
+        await vm.RefreshAsync();
+        IssueEntry rebuilt = vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2");
+        Assert.NotSame(height, rebuilt); // 刷新重建条目（新实例）
+        Assert.True(rebuilt.IsChecked); // 同 RuleId+Targets → 勾选跨刷新保持
+        Assert.False(vm.Issues.Single(i => i.RuleId == "R-50001-13.0.1").IsChecked); // 未勾选不受影响
+    }
+
+    [Fact]
+    public async Task Refresh_DifferentTargetsKey_CheckNotPreserved()
+    {
+        using var f = new Fixture();
+        IssuesViewModel vm = f.MakeVm();
+        await vm.RefreshAsync();
+        vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2").IsChecked = true;
+        // 替换违规文字：同 RuleId 但 Targets（句柄）变化 → key 不同，勾选不保持。
+        TextEntity oldText = f.Session.Doc.Entities.OfType<TextEntity>().First();
+        string oldHandle = oldText.Handle.ToString();
+        f.Session.Doc.Entities.Remove(oldText);
+        f.Session.Doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(30, 30, 0), Value = "新违规文字", Height = 4.2 });
+        await vm.RefreshAsync();
+        IssueEntry rebuilt = vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2");
+        Assert.DoesNotContain(oldHandle, rebuilt.Targets);
+        Assert.False(rebuilt.IsChecked);
+    }
+
+    [Fact]
+    public async Task Uncheck_RemovesKey_NextRefreshNotChecked()
+    {
+        using var f = new Fixture();
+        IssuesViewModel vm = f.MakeVm();
+        await vm.RefreshAsync();
+        vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2").IsChecked = true;
+        await vm.RefreshAsync();
+        IssueEntry restored = vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2");
+        Assert.True(restored.IsChecked);
+        restored.IsChecked = false; // 取消勾选 → key 同步移除
+        await vm.RefreshAsync();
+        Assert.False(vm.Issues.Single(i => i.RuleId == "R-50001-5.0.2").IsChecked);
+    }
+
     [Fact]
     public async Task Refresh_RoomNameRule_Evaluated_ParityWithCli()
     {

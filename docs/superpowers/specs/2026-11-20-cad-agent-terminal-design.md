@@ -547,6 +547,14 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **剩余（明示不假装）**：vision-wiring 剩余边界④真实设备类种子未实证**保持开放**——本轮 seeded=0（GT 吻合 claims 均图签/注记文字无语义类；"电井/配电间/给水"等设备类 claim 无矢量文字命中被拦），待可读瓦命中设备类 GT 后复核；⑦多幅面预算分配策略仍开放（本轮 6 瓦全落幅面1，按产瓦序前 N；coverage 披露为截断前口径）。
 - **门禁**：`outputs/tile-coverage/gate1.log` / `gate2.log`（**1082**=Llm 30+Core 217+Data 319+View 293+Zwcad 13+Cli 210，0 跳过——真实标本 skip-gated 与真实云端 E2E 本机实跑；前后 tasklist 核查无 ZWCAD 残留）。
 
+**§4.1④ 勾选→纠偏意图交互补全（feat/cad-agent-issue-check-intent，2026-11-23 记录；PR#19 Imp#5 deferred 闭合）**：
+
+- **勾选→意图交互落地**：IssueEntry 新增 IsChecked INPC 属性（核心字段 get-only/构造签名不变）+ 问题行 CheckBox（TwoWay 绑定，徽章/RuleId 仍在 Expander）。OnFillIntentFromIssues **checked 优先**：有勾选→intent=勾选项（mandatory+recommended 混合），行格式 `{RuleId} [{Force}]: {Suggestion}`（Force 枚举名原文）；**零勾选兜底**保持既有 mandatory 自动填充（旧格式 `{RuleId}: {Suggestion}` 逐字不变）+ 状态栏提示「未勾选问题，已按 mandatory 自动填充」。Imp#5 所称「后续切片」自此交付，§4.1④「用户勾选问题→LLM 生成步骤计划→预览→人工确认执行」字面交互闭合。
+- **rule-adopted 采纳审计 kind（View 侧新增写入，Core AuditEntry 既有 API 消费，检查器逻辑零改动）**：勾选项含 Recommended 时经 MainWindow 既有写审计实例（writeAudit/signoffIdentity 同源）追加——Source=`rule`（镜像 rule-adjudicated 先例）、Session=`view` 常量口径、Target=图纸路径、params=`{adopted:[{ruleId,clause,standard}],count}`（**仅 Recommended 勾选项**——Mandatory 是义务非采纳，不入采纳审计）；BeforeHash==AfterHash==drawing.ComputeHash()（填充不改图纸）；**每次填充动作各留一条**（append-only 决策日志，不去重）。审计先行（镜像 AdjudicationViewModel）：写失败→行内错误、中止填充，不崩 UI。零勾选兜底/Mandatory-only 勾选无 rule-adopted 条目。
+- **忽略=未勾选正常决策不留痕**（§6.2 recommended 采纳/忽略/修改后采纳口径）：未勾选问题不产生任何审计条目；修改后采纳经意图框自由文本编辑承载（既有能力）。
+- **跨刷新勾选保持（会话级，不持久化）**：IssuesViewModel 持勾选 key 集（key=RuleId+"|"+Targets 逗号连接），Refresh 重建条目按 key 恢复 IsChecked；取消勾选同步移除 key；关闭窗口即清（不落盘）。
+- **门禁**：View.Tests 全量 376 绿 + 全 sln **1214**/0 失败/4 跳过（基线 main 1203 + 本切片 11 新测试；TDD 先红后绿，证据 outputs/issue-check-intent/）。
+
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
 **动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。
