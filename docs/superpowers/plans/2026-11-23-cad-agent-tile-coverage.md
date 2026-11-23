@@ -315,3 +315,4 @@ public void RealSpecimen_TileCoverage_ContentCovered()
 - Rulings：R1 T1→T2 间 View 编译红 sanctioned（顺序任务，门禁只在 T3）；R2 ReadableHeight out bimodal 重载（计划 split 越界笔误）；R3 夹具按注释规格直构 sanctioned；R4 单峰路径旧 Median 口径逐字保持（WeightedMedian 仅双峰上峰）；R5 密度评分单遍分桶+long（plan-mandated Important 本环修复，语义保持）；R6 最终修复波仅 EOF 换行，none 三态混同/cx clamp/锚层关键词 internal 化 park 后续。
 - 遗留 minors（整支 triage 可留）：倍率=8 边界/空表直测、半开 vs inclusive 口径、浮点归桶压线差一格（10% 扩边兜底）、long.MaxValue 极端、none-跳过聚合夹具、锚层关键词测试镜像、存量 CS8602/CS8604 警告、弱子串断言。
 - spec §12：⑥骑缝闭合+覆盖率披露注记（8946072）；④设备种子/⑦多幅预算分配保持开放。
+- PR#20 合入 main 冲突 union 解（9 文件，双方功能/测试全保留，门禁 1207×2：1203 过/0 败/4 Acad 条件跳过；merge 12082d5；交互修：SheetRegistryBuilder.PointsOf 补 Dimension/MText/Hatch 点位——无框 S0 ModelBounds 不再误丢 #19 渲染子图元，R4 legacy 全保留口径恢复）。
