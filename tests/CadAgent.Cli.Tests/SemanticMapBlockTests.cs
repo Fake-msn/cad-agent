@@ -137,6 +137,12 @@ public class SemanticMapBlockTests : IDisposable
     {
         int code = Run("--block", "不存在块", "--symbol", "测试符号");
         Assert.Equal(1, code);
+        // T5 收紧（controller sanctioned）：拒绝必须留痕 kind+reason，不止 exit code
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block-rejected");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.Equal("块不存在", p.RootElement.GetProperty("reason").GetString());
+        Assert.True(audit.VerifyChain(out _));
     }
 
     [Fact]
@@ -144,6 +150,12 @@ public class SemanticMapBlockTests : IDisposable
     {
         int code = Run("--block", "符号块", "--symbol", "测试符号", "--class", "NotAClass");
         Assert.Equal(1, code);
+        // T5 收紧（controller sanctioned）：class 非法拒绝面同样 kind+reason 留痕
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block-rejected");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.Equal("class 非法", p.RootElement.GetProperty("reason").GetString());
+        Assert.True(audit.VerifyChain(out _));
     }
 
     [Fact]
@@ -171,9 +183,50 @@ public class SemanticMapBlockTests : IDisposable
     {
         Assert.Equal(0, Run("--block", "符号块", "--symbol", "测试符号"));
         var outW = new StringWriter(); var errW = new StringWriter();
-        CommandRouter.Run(new[] { "semantic", "scan", "--drawing", _drawing, "--skill", _pkg,
+        // T5 收紧（controller sanctioned）：re-scan 自身必须 exit 0（此前丢弃退出码）
+        int scanCode = CommandRouter.Run(new[] { "semantic", "scan", "--drawing", _drawing, "--skill", _pkg,
             "--project", _project }, outW, errW);
+        Assert.Equal(0, scanCode);
         var overlay = SemanticOverlay.Load(Path.Combine(_project, ".cadagent", "semantic.json"));
         Assert.Equal(3, overlay.Annotations.Count(a => a.Provenance == Provenance.HumanConfirmed));
+    }
+
+    /// <summary>
+    /// T5 补测（controller sanctioned）：块中块嵌套实例——外层块定义内含符号块 Insert，
+    /// 顶层仅 Insert 外层块。map-block 确认符号块→HumanConfirmed 必须落嵌套后缀句柄
+    /// "{parent}:{i}"（BlockWalker 同 convention），不止顶层实例。
+    /// </summary>
+    [Fact]
+    public void MapBlock_NestedInstance_ConfirmsSuffixHandle_HumanConfirmed()
+    {
+        // 读回图纸→加外层块（内含符号块 Insert）+顶层 Insert 外层块→重写（DxfFixture 读回改写模式）
+        CadDocument doc;
+        using (var fs = File.OpenRead(_drawing)) doc = new DxfReader(fs).Read();
+        var inner = doc.BlockRecords.First(b => b.Name.Equals("符号块", StringComparison.OrdinalIgnoreCase));
+        var outer = new BlockRecord("外层块");
+        outer.Entities.Add(new Insert(inner) { InsertPoint = new XYZ(5, 5, 0) });
+        doc.BlockRecords.Add(outer);
+        doc.Entities.Add(new Insert(outer) { InsertPoint = new XYZ(500, 0, 0) });
+        using (var fs = File.Create(_drawing)) DxfWriter.Write(fs, doc);
+
+        int code = Run("--block", "符号块", "--symbol", "测试符号");
+        Assert.Equal(0, code);
+        using var j = JsonDocument.Parse(LastStdout);
+        // 3 顶层 + 1 嵌套（外层块内 Insert）= 4 实例
+        Assert.Equal(4, j.RootElement.GetProperty("instances").GetInt32());
+        var overlay = SemanticOverlay.Load(Path.Combine(_project, ".cadagent", "semantic.json"));
+        var confirmed = overlay.Annotations.Where(a => a.Provenance == Provenance.HumanConfirmed).ToList();
+        Assert.Equal(4, confirmed.Count);
+        // 嵌套实例落后缀句柄（含 ':'），且恰 1 条（外层块内仅 1 个符号块 Insert）
+        var nested = Assert.Single(confirmed, a => a.TargetHandle.Contains(':'));
+        Assert.Equal(1.0, nested.Confidence);
+        Assert.Equal(SemanticClass.Device, nested.Class);
+        Assert.StartsWith("人工确认块映射:", nested.Evidence);
+        // 后缀句柄前缀=顶层外层 Insert 句柄（读回核定，不赌写盘句柄值）
+        using var fs2 = File.OpenRead(_drawing);
+        var reread = new DxfReader(fs2).Read();
+        var outerInsert = reread.Entities.OfType<Insert>().First(i =>
+            i.Block?.Name.Equals("外层块", StringComparison.OrdinalIgnoreCase) == true);
+        Assert.StartsWith(outerInsert.Handle.ToString() + ":", nested.TargetHandle);
     }
 }
