@@ -546,6 +546,52 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **审计/安全/成本**：审计 8 条验链绿 + 外部锚通过；密钥 stdout/stderr/审计全文 grep `sk-` 零命中；标本源/副本 SHA-256 前后一致（源目录零触碰，working/sidecar 全落副本目录）；云端总瓦披露：对照 1 跑 + 门禁 2 跑（各含真实云端 E2E）= 3 跑×6 瓦 = **18 瓦**（每跑≤6 瓦绑定约束保持）。
 - **剩余（明示不假装）**：vision-wiring 剩余边界④真实设备类种子未实证**保持开放**——本轮 seeded=0（GT 吻合 claims 均图签/注记文字无语义类；"电井/配电间/给水"等设备类 claim 无矢量文字命中被拦），待可读瓦命中设备类 GT 后复核；⑦多幅面预算分配策略仍开放（本轮 6 瓦全落幅面1，按产瓦序前 N；coverage 披露为截断前口径）。
 - **门禁**：`outputs/tile-coverage/gate1.log` / `gate2.log`（**1082**=Llm 30+Core 217+Data 319+View 293+Zwcad 13+Cli 210，0 跳过——真实标本 skip-gated 与真实云端 E2E 本机实跑；前后 tasklist 核查无 ZWCAD 残留）。
+
+## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
+
+**动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。
+
+**诚实边界（实证钉死）**：电施 `$equip$00002832`×1364 等天正设备块**块定义无可读几何**（代理图形不暴露，census Yellow 领地）——指纹不可匹配，不假装；此类块入歧义清单标 `reason="代理图形不可读"` + T3 指引。指纹真实目标＝有实几何的自定义 plain 块（如 `2` 96 实体 10.2×27.3、`2021_0722_204741` 700×700 Circle×22）与标准符号块。GB 符号库精确命中在该语料可能稀少——三级输出价值在建议+人工映射两翼，不赌命中率。
+
+### 13.1 决策基线（用户批准）
+
+- **落种子分级**：精确指纹命中→自动 `GeometryInference` 0.9（高于语义闸 0.8、低于人工 1.0，仿 LayerInference 0.8 确定性先例）；近似命中→**只建议不自动**，人工确认→`HumanConfirmed` 1.0；无命中高频块→块级歧义清单待人工映射。
+- **扫描范围**：全块定义（含 `*U` 匿名块——T3 导出态几何常落匿名块）；排除 `*Model`/`*Paper` 空间块、空定义、图框块（**AttributeDefinition 存在且 bbox 最长边≥500**——实证图框 841~1486 vs 符号库≤10）、`$LinePat$`/`$TCHSYS$` 系统前缀块。符号库范围＝项目已加载 skill 包（与 insert-symbol 同口径，`--skill` 注入同路）。
+- **方案选定 A**：归一化矢量指纹+三级匹配（纯 Data 层，无渲染依赖）；否决 B 纯精确（丢近似翼，与分级决策矛盾）/C 位图 pHash（渲染依赖+分辨率敏感+失矢量精度，341 符号库过度工程）。
+
+### 13.2 指纹与匹配算法
+
+- **指纹提取**（`BlockFingerprint`，Data/Semantic，纯静态）：块定义**直接几何**（不递归子块——嵌套符号实例经其自身块定义匹配）仅 LINE/CIRCLE/ARC（与 insert-symbol 白名单同口径；TEXT 不入哈希——注记文字随实例变化，留作辅助证据）→ bbox 平移归零 + **最长边归一**（退化 bbox 安全：13 单轴符号实证）→ 坐标量化 round(1e-3) → 实体元组规范排序 → SHA256 大写 hex（借鉴 AdjudicationSet.Fingerprint 模式）。
+- **结构签名**（近似预过滤）：实体类型直方图 + bbox 宽高比 + 圆半径比签名；签名相容才入几何距离计算。
+- **近似距离**：归一化几何逐实体匹配平均距离 d∈[0,1]；**初始阈值 0.15**（真实标本实战校准，校准证据入执行记录）；置信度 = **0.9 − 2d**（d=阈值 0.15 时置信 0.6，低于闸 0.8 → 近似永不自动落种子，数学保证）。
+- **精确层**：哈希相等→该块全部 Insert 实例落 `GeometryInference` 0.9，evidence="几何指纹精确匹配: {符号名}"。
+- **近似层**：d≤阈值→建议（blockName, candidates[符号名, d, confidence] 按 d 升序全列不静默择一, instanceCount, sampleHandles≤5）。
+- **歧义层**：无命中且 instanceCount≥**3**（默认，`semantic scan --min-block-instances <n>` 可配）→块级歧义（blockName, instanceCount, 实体直方图, bbox, sampleHandles, reason）；代理无几何块 reason="代理图形不可读"+T3 指引。
+
+### 13.3 组件与数据流
+
+- 新 `src/CadAgent.Data/Semantic/BlockFingerprint.cs`（提取/签名/距离）+ `BlockSymbolMatcher.cs`（消费 SkillSet 符号库→索引→三级输出）；符号 DXF 读取复用 SkillPackage.LoadSymbols + 白名单校验，**读失败/超白名单实体→该符号诚实跳过+计数披露**（不整体失败）。
+- `SemanticScanner.Scan` 信号链：BlockAttributeSeeder 之后插入块指纹信号；HumanConfirmed 跳过不变；re-scan 先清陈旧块级 GeometryInference（仿 NativeObject 清理先例），HumanConfirmed 保留。
+- CLI `semantic scan` stdout **加性键** blockAutoSeeded/blockSuggestions/blockAmbiguous（旧字段逐字不变）；审计 semantic-scan params 加性计数。
+- 新 CLI `semantic map-block --block <name> --symbol <symbolName> [--class <cls>]`：确认时**重提取指纹复核**（精确或 d≤阈值，否则拒绝留痕 exit 非零）→ HumanConfirmed 1.0 落该块全部实例（class 默认取符号 meta.Class，--class 覆盖须合法枚举）→ 审计 **semantic-map-block**（before==after 哈希，overlay-only）。**Yellow 闸豁免沿用 semantic map 先例**（只改 overlay 不改图纸）；单写入通道+原子写复用。
+- 建议**不持久化**（scan 确定性可重算，map-block 复核制）；View 面板 deferred（CLI 先行切片先例）。
+
+### 13.4 错误处理与并发
+
+- 符号库空/未加载→三级输出空+披露（不报错）；块定义读取异常→该块跳过+计数；量化/归一数值守卫 IsFinite（NaN/∞ 实体坐标→该实体剔除+披露）。
+- map-block 失败面：块不存在/符号不存在/指纹不符/class 非法→审计拒绝（semantic-map-block-rejected）+stderr+exit 非零；overlay 写失败→既有降级链。
+- 并发：scan 只读；map-block 经项目单写入通道（哈希链有序追加）；与在途编辑 tx 互斥沿用会话闸。
+
+### 13.5 测试与验证
+
+- 合成夹具 TDD：精确克隆命中 0.9 / 扰动近似建议（d>0 不自动）/ TEXT 差异仍精确 / 图框排除 / 系统前缀排除 / 退化 bbox 归一 / 多候选排序不静默择一 / 置信公式闸下保证 / map-block 确认→HumanConfirmed+闸过 / 复核不符拒绝留痕 / re-scan 清陈旧保 HumanConfirmed / Yellow 豁免 parity / 空库披露 / 代理块 reason 标注。
+- 真实标本 skip-gated 实战（电施副本，源零触碰）：三级输出诚实期望（精确命中可能 0）+ $equip$ 代理标注 + 高频自定义块入歧义；before/after 证据存档 outputs/block-fingerprint/。
+- 门禁全 sln 连绿两次；§12 追加闭环注记（含阈值校准证据）。
+
+### 13.6 不做（明示）
+
+位图渲染/pHash；建议持久化；View 面板（deferred）；近似自动种子；$equip$ 代理语义硬解析（census/T3 领地）；子块递归指纹（嵌套经自身定义匹配）；图框块语义种子。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
