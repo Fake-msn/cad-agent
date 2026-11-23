@@ -514,6 +514,17 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **剩余边界（明示不假装）**：①视图交互按钮路径 deferred（headless `--confirm-egress` 为唯一生产视觉入口；**R3：生产由人工权衡数据出境后手动给 flag**，测试经用户授权行使该通道，不伪造人工确认语义）；②claim.Region 瓦片几何校验 deferred（region 当前仅描述文本，佐证走幅面级矢量 GT）；③bulge 弧保守限（RenderModel 弧段以直弦近似——视觉输入弧几何非精确；GT 交叉验证用真实矢量不受影响）；④真实设备类种子未实证（本轮 overview 图签区 claims 无语义类；LlmInference 0.9 种子通道由 fake/合成夹具钉住，真实设备种子待可读瓦片命中——诚实缺口）；⑤profile 默认 timeoutSeconds **已按用户裁定 60→600（2026-11-23）**，生产 profile 同步 600；视觉长输出超时缺口闭合（E2E 不再 override）；⑥瓦片零重叠骑缝（幅面感知⑨既有）；⑦多幅面预算分配策略（当前按产瓦序前 N，幅面均衡覆盖留后续）。
 - **门禁**：`outputs/vision-wiring/gate1.log` / `gate2.log`（**1057**=Llm 30+Core 208+Data 309+View 289+Zwcad 13+Cli 208，0 跳过——真实标本 skip-gated 与真实云端 E2E 本机实跑；前后 tasklist 核查无 ZWCAD 残留）。验证协议：`docs/verification/sheet-aware-protocol.md` §6 视觉接线实战节。
 
+**tile-coverage 切片完成（T1-T3，2026-11-23 记录；全套件 1082 测试连绿两次含 13 Zwcad 真机 + 每门禁 1 真实云端 E2E）**：
+
+- **根因三重实证**（`outputs/api-probe/tile-coverage-out.txt`，真实标本 1#配套用房0928）：①微字峰——尺寸/轴号字高 2.4 世界单位（477 个）主导字高中位数 → regionW≈280=幅宽 0.27%，5/6 瓦空（all=0/content=0）；②幻影锚——锚点 X/Y 独立中位数合成落空区（L 形锚簇图签瓦不中图签）；③单锚偏移网格——以单锚中心偏移铺格不覆盖大幅面内容簇。before 基线：claims 14 / seeded 0 / ambiguous 14，coverage≈0.003（6 瓦×0.27% 幅宽；vision-wiring 实战存档 `outputs/vision-wiring/p1-vision-stdout.json`）。
+- **T1 修复**（SheetTiler）：字高间隙分割（distinct 排序相邻倍率≥8 判双峰→上峰计数加权中位数；单峰保持旧中位数口径逐字不变——实证间隙 2.7→150=55× vs 峰内≤1.6×，裕度充分）+ 密度格网选瓦（瓦落内容实体密集格、空格不选；R5 单遍实体分桶 O(N+命中格数)，格网维度 long 运算防整型溢出，同分按 (cx,cy) 升序钉住）+ 图签瓦改锚层实体真实 bbox 中心 + **10% 骑缝重叠边距（vision-wiring 剩余边界⑥＝幅面感知⑨"瓦片零重叠骑缝文字可能截半"自此闭合）** + TilingResult.ContentCoverage 披露（被≥1 非 overview 瓦覆盖的 inSheet walked 实体比例）。
+- **T2 披露**（VisionScanMode stdout 加性 coverage/regionW/heightBasis）：coverage=实体数加权聚合 sum(coverage_i×inSheet_i)/sum(inSheet_i)（0 权幅面跳过）；regionW/heightBasis 取首幅非 none 值；**截断前全量切瓦口径**——--max-tiles 预算截断进一步降低实际已读覆盖，tilesTotal/maxTiles 另行披露，不假装已读=全覆盖。双幅面加权聚合+首非 none basis 由 fake 夹具直接钉住（T2 遗留 minor 闭合）。
+- **T3 真实对照**（`outputs/tile-coverage/`，combat-t3 副本 + --confirm-egress --max-tiles 6，DashScope qwen3-vl-plus）：exit 0 / Yellow / tiles 6（tilesTotal 82）/ **claims 14→77 / seeded 0 / ambiguous 14→54 / completionTokens 598→2742**（before 5/6 瓦空 claims 仅 5 token → after 6/6 瓦产 claims）/ **coverage≈0.003→0.741074**（加权聚合，探针与 stdout 精确一致）/ regionW 280→75767.5 / heightBasis=bimodal-upper；**首幅 ContentCoverage 0.003→1.0000**（603/603 实体覆盖、空瓦 0；skip-gated 测试 RealSpecimen_TileCoverage_ContentCovered 钉住 >0.5 + 空瓦≤1）。诚实披露：纯微字详图幅面4/6（单峰 median regionW=280）6 瓦上限下覆盖率≈0.09，不假装全覆盖。
+- **GT 抽查**（`outputs/tile-coverage/t3-gt-spotcheck.md`）：新增可读瓦 claims（图纸升版记录表/英文图签行/证书编号/签署栏多岗位）与矢量 GT 逐字吻合；20/54 无 GT 命中全拦截（含凭空项目名"君悦新居"幻觉、设计院名先验填充变体、688→666 数字误读）——**可读≠不幻觉，交叉验证闸不可省**；地址行 before 误读"项目：成都…"被拦 → 本轮逐字正确读出"地址：成都市天府大道中段688号大源国际中心"。
+- **审计/安全/成本**：审计 8 条验链绿 + 外部锚通过；密钥 stdout/stderr/审计全文 grep `sk-` 零命中；标本源/副本 SHA-256 前后一致（源目录零触碰，working/sidecar 全落副本目录）；云端总瓦披露：对照 1 跑 + 门禁 2 跑（各含真实云端 E2E）= 3 跑×6 瓦 = **18 瓦**（每跑≤6 瓦绑定约束保持）。
+- **剩余（明示不假装）**：vision-wiring 剩余边界④真实设备类种子未实证**保持开放**——本轮 seeded=0（GT 吻合 claims 均图签/注记文字无语义类；"电井/配电间/给水"等设备类 claim 无矢量文字命中被拦），待可读瓦命中设备类 GT 后复核；⑦多幅面预算分配策略仍开放（本轮 6 瓦全落幅面1，按产瓦序前 N；coverage 披露为截断前口径）。
+- **门禁**：`outputs/tile-coverage/gate1.log` / `gate2.log`（**1082**=Llm 30+Core 217+Data 319+View 293+Zwcad 13+Cli 210，0 跳过——真实标本 skip-gated 与真实云端 E2E 本机实跑；前后 tasklist 核查无 ZWCAD 残留）。
+
 ## 附录：调查证据来源
 
 - Autodesk 官方编程接口文档：https://help.autodesk.com/cloudhelp/2026/CHS/AutoCAD-Customization/files/GUID-E6429154-36DF-4D84-8ABC-9FCA15B66158.htm
