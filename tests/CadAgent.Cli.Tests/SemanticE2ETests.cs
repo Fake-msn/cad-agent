@@ -235,6 +235,11 @@ public class SemanticE2ETests : IDisposable
             Assert.Equal(0, c1);
             using (var d1 = JsonDocument.Parse(out1))
                 Assert.Equal(4, d1.RootElement.GetProperty("blockAutoSeeded").GetInt32());
+            // fix wave（测试小缺口）：精确夹具下审计 params blockAutoSeeded>0（=4 实例）——
+            // stdout/审计双通道计数一致，防审计侧空过。
+            var rec1 = Assert.Single(AuditRecords(), r => r.Entry.Kind == "semantic-scan");
+            using (var p1 = JsonDocument.Parse(rec1.Entry.ParamsJson))
+                Assert.Equal(4, p1.RootElement.GetProperty("blockAutoSeeded").GetInt32());
             Assert.Equal(0, Run("semantic", "map", "--layer", "DEV-A", "--class", "Lighting", "--drawing", blockDxf).code);
             // 块定义改走样（加对角线 → 指纹漂移）；.dxf 的 SaveWorking 即写回源路径。
             var session = DrawingSession.Load(blockDxf);

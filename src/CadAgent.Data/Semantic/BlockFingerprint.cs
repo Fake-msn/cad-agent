@@ -17,7 +17,8 @@ public static class BlockFingerprint
     /// <summary>近似匹配阈值：几何距离 ≤ 0.15 视为近配（三级匹配第二档）。</summary>
     public const double NearThreshold = 0.15;
 
-    /// <summary>置信公式：d=0 → 0.9；d=NearThreshold → 0.6（闸下保证 &lt; 0.8）。</summary>
+    /// <summary>置信公式：d=0 → 0.9；d=NearThreshold → 0.6（d≥0.05 时 conf≤0.8——R7 同框限定；
+    /// 结构性保证是近似永不自动落种子，非全值域公式闸下，d&lt;0.05 时 conf&gt;0.8）。</summary>
     public static double Confidence(double d) => 0.9 - 2 * d;
 
     /// <summary>归一化几何：坐标已平移归零+最长边归一+量化；Aspect 为归一化前原始 bbox 的 min(w,h)/max(w,h)∈[0,1]。</summary>

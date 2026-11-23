@@ -92,11 +92,13 @@ public class BlockFingerprintTests
     [Fact]
     public void Distance_Identical_Zero_AndConfidenceFormula()
     {
+        // R3 机械守卫（fix wave）：阈值字面量钉住——静默改阈必须显式改此断言，禁止无声漂移。
+        Assert.Equal(0.15, BlockFingerprint.NearThreshold);
         var a = BlockFingerprint.Extract(Symbol())!;
         Assert.Equal(0, BlockFingerprint.Distance(a, a), 9);
         Assert.Equal(0.9, BlockFingerprint.Confidence(0), 9);
         Assert.Equal(0.6, BlockFingerprint.Confidence(BlockFingerprint.NearThreshold), 9);
-        Assert.True(BlockFingerprint.Confidence(BlockFingerprint.NearThreshold) < 0.8); // 闸下保证
+        Assert.True(BlockFingerprint.Confidence(BlockFingerprint.NearThreshold) < 0.8); // 闸下（d=0.15≥0.05 限定域）
     }
 
     [Fact]

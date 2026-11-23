@@ -132,6 +132,43 @@ public class SemanticMapBlockTests : IDisposable
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block-rejected");
     }
 
+    /// <summary>
+    /// fix wave（Important#1）：非法 --skill 目录→用法错误先于任何副作用——
+    /// 异常经 Run 兜底 exit 1，audit.db 不创建、overlay 不落
+    /// （镜像 scan --min-block-instances 先例测试模式）。
+    /// </summary>
+    [Fact]
+    public void MapBlock_InvalidSkillDir_Exit1_BeforeAnySideEffect()
+    {
+        string bogus = Path.Combine(_project, "no-such-skill");
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = CommandRouter.Run(new[] { "semantic", "map-block", "--drawing", _drawing,
+            "--block", "符号块", "--symbol", "测试符号", "--skill", bogus,
+            "--project", _project }, outW, errW);
+        Assert.Equal(1, code);
+        Assert.NotEmpty(errW.ToString());
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "audit.db")));
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "semantic.json")));
+    }
+
+    /// <summary>
+    /// fix wave（测试小缺口）：无 --skill→空包列表→符号不存在 reason 留痕 exit 1
+    /// （用法合法故走 OpenAudit 后拒绝面，与非法包零副作用路径区分）。
+    /// </summary>
+    [Fact]
+    public void MapBlock_NoSkill_EmptyPackages_SymbolNotFound_RejectedAudited()
+    {
+        var outW = new StringWriter(); var errW = new StringWriter();
+        int code = CommandRouter.Run(new[] { "semantic", "map-block", "--drawing", _drawing,
+            "--block", "符号块", "--symbol", "测试符号", "--project", _project }, outW, errW);
+        Assert.Equal(1, code);
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        var rec = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "semantic-map-block-rejected");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.Equal("符号不存在", p.RootElement.GetProperty("reason").GetString());
+        Assert.True(audit.VerifyChain(out _));
+    }
+
     [Fact]
     public void MapBlock_UnknownBlock_Rejected_Exit1()
     {

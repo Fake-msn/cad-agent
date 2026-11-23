@@ -7,7 +7,8 @@ namespace CadAgent.Data.Tests;
 /// <summary>
 /// BF-T5：真实标本实证（skip-gated，spec §13.5）——电施强电副本 + electrical skill 包
 /// （324 符号）全链 Scan：三级输出口径一致性断言（公式/marker/reason 合法/只读），
-/// 不赌 GB 精确命中数（语料为 TArch $equip$ 代理 + 自定义 plain 块，精确命中可能 0）。
+/// 不赌 GB 精确命中数（语料为 TArch $equip$ 代理 + 自定义 plain 块；命中率因语料而异——
+/// 本标本实证 102 实例精确命中，其他语料可能更低，不赌具体数字）。
 /// 标本只读副本（源 D: 零触碰）：临时目录副本字节前后一致；缺标本/缺包→显式跳过不假装。
 /// </summary>
 public class RealBlockFingerprintTests
@@ -46,14 +47,19 @@ public class RealBlockFingerprintTests
             Assert.True(bm.BlocksScanned + bm.BlocksExcluded > 200); // 普查 246 非空块口径
             // 自动种子全 0.9 + marker；建议全闸下 + 公式；歧义 reason 合法 + 样本非空
             var overlay = result.Overlay;
-            Assert.All(overlay.Annotations.Where(a => a.Evidence.StartsWith("几何指纹精确匹配:")),
+            // 防空过（fix wave）：marker 集非空 + 计数 tie 到 AutoSeeds 实例句柄总数
+            var markers = overlay.Annotations.Where(a => a.Evidence.StartsWith("几何指纹精确匹配:")).ToList();
+            Assert.NotEmpty(markers);
+            Assert.Equal(bm.AutoSeeds.Sum(a => a.Handles.Count), markers.Count);
+            Assert.All(markers,
                 a => { Assert.Equal(0.9, a.Confidence); Assert.Equal(Provenance.GeometryInference, a.Provenance); });
             Assert.All(bm.Suggestions.SelectMany(s => s.Candidates), c =>
             {
                 Assert.InRange(c.Distance, 0, BlockFingerprint.NearThreshold);
                 Assert.Equal(BlockFingerprint.Confidence(c.Distance), c.Confidence, 9);
                 // T5 真实语料更正（brief 原断言 c.Confidence<0.8 过度）：公式 0.9−2d 为 spec §13.2
-                // 钉住口径，d<0.05 → conf>0.8（本标本 30 候选中 17 个 conf≥0.8，d∈[0.04,0.05)）。
+                // 钉住口径，d<0.05 → conf>0.8（本标本 30 候选中 17 个 conf≥0.8，d∈[0.0035,0.05]，
+                // 含 LG-QQ1→电锁按键 d=0.0035 最小距离候选）。
                 // "近似永不自动落种子"是结构保证（近似档只披露不落标注），非全值域公式闸下——
                 // 断言口径一致性（公式+值域 [0.6,0.9]），阈值 0.15 不动（R3 不静默改阈）。
                 Assert.InRange(c.Confidence, 0.6, 0.9);

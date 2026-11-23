@@ -795,7 +795,8 @@ public static partial class CommandRouter
     /// 块不存在/符号不存在/块无几何/符号无几何/指纹不符/class 非法。
     /// class 默认符号 meta.Class；--class 覆盖须 Enum.TryParse 成功（SemanticMap 同口径）。
     /// 符号首包命中 OrdinalIgnoreCase（镜像 ImportSymbolHandler）；drawing Load 失败
-    /// 镜像 scan intake-rejected 留痕。
+    /// 镜像 scan intake-rejected 留痕。--skill 用法校验先于 OpenAudit（最终审查
+    /// Important#1：非法包→exit 1 零副作用，audit.db 不创建）。
     /// </summary>
     private static int SemanticMapBlock(string[] args, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -803,7 +804,11 @@ public static partial class CommandRouter
         string blockName = RequireOption(args, "--block");
         string symbolName = RequireOption(args, "--symbol");
         string drawingPath = RequireOption(args, "--drawing");
-        // 审计先行（最终审查裁定）：drawing Load 失败也必须留痕（scan intake-rejected 镜像）。
+        // 用法校验先于任何副作用（LoadRuleSet/scan 先例，最终审查 Important#1）：
+        // 非法 skill 包→异常经 Run 兜底 exit 1，此时 audit.db 未建、working 未物化。
+        var packages = LoadSkillPackages(args);
+        // 审计先行（最终审查裁定，仅覆盖 drawing Load 失败留痕，不要求用法校验在审计后）：
+        // Load 失败也必须留痕（scan intake-rejected 镜像）。
         using var audit = OpenAudit(agentDir);
         var op = Identity(agentDir).Current;
         DrawingSession drawing;
@@ -819,7 +824,6 @@ public static partial class CommandRouter
             stderr.WriteLine(ex.Message);
             return 1;
         }
-        var packages = LoadSkillPackages(args);
         // 符号首包命中（OrdinalIgnoreCase，镜像 ImportSymbolHandler）
         SymbolMeta? meta = null;
         SkillPackage? owner = null;
