@@ -61,7 +61,11 @@ public class VendorCommandTests : IDisposable
         Assert.Equal(0, code);
         Assert.Contains("ZWCAD", stdout);
         Assert.Contains("Verified", stdout);
-        Assert.Contains("CompatibleUnverified", stdout);
+        // 2026-11-24 矩阵升级：AutoCAD 2014 真机 4 绿 + Blocks.Add 探针核定 → Verified，
+        // 矩阵不再有 CompatibleUnverified 条目；改钉 AutoCAD Verified + TArch Unsupported。
+        Assert.Contains("AutoCAD", stdout);
+        Assert.Contains("Unsupported", stdout);
+        Assert.DoesNotContain("CompatibleUnverified", stdout);
     }
 
     [Fact]

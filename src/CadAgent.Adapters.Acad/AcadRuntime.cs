@@ -11,7 +11,7 @@ namespace CadAgent.Adapters.Acad;
 /// 状态：CompatibleUnverified——开发机无 AutoCAD（孤儿注册），真机验证按
 /// docs/verification/autocad-adapter-protocol.md 在工作环境执行。
 /// 与 ZwcadRuntime 同源结构；差异经 VendorProfiles.Acad 参数化
-/// （Blocks.Add 文档序 Name 先，待真机探针核定）。
+/// （Blocks.Add 实测序 origin 先，2026-11-24 真机探针核定，与文档相反）。
 /// </summary>
 public sealed class AcadRuntime : ICadRuntime
 {
@@ -257,8 +257,8 @@ public sealed class AcadRuntime : ICadRuntime
             try { dynamic b0 = blocks.Item(blockName); exists = b0 != null; }
             catch { exists = false; }
             if (exists) return;
-            // AutoCAD 文档序=(Name, origin)；与 ZWCAD 实测序相反。
-            // 真机探针若核定相反，翻 VendorProfiles.Acad.BlocksAddNameFirst 即可。
+            // AutoCAD 2014 实测序=(origin, Name)（2026-11-24 探针核定，与文档序相反，同 ZWCAD）。
+            // 厂商差异仅数据：翻 VendorProfiles.Acad.BlocksAddNameFirst 即可，无需改此逻辑。
             dynamic block = Profile.BlocksAddNameFirst
                 ? blocks.Add(blockName, Pt(0, 0))
                 : blocks.Add(Pt(0, 0), blockName);

@@ -90,8 +90,8 @@ public class AcadLiveTests : IDisposable
         rt.AddText(50, 50, "生成式标注", 5);
         rt.AddCircle(20, 20, 7.5);
         Assert.Equal(4, rt.EntityCount());
-        // EnsureBlock 走 BlocksAddNameFirst=true（AutoCAD 文档序）。
-        // 若此处 COM 报错→真机核定签名序相反→翻 VendorProfiles.Acad 标志并重跑（协议文档步骤 4）。
+        // EnsureBlock 走 BlocksAddNameFirst=false（2026-11-24 真机探针核定：AutoCAD 2014
+        // 实测序=(origin, Name)，与 Autodesk 文档序相反，同 ZWCAD；g3 证据归档）。
         rt.EnsureBlock("SYM", new BlockPrimitive[]
         {
             new BlockCircle(0, 0, 1.5),
