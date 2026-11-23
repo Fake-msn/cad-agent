@@ -249,4 +249,97 @@ public class VisionScanModeTests : IDisposable
         Assert.Equal(1, code);
         Assert.Contains("--drawing", errW.ToString());
     }
+
+    // ===== T4：--max-tiles 瓦片预算（真实云端成本控制；截断必须披露，不静默）=====
+
+    /// <summary>多瓦夹具：图框 (0,0)-(1000,700) + 小字高文字（Height=2 → regionW≈233/regionH≈146
+    /// 远小于幅面 → overview+6 tiles=7 瓦）+ 设备 Insert（A=深照型灯，GT 佐证面）。</summary>
+    private static string CreateMultiTileDrawing() => DxfFixture.CreateTempDxf(doc =>
+    {
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        frameIns.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+        doc.Entities.Add(frameIns);
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 2, Layer = new Layer("图框") });
+        var e = new BlockRecord("E");
+        e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
+        doc.BlockRecords.Add(e);
+        var layer = new Layer("EQUIP-照明");
+        doc.Layers.Add(layer);
+        var ins = new Insert(e) { InsertPoint = new XYZ(100, 100, 0), Layer = layer };
+        ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
+        doc.Entities.Add(ins);
+    });
+
+    [AvaloniaFact]
+    public void VisionScan_MaxTiles_CapsReads_DisclosesTruncation()
+    {
+        string drawing = CreateMultiTileDrawing();
+        try
+        {
+            InjectCensus(drawing);
+            var client = new FakeVisionClient(MatchingClaims);
+            var outW = new StringWriter(); var errW = new StringWriter();
+            int code = VisionScanMode.Run(
+                new[] { "--vision-scan", "--drawing", drawing, "--project", _project, "--confirm-egress", "--max-tiles", "2" },
+                outW, errW, client, FakeProfile());
+
+            Assert.Equal(0, code);
+            Assert.Equal(2, client.Calls); // 预算闸：仅读前 2 瓦（云端成本上限）
+            using (var doc = JsonDocument.Parse(outW.ToString()))
+            {
+                var r = doc.RootElement;
+                Assert.Equal(2, r.GetProperty("tiles").GetInt32());
+                Assert.Equal(7, r.GetProperty("tilesTotal").GetInt32()); // 截断披露：预算前总瓦数
+                Assert.Equal(2, r.GetProperty("maxTiles").GetInt32());
+                Assert.Equal(2 * 100, r.GetProperty("usage").GetProperty("promptTokens").GetInt32());
+            }
+            Assert.Contains("--max-tiles", errW.ToString()); // 截断不静默（stderr 披露）
+            Assert.Contains("7", errW.ToString());
+            // 审计 vision-scan payload 同步披露（tilesTotal/maxTiles）
+            var scan = AuditRecords().Single(r => r.Entry.Kind == "vision-scan");
+            using (var p = JsonDocument.Parse(scan.Entry.ParamsJson))
+            {
+                Assert.Equal(2, p.RootElement.GetProperty("tiles").GetInt32());
+                Assert.Equal(7, p.RootElement.GetProperty("tilesTotal").GetInt32());
+                Assert.Equal(2, p.RootElement.GetProperty("maxTiles").GetInt32());
+            }
+            // llm-call 恰 2 条（每瓦一次，预算外零调用）
+            Assert.Equal(2, AuditRecords().Count(r => r.Entry.Kind == "llm-call"));
+        }
+        finally { File.Delete(drawing); }
+    }
+
+    [AvaloniaTheory]
+    [InlineData("0")]
+    [InlineData("-2")]
+    [InlineData("abc")]
+    public void VisionScan_MaxTilesInvalid_UsageExit1_BeforeSideEffects(string value)
+    {
+        var client = new FakeVisionClient(MatchingClaims);
+        var (code, stdout, stderr) = RunWith(client, "--confirm-egress", "--max-tiles", value);
+        Assert.Equal(1, code);
+        Assert.Contains("--max-tiles", stderr);
+        Assert.Empty(stdout);
+        Assert.Equal(0, client.Calls);
+        // 用法错误先于一切副作用：不建 .cadagent/audit.db（check --skill 冲突先例）
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "audit.db")));
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_NoMaxTiles_StdoutShapeUnchanged()
+    {
+        // 无 --max-tiles → 生产全量行为保持：stdout 不得多出预算字段（T3 契约逐字）
+        InjectCensus();
+        var client = new FakeVisionClient(MatchingClaims);
+        var (code, stdout, _) = RunWith(client, "--confirm-egress");
+        Assert.Equal(0, code);
+        Assert.DoesNotContain("tilesTotal", stdout);
+        Assert.DoesNotContain("maxTiles", stdout);
+    }
 }

@@ -123,6 +123,8 @@ var result = SemanticScanner.Scan(session, existingOverlay, skillAliases, vision
   无佐证声称入 `VisionAmbiguous` 不静默丢弃；单字符轴号 GT 不得以包含匹配误种子（R9 短值守卫）。
 - **诚实边界**：真实 VL 模型端到端（真实瓦片渲染→真实模型读图→交叉验证）留 harness，
   未接生产 CLI；合成 fake seam 测试为当前自动化闸口。
+  **⚠️ 本边界已于 vision-wiring T1-T4 闭合（2026-11-23）——生产接线 + 真实 DashScope
+  端到端落地，见第 6 节视觉接线实战节；本节 harness 示例保留为历史记录。**
 
 ## 3. 剩余边界（明示，不假装）
 
@@ -133,6 +135,7 @@ var result = SemanticScanner.Scan(session, existingOverlay, skillAliases, vision
    原生标本均 Yellow（图内 Unknowns=0 是 ACadSharp 对象图盲区，非全解析证据）。
 2. **空布局视口无内容标本**：视口真实 E2E 缺口（见 2.5）。
 3. **视觉管道真实模型 E2E 留 harness**：IRenderSnapshot 实现 + VL reader 未接生产 CLI（见 2.6）。
+   **已于 vision-wiring T1-T4 闭合（2026-11-23，见第 6 节）——原文保留为历史记录。**
 4. **纸面编辑 deferred**：布局幅面只读硬闸（编辑工具硬禁；不做纸面→模型逆映射）。
 5. **TwistAngle 与非矩形视口裁剪 deferred**：视口数学仅平移+缩放（ViewTarget/ViewHeight）。
 6. **图框块内部几何编辑在指纹外**：Sheets 缓存指纹覆盖顶层实体与图框插入变换，块定义内容
@@ -271,3 +274,98 @@ R9 修复证据：`r9-fix/{data,cli}-{red,green-filtered,full}.log`（RED 实证
 全量 Data 288/288、Cli 196/196）。R10 修复证据：`r10-fix/{cli-red,data-red-probe,cli-green-filtered,data-green-filtered,cli-full,data-full}.log`
 （rollback LoadWithCensus 真 RED + 钉住断言活性变异 + 异常类型核定 EndOfStreamException + 全量）。
 法院副本与项目：`outputs/tarch-court/`。
+
+## 6. 视觉接线实战节（vision-wiring T4，2026-11-23 复核）
+
+视觉管道生产接线（T1 VisionReader / T2 RenderSnapshotProvider / T3 View --vision-scan
+headless 入口 + CLI relay）落地后，用真实原生天正标本 + 真实 DashScope 云端模型实战闭环。
+证据目录 `outputs/vision-wiring/`（UTF-8 日志 + audit params 摘录 + GT 对照表）。
+**标本只读硬约束**：.dwg 复制到证据目录 combat 项目再扫描（working/sidecar 全落副本侧）；
+源 `outputs/tarch-native2/1#配套用房0928.dwg` SHA-256 前后一致
+（`b0b63d48…72d96a`，`specimen-source-hash.txt`）；法院目录零触碰。
+
+### 6.1 前置与成本闸
+
+- **profile/keys 复制复用**：`outputs/view-closure/.cadagent/llm-profiles.json`
+  （dashscope / qwen3-vl-plus / CloudAllowed）+ `keys/dashscope.key`（DPAPI CurrentUser
+  同用户可解）复制到 combat 项目 `.cadagent/`；**复制侧 timeoutSeconds 60→240**
+  （T1 实证视觉长输出超默认超时，源 profile 不动）；不复制 cloud-consent.json——
+  首次出境确认通道必须真实行使。
+- **瓦片预算 `--max-tiles N`（T4 加性成本闸）**：标本 12 幅面 SheetTiler 共产 **82 瓦**，
+  无预算全量扫描=82 次云端调用——实战/自动化统一 `--max-tiles 6`（绑定约束 瓦片≤6/标本）。
+  截断披露三通道：stderr"瓦片预算…仅读前 N 瓦（其余未读，非全量审查）"+ stdout
+  `tilesTotal`/`maxTiles` + 审计 vision-scan payload 同字段；无预算行为逐字保持。
+- **R3 生产人工确认注记**：`--confirm-egress` 即 §8.5 显式确认通道本身——**生产环境由
+  人工权衡数据出境（图纸瓦片 PNG 将发送至 profile endpoint）后手动给 flag**；headless
+  无交互按钮（视图交互按钮路径 deferred）。自动化测试行使该通道系用户先前授权云端测试，
+  不伪造人工确认语义。
+
+### 6.2 自动化复核（skip-gated 真实云端 E2E，本机实跑）
+
+```
+dotnet test tests/CadAgent.Cli.Tests --filter FullyQualifiedName~RealVisionScanE2E
+```
+
+`RealVisionScanE2ETests.RealSpecimen_VisionScan_CloudChain_SeedsOrAmbiguous`：
+profile+keys 复制到临时项目 → 标本副本 → `semantic scan --vision --confirm-egress
+--max-tiles 6`（**relay 真 View 进程**，VisionScanSpawn=null 生产路径）→ 断言
+exit 0 + level Yellow + tiles∈[1,6] + usage>0 + (seeded>0 或 ambiguous>0) +
+llm-call==tiles（model=qwen3-vl-plus，PromptTokens>0）+ egress-consent + vision-scan
+前后哈希一致 + 验链绿 + cloud-consent.json 落盘 + 有 seeded 时 overlay 含 LlmInference +
+**stdout/stderr/审计全文/同意文件 grep `sk-` 零命中** + 标本副本字节不变。
+缺标本/缺 profile/缺密钥显式 Skipped 不假装。TDD RED 相=密钥复制变异（真进程诚实拒绝
+exit 1，零云端成本，`t4-red-e2e.log`）→ 还原 GREEN（`t4-green-e2e.log`）。
+
+### 6.3 手动实战循环（combat-p1，1#配套用房 Yellow census 3257）
+
+```
+dotnet <cli> semantic scan --vision --drawing <副本> --project combat-p1                     # 无 flag 拒绝
+dotnet <cli> semantic scan --vision --drawing <副本> --confirm-egress --max-tiles 6 --project combat-p1
+dotnet <cli> audit verify --project combat-p1
+```
+
+| 步骤 | 结果 | 证据 |
+|---|---|---|
+| 无 --confirm-egress | exit 1 + stderr"首次云端出境需 --confirm-egress 明确确认" + egress-blocked 留痕 + **零 llm-call** | `p1-noconsent-{stdout.json,stderr.txt}` |
+| 全链（--confirm-egress --max-tiles 6） | exit 0 / Yellow / tiles 6（tilesTotal 82）/ claims 14 / seeded 0 / ambiguous 14 / usage **15960+598** / parseErrors 0 | `p1-vision-{stdout.json,stderr.txt}` |
+| local-only profile 对照（combat-local，合成副本 dataPolicy=LocalOnly） | exit 1 + "数据出境被本地约束阻止（local-only）" + egress-blocked + **零 llm-call**（即使带 --confirm-egress） | `local-refused-{stdout.json,stderr.txt}` |
+| audit verify | combat-p1 **9 条**链绿（egress-blocked 1+egress-consent 1+llm-call 6+vision-scan 1）；combat-local **1 条**链绿 | `p1-audit-verify.json` / `local-audit-verify.json` / `{p1,local}-audit-entries.json` |
+| overlay | seeded=0 → **semantic.json 未落盘**（防空覆盖实证）；cloud-consent.json 仅 combat-p1 落盘 | combat-p1/.cadagent 目录清单 |
+| 密钥 grep | stdout/audit/日志/证据文本 `sk-` **零命中** | 本节 6.5 |
+
+llm-call payload 逐条：model=qwen3-vl-plus / PromptTokens=2660 / attempt 1..6 /
+planId=null；attempt 1 CompletionTokens=573（overview 产全部 14 claims），
+attempt 2-6 各 5（空 claims JSON——模型对不可读瓦片拒绝编造）。
+
+### 6.4 claims 与 GT 人工抽查（幻觉拦截实证）
+
+GT 通道=working DXF 矢量文字全摘录（`gt-probe/` ACadSharp 探针 → `gt-text-dump.txt`
+1226 行）；对照表 `gt-spotcheck.md`。14 claims 判定：
+
+- **4 条无 GT 命中 → 全拦截入歧义清单，零种子**：设计院名（GT 无 公司/研究院 文字，
+  logo 图形或先验填充）／"项目：成都天府大道中段688号大源国际中心"（GT 实为
+  **地址**：同址——标签误读）／"校审人"（GT 图签 Tag 实为**校对人**——字形误读）／
+  "注册执业签章"（GT 仅注册证书号/印章号空属性）。
+- **10 条 GT 精确吻合但"无法归类"**：图签模板文字（资质证书/专业负责人/设计人/图名/
+  比例/单位）+材料注记（真石漆色号×3/消防救援窗口，C-说明层）——无语义类可归，
+  保守不种子（宁缺勿滥）。
+- **诚实缺口**：本轮 claims 均出自 overview 图签/说明区，设备类（灯具/配电箱）真实
+  种子未实证（小字区不可读→低置信拦截或未声称）；LlmInference 0.9 种子通道由
+  View fake 测试 + T6 合成夹具钉住，真实设备种子待可读瓦片命中。
+
+### 6.5 证据清单与门禁（outputs/vision-wiring/）
+
+`specimen-source-hash.txt`；`combat-p1/` `combat-local/`（标本副本+项目态）；
+`p1-noconsent-*` / `p1-vision-*` / `local-refused-*`；`{p1,local}-audit-entries.json` /
+`{p1,local}-audit-verify.json`；`gt-probe/` + `gt-text-dump.txt` + `gt-spotcheck.md`；
+`t4-red-cli.log` / `t4-red-view.log` / `t4-red-e2e.log` / `t4-green-{cli,view}-filtered.log` /
+`t4-green-e2e.log`；`gate1.log` / `gate2.log`；`tasklist-{pre-gate1,post-gate1,post-gate2}.txt`。
+
+- **密钥硬规则核查**：`grep -r "sk-" outputs/vision-wiring/`（json/txt/md/log）**零命中**；
+  DPAPI 密钥文件仅复制复用（CurrentUser 同用户），密钥值永不入 stdout/审计/日志/证据文本。
+- **门禁连绿两次**：`dotnet test CadAgent.sln` → **1057/1057 ×2**（Llm 30 + Core 208 +
+  Data 309 + View 289 + Zwcad 13 + Cli 208；0 失败 0 跳过——含 13 Zwcad 真机 + 真实云端
+  E2E 本机实跑；无瞬态失败）。前后 tasklist 核查无 ZWCAD 残留、无并行 dotnet test 会话。
+- **剩余边界**：见 spec §12"视觉管道生产接线完成"块（视图交互按钮 deferred / Region
+  瓦片校验 deferred / bulge 弧直弦近似 / 真实设备种子未实证 / timeout 默认偏紧 /
+  骑缝零重叠 / 预算幅面均衡分配留后续）。

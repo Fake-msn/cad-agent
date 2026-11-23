@@ -478,7 +478,7 @@ public static partial class CommandRouter
     /// 视觉接线 T3：semantic scan --vision → 独立 View 进程 --vision-scan headless 入口
     /// （R4 parity：ViewLaunch 进程模式镜像——Cli 不 using Avalonia；区别：relay 须等进程
     /// 结束并转发 stdout/stderr/退出码，故 RedirectStandardOutput/Error + WaitForExit）。
-    /// 转发 --drawing/--project/--confirm-egress/--name；闸口/出境/审计全在 View 进程内。
+    /// 转发 --drawing/--project/--confirm-egress/--name/--max-tiles；闸口/出境/审计全在 View 进程内。
     /// View 程序集缺失→stderr + exit 1（ViewLaunch 同口径）。
     /// </summary>
     private static int VisionScanRelay(string[] args, string drawingPath, string agentDir,
@@ -489,6 +489,9 @@ public static partial class CommandRouter
         if (args.Contains("--confirm-egress")) relayArgs.Add("--confirm-egress");
         string? name = GetOption(args, "--name");
         if (name is not null) { relayArgs.Add("--name"); relayArgs.Add(name); }
+        // T4 成本闸：--max-tiles 瓦片预算直通 View 进程（值非法由 View 用法拒绝，先于其副作用）。
+        string? maxTiles = GetOption(args, "--max-tiles");
+        if (maxTiles is not null) { relayArgs.Add("--max-tiles"); relayArgs.Add(maxTiles); }
         if (VisionScanSpawn is { } spawn)
             return spawn(relayArgs.ToArray());
         string viewDll = Path.Combine(AppContext.BaseDirectory, "CadAgent.View.dll");
@@ -596,13 +599,22 @@ public static partial class CommandRouter
     /// （规则包溯源，与 check 同口径；扫描行为本身不变）。
     /// 视觉接线 T3：--vision → relay 独立 View 进程 headless 入口（Cli 不 using Avalonia，
     /// ViewLaunch 先例）；无 --vision 的 legacy 在进程扫描逐字不变。
+    /// R9（T4 顺带修）：--vision 与 --skill 并存 → 用法拒绝 exit 1——relay 不转发 --skill
+    /// （View headless 入口无别名通道），静默丢弃=诚实缺口；拒绝先于一切副作用（check --skill 先例）。
     /// </summary>
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
     {
         // --vision relay 先于一切在进程副作用（闸口/出境/审计全在 View 进程内编排）。
         if (args.Contains("--vision"))
+        {
+            if (GetOptionValues(args, "--skill").Count > 0)
+            {
+                stderr.WriteLine("用法: semantic scan --vision 与 --skill 不能并存（视觉读图不支持 skill 别名；请去掉 --skill 或改用无 --vision 的语义扫描）");
+                return 1;
+            }
             return VisionScanRelay(args, drawingPath, agentDir, stdout, stderr);
+        }
         var ruleSet = LoadRuleSet(args, stderr);
         string overlayPath = SemanticOverlayPath(agentDir);
         using var audit = OpenAudit(agentDir);

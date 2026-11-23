@@ -48,12 +48,26 @@ internal static class VisionScanMode
         string? drawing = GetOption(args, "--drawing");
         if (drawing is null)
         {
-            stderr.WriteLine("用法: CadAgent.View --vision-scan --drawing <file> [--project <dir>] [--confirm-egress] [--name <profile>]");
+            stderr.WriteLine("用法: CadAgent.View --vision-scan --drawing <file> [--project <dir>] [--confirm-egress] [--name <profile>] [--max-tiles <正整数>]");
             return 1;
         }
         string project = GetOption(args, "--project") ?? Directory.GetCurrentDirectory();
         bool confirmEgress = args.Contains("--confirm-egress");
         string? profileName = GetOption(args, "--name");
+        // T4 成本闸：--max-tiles 瓦片预算（正整数；跨幅面按产瓦顺序取前 N，截断必须披露）。
+        // 用法错误先于一切副作用（不建 .cadagent/审计——check --skill 冲突先例）。
+        int? maxTiles = null;
+        string? maxTilesRaw = GetOption(args, "--max-tiles");
+        if (maxTilesRaw is not null)
+        {
+            if (!int.TryParse(maxTilesRaw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out int n) || n < 1)
+            {
+                stderr.WriteLine($"用法: --max-tiles 须为正整数（收到: {maxTilesRaw}）");
+                return 1;
+            }
+            maxTiles = n;
+        }
         string agentDir = Path.Combine(project, ".cadagent");
         string session = GetOption(args, "--session") ?? Guid.NewGuid().ToString("N");
         try
@@ -62,7 +76,7 @@ internal static class VisionScanMode
             using var audit = new SqliteAuditStore(Path.Combine(agentDir, "audit.db"),
                 new CadAgent.Core.Audit.AnchorService(agentDir));
             var op = new WindowsIdentityProvider(RoleConfig.Load(Path.Combine(agentDir, "roles.yaml"))).Current;
-            return RunCore(drawing, project, agentDir, session, confirmEgress, profileName,
+            return RunCore(drawing, project, agentDir, session, confirmEgress, profileName, maxTiles,
                 clientOverride, profileOverride, audit, op, stdout, stderr);
         }
         catch (Exception ex)
@@ -74,7 +88,7 @@ internal static class VisionScanMode
     }
 
     private static int RunCore(string drawing, string project, string agentDir, string session,
-        bool confirmEgress, string? profileName, ILlmClient? clientOverride, ProviderProfile? profileOverride,
+        bool confirmEgress, string? profileName, int? maxTiles, ILlmClient? clientOverride, ProviderProfile? profileOverride,
         SqliteAuditStore audit, OperatorIdentity op, TextWriter stdout, TextWriter stderr)
     {
         // 2. 读图 + census sidecar（与 Cli LoadWithCensus 同模式：persisted 直载 + 非空回写）
@@ -154,6 +168,14 @@ internal static class VisionScanMode
         // 6. 遍历/瓦片/provider/reader（密钥仅入 OpenAiClient，reader 不触密钥）
         var walked = BlockWalker.Walk(doc.Doc, doc.Sheets).ToList();
         var tiles = doc.Sheets.SelectMany(s => SheetTiler.Tiles(s, walked)).ToList();
+        // T4 成本闸：瓦片预算截断（跨幅面按产瓦顺序取前 N）——截断必须披露（stderr+stdout+审计），
+        // 未读瓦片/幅面不假装已审查；无预算→全量行为逐字保持。
+        int totalTiles = tiles.Count;
+        if (maxTiles is { } cap && tiles.Count > cap)
+        {
+            tiles = tiles.Take(cap).ToList();
+            stderr.WriteLine($"瓦片预算 --max-tiles {cap}：共 {totalTiles} 瓦，仅读前 {tiles.Count} 瓦（其余未读，非全量审查）");
+        }
         var provider = new RenderSnapshotProvider(doc);
         ILlmClient client = clientOverride ?? new OpenAiClient(profile, key!);
         var reader = new VisionReader(client, profile.Model);
@@ -192,26 +214,17 @@ internal static class VisionScanMode
             overlay.Save(overlayPath);
 
         // 10. vision-scan 留痕（扫描不改图：前后哈希一致）+ stdout JSON + exit 0
+        // 预算披露（仅 --max-tiles 给定时加性输出 tilesTotal/maxTiles；无预算契约逐字不变）。
         string hash = doc.ComputeHash();
-        Append(audit, op, session, "vision-scan", drawing, new
-        {
-            tiles = rendered.Count,
-            claims = claimCount,
-            seeded = seededCount,
-            ambiguousCount = distinctAmbiguous.Count,
-            usage = new { promptTokens = read.PromptTokens, completionTokens = read.CompletionTokens }
-        }, hash, hash);
-        stdout.WriteLine(JsonSerializer.Serialize(new
-        {
-            ok = true,
-            level = gate.Level.ToString(),
-            tiles = rendered.Count,
-            claims = claimCount,
-            seeded = seededCount,
-            ambiguous = distinctAmbiguous,
-            usage = new { promptTokens = read.PromptTokens, completionTokens = read.CompletionTokens },
-            parseErrors = read.ParseErrors
-        }, JsonOpts));
+        var usage = new { promptTokens = read.PromptTokens, completionTokens = read.CompletionTokens };
+        object scanPayload = maxTiles is null
+            ? new { tiles = rendered.Count, claims = claimCount, seeded = seededCount, ambiguousCount = distinctAmbiguous.Count, usage }
+            : new { tiles = rendered.Count, tilesTotal = totalTiles, maxTiles = maxTiles.Value, claims = claimCount, seeded = seededCount, ambiguousCount = distinctAmbiguous.Count, usage };
+        Append(audit, op, session, "vision-scan", drawing, scanPayload, hash, hash);
+        object stdoutPayload = maxTiles is null
+            ? new { ok = true, level = gate.Level.ToString(), tiles = rendered.Count, claims = claimCount, seeded = seededCount, ambiguous = distinctAmbiguous, usage, parseErrors = read.ParseErrors }
+            : new { ok = true, level = gate.Level.ToString(), tiles = rendered.Count, tilesTotal = totalTiles, maxTiles = maxTiles.Value, claims = claimCount, seeded = seededCount, ambiguous = distinctAmbiguous, usage, parseErrors = read.ParseErrors };
+        stdout.WriteLine(JsonSerializer.Serialize(stdoutPayload, JsonOpts));
         return 0;
     }
 

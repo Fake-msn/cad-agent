@@ -94,6 +94,40 @@ public class SemanticScanVisionRelayTests : IDisposable
     }
 
     [Fact]
+    public void SemanticScan_VisionWithSkill_UsageRefused_NoRelay()
+    {
+        // R9（视觉接线 T4 顺带修）：--vision 与 --skill 并存 → 用法拒绝 exit 1。
+        // relay 不转发 --skill（View headless 入口无别名通道）——静默丢弃=诚实缺口，
+        // 须响亮拒绝且不得进入 relay（seam 捕获必须为 null），先于一切副作用。
+        string[]? captured = null;
+        CommandRouter.VisionScanSpawn = a => { captured = a; return 0; };
+
+        var (code, stdout, stderr) = Run("semantic", "scan", "--vision", "--skill", @"C:\skillpkg", "--drawing", _drawing);
+
+        Assert.Equal(1, code);
+        Assert.Null(captured); // 不得进入 relay
+        Assert.Empty(stdout);
+        Assert.Contains("--vision", stderr);
+        Assert.Contains("--skill", stderr);
+    }
+
+    [Fact]
+    public void SemanticScan_Vision_MaxTilesForwarded()
+    {
+        // T4 成本闸：--max-tiles 瓦片预算转发 View 进程（顺序钉住：--name 之后追加）。
+        string[]? captured = null;
+        CommandRouter.VisionScanSpawn = a => { captured = a; return 0; };
+
+        var (code, _, _) = Run("semantic", "scan", "--vision", "--drawing", _drawing, "--max-tiles", "6");
+
+        Assert.Equal(0, code);
+        Assert.NotNull(captured);
+        Assert.Equal(
+            new[] { "--vision-scan", "--drawing", _drawing, "--project", _project, "--max-tiles", "6" },
+            captured);
+    }
+
+    [Fact]
     public void BuildVisionScanArgs_QuotesValuesNotFlags()
     {
         // 与 BuildViewArgs 同口径：dll/值加引号，flag 裸追加（arg-builder 单测，不真启动进程）
