@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Text.Json;
 using CadAgent.Core;
 using CadAgent.Data;
@@ -12,9 +13,13 @@ namespace CadAgent.View.ViewModels;
 /// <see cref="ForceBrush"/> 为效力徽章画刷字符串 "#RRGGBB"（Mandatory 红 /
 /// Recommended 黄 / Informational 灰），UI 层用 Color.Parse 转 SolidColorBrush
 /// （沿用 LayerEntry.ColorBrush 先例，VM 保持 Avalonia-free）。
+/// §4.1④ 勾选→意图：新增 <see cref="IsChecked"/> INPC 属性（核心字段 get-only
+/// 保持、构造签名不变）——UI 行复选框 TwoWay 绑定；忽略=未勾选正常决策（spec §6.2）。
 /// </summary>
-public sealed class IssueEntry
+public sealed class IssueEntry : INotifyPropertyChanged
 {
+    private bool _isChecked;
+
     internal IssueEntry(Issue issue)
     {
         RuleId = issue.RuleId;
@@ -56,6 +61,21 @@ public sealed class IssueEntry
         RuleForce.Recommended => "#F9A825",
         _ => "#616161",
     };
+
+    /// <summary>§4.1④ 勾选态（INPC）：勾选→填充意图优先取勾选项；默认 false。</summary>
+    public bool IsChecked
+    {
+        get => _isChecked;
+        set
+        {
+            if (_isChecked == value) return; // 同值幂等，不重复通知
+            _isChecked = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked)));
+        }
+    }
+
+    /// <summary>勾选态变更通知（UI TwoWay 绑定 + VM 勾选 key 集同步）。</summary>
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 /// <summary>
@@ -86,6 +106,11 @@ public sealed class IssuesViewModel
 
     /// <summary>in-flight 硬闸（视图闭环 T6）：并发刷新第二次立即返回——结构性守卫，不依赖按钮 IsEnabled UI 态。</summary>
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
+
+    /// <summary>§4.1④ 勾选 key 集（会话级，不持久化）：key=RuleId+"|"+Targets 逗号连接+"|"+Message。
+    /// Refresh 重建 IssueEntry 时按 key 恢复 IsChecked（跨刷新保持）；勾选变更经
+    /// PropertyChanged 订阅同步增删（取消勾选即移除——忽略是正常决策，不留痕）。</summary>
+    private readonly HashSet<string> _checkedKeys = new();
 
     public IssuesViewModel(DrawingSession session, string projectDir,
         IReadOnlyList<string> skillDirs, CanvasViewModel? canvas = null, SemaphoreSlim? sessionGate = null,
@@ -136,7 +161,15 @@ public sealed class IssuesViewModel
             {
                 EvalResult eval = await Task.Run(Evaluate);
                 CheckSummary summary = eval.Summary;
-                Issues = summary.Issues.Select(i => new IssueEntry(i)).ToList();
+                // §4.1④：重建条目按 key 恢复勾选态（跨刷新保持），再订阅 PropertyChanged
+                // 同步 key 集（恢复赋值先于订阅——恢复不触发冗余同步）。
+                Issues = summary.Issues.Select(i =>
+                {
+                    var entry = new IssueEntry(i);
+                    entry.IsChecked = _checkedKeys.Contains(CheckKey(entry));
+                    entry.PropertyChanged += OnEntryCheckedChanged;
+                    return entry;
+                }).ToList();
                 MandatoryCount = Issues.Count(i => i.Force == RuleForce.Mandatory);
                 RulesSkipped = summary.RulesSkipped;
                 SkippedReasons = summary.StructuredSkips ?? Array.Empty<SkipReason>();
@@ -197,6 +230,24 @@ public sealed class IssuesViewModel
         if (_canvas is null) return;
         _canvas.SelectHandles(issue.Targets);
         _canvas.CenterOn(issue.Targets);
+    }
+
+    /// <summary>§4.1④ 勾选 key：RuleId+"|"+Targets 逗号连接+"|"+Message（同规则不同目标=不同问题）。
+    /// I1（合并前 ISTQB fixwave2）：Message 为区分因子——标高规则 mode 省略时同一文本
+    /// 产两条 issue（小数位 vs 符号），同 RuleId 同 Targets 异 Message，旧 key 碰撞导致
+    /// 勾其一刷新后两条全勾（意图混入未采纳 + adopted 重复/count 失真）/取消其一两条全丢。
+    /// 同 rule+targets+message 的真重复视为同一条（去重语义，可接受——内容完全相同的问题
+    /// 勾选态本就不应分裂）。</summary>
+    private static string CheckKey(IssueEntry entry) =>
+        entry.RuleId + "|" + string.Join(",", entry.Targets) + "|" + entry.Message;
+
+    /// <summary>勾选变更 → key 集同步（勾选加入/取消移除；跨刷新保持的权威存储）。</summary>
+    private void OnEntryCheckedChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(IssueEntry.IsChecked) || sender is not IssueEntry entry) return;
+        string key = CheckKey(entry);
+        if (entry.IsChecked) _checkedKeys.Add(key);
+        else _checkedKeys.Remove(key);
     }
 
     /// <summary>评估结果 + 复现证据（视图闭环 T6）：审计 paramsJson 所需的

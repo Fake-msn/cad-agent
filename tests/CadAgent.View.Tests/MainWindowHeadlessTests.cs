@@ -573,4 +573,426 @@ public class MainWindowHeadlessTests
             if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
         }
     }
+
+    // ---- §4.1④ 勾选→意图（checked 优先 + force 标签 + 零勾选兜底 + rule-adopted 采纳审计） ----
+
+    /// <summary>勾选→意图夹具（镜像 PlanPanel 测试装配）：2-issue 图纸（字高 4.2 +
+    /// W-墙体 混排层名）+ 裁定升级 R-50001-5.0.2 → Mandatory（mandatory+recommended
+    /// 混合）+ 预建 audit.db + fake client PlanPreviewViewModel（不触网）。
+    /// elevationCollision=true（I1 碰撞夹具）：字高违规文本换成标高 "+3.50"（Height=3
+    /// 合规避免字高 issue）+ mode 省略 elevation skill 规则 + overlay Annotation →
+    /// 同 RuleId 同 Targets 异 Message 两条 issue（小数位 vs 符号）。</summary>
+    private sealed class IssueIntentFixture : IDisposable
+    {
+        public string ProjectDir { get; }
+        public string DxfPath { get; }
+        public SqliteAuditStore Audit { get; }
+        public MainViewModel Vm { get; }
+        public MainWindow Window { get; }
+        public PlanPreviewViewModel PlanVm { get; }
+
+        /// <summary>注入窗口的共享会话闸（I2 busy 测试持闸制造确定性在途编辑）。</summary>
+        public SemaphoreSlim Gate { get; }
+
+        /// <summary>elevationCollision 模式的临时 skill 目录（Dispose 清理）。</summary>
+        public string? SkillDir { get; }
+
+        public IssueIntentFixture(bool elevationCollision = false)
+        {
+            ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-issue-intent-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(ProjectDir, ".cadagent"));
+            DxfPath = DxfFixture.CreateTempDxf(doc =>
+            {
+                var wall = new Layer("W-墙体");
+                doc.Layers.Add(wall);
+                doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0), Layer = wall });
+                doc.Entities.Add(elevationCollision
+                    ? new TextEntity { InsertPoint = new XYZ(20, 20, 0), Value = "+3.50", Height = 3 }
+                    : new TextEntity { InsertPoint = new XYZ(10, 10, 0), Value = "字高违规", Height = 4.2, Layer = wall });
+            });
+            var adj = new AdjudicationSet();
+            adj.Upsert(new Adjudication("R-50001-5.0.2", "tester", DateTimeOffset.UtcNow,
+                "测试升级", ForceOverride: RuleForce.Mandatory));
+            adj.Save(Path.Combine(ProjectDir, ".cadagent", "adjudications.json"));
+            string auditDbPath = Path.Combine(ProjectDir, ".cadagent", "audit.db");
+            using (var seed = new SqliteAuditStore(auditDbPath)) { } // 预建库文件（窗口走 SqliteAuditStore 分支）
+            Audit = new SqliteAuditStore(auditDbPath);
+            if (elevationCollision) SkillDir = MakeElevationSkillDir();
+            Vm = new MainViewModel(DxfPath, ProjectDir, SkillDir is null ? null : new[] { SkillDir });
+            Assert.Null(Vm.ErrorMessage);
+            if (elevationCollision)
+            {
+                // overlay Annotation 标注标高文本（ElevationChecker IOverlayDependent 前提）。
+                string handle = Vm.Session.Doc.Entities.OfType<TextEntity>()
+                    .Single(t => t.Value == "+3.50").Handle.ToString();
+                var overlay = new SemanticOverlay();
+                overlay.UpsertAnnotation(new SemanticAnnotation(handle, SemanticClass.Annotation,
+                    Provenance.HumanConfirmed, 0.9, "测试标注"));
+                overlay.Save(Path.Combine(ProjectDir, ".cadagent", "semantic.json"));
+            }
+            Gate = new SemaphoreSlim(1, 1);
+            var identity = new FixedIdentity(new OperatorIdentity("tester", Role.Draw));
+            PlanVm = new PlanPreviewViewModel(Vm.Session, ProjectDir, Audit, identity,
+                new RoleChecker(), Gate,
+                new FakeLlmClient("""{"steps":[{"kind":"add-line","params":{"x1":0,"y1":5,"x2":10,"y2":5}}]}"""),
+                new ProviderProfile("local", "http://localhost:11434/v1", "fake-model",
+                    VisionCapable: false, DataPolicy.LocalOnly, new ProfileLimits()));
+            Window = new MainWindow(Vm, identity, Gate, PlanVm);
+            Window.Show();
+            Dispatcher.UIThread.RunJobs();
+        }
+
+        /// <summary>点击 Refresh 并等待 IssuesChanged（async Task.Run 路径，镜像 IssuesPanelHeadlessTests）。</summary>
+        public async Task RefreshIssuesAsync()
+        {
+            var tcs = new TaskCompletionSource();
+            void Handler() => tcs.TrySetResult();
+            Window.Issues!.IssuesChanged += Handler;
+            try
+            {
+                Window.RefreshIssuesButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally { Window.Issues!.IssuesChanged -= Handler; }
+        }
+
+        public void Dispose()
+        {
+            Window.Close();
+            Audit.Dispose();
+            // Microsoft.Data.Sqlite 连接池持有文件句柄，Windows 下删临时目录前须清池。
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(DxfPath);
+            if (Directory.Exists(ProjectDir)) Directory.Delete(ProjectDir, true);
+            if (SkillDir is not null && Directory.Exists(SkillDir)) Directory.Delete(SkillDir, true);
+        }
+    }
+
+    /// <summary>标高规则 mode 省略的最小 skill 包（params 空 → 全查：小数位+符号，I1 碰撞夹具）。</summary>
+    private static string MakeElevationSkillDir()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cadagent-skill-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(dir, "rules"));
+        File.WriteAllText(Path.Combine(dir, "skill.yaml"),
+            "name: elevation-skill\nversion: \"1.0.0\"\ndiscipline: architecture\ndrawingType: any\n");
+        File.WriteAllText(Path.Combine(dir, "rules", "r1.yaml"), """
+            id: R-TEST-ELEV
+            source: { standard: "院标", clause: "1.0", excerpt: "标高注写格式测试条款", verification: source-text }
+            modal: "应"
+            force: recommended
+            severity: high
+            scope: { discipline: any, drawingType: any }
+            check: { type: elevation-format, params: {} }
+            suggestion: "按 11.8.4/11.8.5 修正标高注写"
+            """);
+        return dir;
+    }
+
+    private static void ClickFillIntent(MainWindow window)
+    {
+        window.FillIntentButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_CheckedMixed_ForceTagFormat_AndCheckboxBinding()
+    {
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        IssueEntry mandatory = window.Issues!.Issues.Single(i => i.RuleId == "R-50001-5.0.2");
+        IssueEntry recommended = window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1");
+        Assert.Equal(RuleForce.Mandatory, mandatory.Force);
+        Assert.Equal(RuleForce.Recommended, recommended.Force);
+        mandatory.IsChecked = true;
+        recommended.IsChecked = true;
+        Dispatcher.UIThread.RunJobs();
+        // TwoWay 绑定 source→target：问题行 CheckBox 同步勾选（图层面板复选框不在 IssueList 内）。
+        List<CheckBox> issueChecks = window.IssueList!.GetVisualDescendants().OfType<CheckBox>().ToList();
+        Assert.Equal(2, issueChecks.Count);
+        Assert.All(issueChecks, c => Assert.True(c.IsChecked));
+
+        ClickFillIntent(window);
+        // 行格式逐字：{RuleId} [{Force}]: {Suggestion}（Force 枚举名原文），顺序=清单顺序。
+        string expected = string.Join("\n", window.Issues.Issues
+            .Where(i => i.IsChecked)
+            .Select(i => $"{i.RuleId} [{i.Force}]: {i.Suggestion}"));
+        Assert.Equal(expected, window.PlanIntentInput!.Text);
+        Assert.Contains($"R-50001-5.0.2 [Mandatory]: {mandatory.Suggestion}", window.PlanIntentInput.Text);
+        Assert.Contains($"R-50001-13.0.1 [Recommended]: {recommended.Suggestion}", window.PlanIntentInput.Text);
+        Assert.Equal(2, window.PlanIntentInput!.Text!.Split('\n').Length);
+    }
+
+    [AvaloniaFact]
+    public async Task IssueRow_CheckboxPointerClick_TogglesEntryIsChecked()
+    {
+        // TwoWay 绑定 target→source：真实指针点击行复选框 → IssueEntry.IsChecked 翻转。
+        // M1（fixwave2）：点第二行复选框 → 断言对应第二条目翻转（闭合"绑定正确条目"透镜，
+        // 首行点击无法区分"全部绑到第一条目"的错误实现）。
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        List<CheckBox> checks = window.IssueList!.GetVisualDescendants().OfType<CheckBox>().ToList();
+        Assert.Equal(2, checks.Count);
+        CheckBox check = checks[1]; // 第二行
+        // sln 并行负载下第二行容器 arrange 可能晚于首次 RunJobs（Bounds 空/与首行重叠 →
+        // 点击点失真误点首行）：泵消息直至两行容器均有非零尺寸且位置分离（有界防挂死）。
+        bool laidOut = false;
+        for (int i = 0; i < 200 && !laidOut; i++)
+        {
+            Dispatcher.UIThread.RunJobs();
+            if (checks[0].Bounds.Width > 0 && check.Bounds.Width > 0)
+            {
+                Point a = checks[0].TranslatePoint(new Point(0, 0), window)!.Value;
+                Point b = check.TranslatePoint(new Point(0, 0), window)!.Value;
+                laidOut = a != b;
+            }
+            if (!laidOut) await Task.Delay(5);
+        }
+        Assert.True(laidOut); // 布局确定性前提（失败=环境异常而非绑定缺陷）
+        Point p = check.TranslatePoint(new Point(check.Bounds.Width / 2, check.Bounds.Height / 2), window)!.Value;
+        window.MouseDown(p, MouseButton.Left);
+        window.MouseUp(p, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(check.IsChecked);
+        Assert.True(window.Issues!.Issues[1].IsChecked); // 对应第二条目翻转
+        Assert.False(window.Issues.Issues[0].IsChecked); // 第一条目不受牵连
+        Assert.Single(window.Issues.Issues.Where(i => i.IsChecked));
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_NoChecks_MandatoryFallback_OldFormatAndStatusNote()
+    {
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        IssueEntry mandatory = window.Issues!.Issues.Single(i => i.Force == RuleForce.Mandatory);
+        ClickFillIntent(window);
+        // 旧格式逐字保持（既有行为）：仅 mandatory、无 force 标签。
+        Assert.Equal($"{mandatory.RuleId}: {mandatory.Suggestion}", window.PlanIntentInput!.Text);
+        Assert.Contains("未勾选问题，已按 mandatory 自动填充", window.Status!.Text);
+        // 零勾选兜底不留采纳审计（义务非采纳）。
+        Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "rule-adopted");
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_CheckedRecommended_WritesRuleAdoptedAudit()
+    {
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        IssueEntry recommended = window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1");
+        recommended.IsChecked = true;
+        ClickFillIntent(window);
+
+        AuditRecord rec = Assert.Single(f.Audit.ReadAll(), r => r.Entry.Kind == "rule-adopted");
+        AuditEntry e = rec.Entry;
+        Assert.Equal("rule", e.Source); // 镜像 rule-adjudicated 先例（Source=rule）
+        Assert.Equal("view", e.Session); // 视图会话常量口径（镜像 IssuesVM check-run）
+        Assert.Equal("tester", e.Operator);
+        Assert.Equal("Draw", e.Role);
+        Assert.Equal(f.Vm.Session.SourcePath, e.Target);
+        // 填充不改图纸：前后哈希一致且等于当前图纸哈希。
+        Assert.Equal(e.BeforeHash, e.AfterHash);
+        Assert.Equal(f.Vm.Session.ComputeHash(), e.AfterHash);
+        Assert.Equal("", e.SnapshotRef);
+        Assert.Equal("", e.PlanRef);
+        using var doc = JsonDocument.Parse(e.ParamsJson);
+        JsonElement p = doc.RootElement;
+        Assert.Equal(1, p.GetProperty("count").GetInt32());
+        JsonElement adopted = p.GetProperty("adopted");
+        Assert.Equal(1, adopted.GetArrayLength());
+        Assert.Equal("R-50001-13.0.1", adopted[0].GetProperty("ruleId").GetString());
+        Assert.Equal(recommended.Clause, adopted[0].GetProperty("clause").GetString());
+        Assert.Equal(recommended.Standard, adopted[0].GetProperty("standard").GetString());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_MandatoryOnlyChecked_NoRuleAdopted()
+    {
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        IssueEntry mandatory = window.Issues!.Issues.Single(i => i.Force == RuleForce.Mandatory);
+        mandatory.IsChecked = true;
+        ClickFillIntent(window);
+        // Mandatory 勾选走 force 标签格式，但义务非采纳——无 rule-adopted。
+        Assert.Equal($"{mandatory.RuleId} [Mandatory]: {mandatory.Suggestion}", window.PlanIntentInput!.Text);
+        Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "rule-adopted");
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_Twice_AppendsTwoRuleAdopted()
+    {
+        // append-only 决策日志：每次填充动作各留一条，不去重。
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        f.Window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1").IsChecked = true;
+        ClickFillIntent(f.Window);
+        ClickFillIntent(f.Window);
+        Assert.Equal(2, f.Audit.ReadAll().Count(r => r.Entry.Kind == "rule-adopted"));
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_AuditWriteFails_AbortsFillWithInlineError()
+    {
+        // 审计写失败路径（严格中止口径）：刷新后清连接池并把 audit.db 换成同名目录
+        // → Append 开库失败抛 SqliteException → 行内错误 + 意图框不变 + 不崩 UI。
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        window.PlanIntentInput!.Text = "既有意图哨兵"; // 钉住"不填充"：失败后哨兵须逐字保留
+        string auditDbPath = Path.Combine(f.ProjectDir, ".cadagent", "audit.db");
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); // 连接池持文件句柄，Windows 下删库前须清池
+        File.Delete(auditDbPath);
+        Directory.CreateDirectory(auditDbPath); // 目录占位 → SQLite CANTOPEN（非 BUSY/LOCKED 重试路径）
+        window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1").IsChecked = true;
+        ClickFillIntent(window); // 异常吞入行内通道，不崩 UI
+        Assert.True(window.PlanError!.IsVisible);
+        Assert.Contains("采纳审计写入失败", window.PlanError.Text);
+        Assert.Equal("既有意图哨兵", window.PlanIntentInput.Text); // 严格中止：审计先行无旁路
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_Checked_GeneratePlan_PreviewReadyWithCheckedIntent()
+    {
+        // 勾选→填充→生成预览全链（FakeLlmClient 注入，不触网）：Intent 含勾选项 force 标签。
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        foreach (IssueEntry i in window.Issues!.Issues) i.IsChecked = true;
+        ClickFillIntent(window);
+        window.LeftTabs!.SelectedIndex = 3; // 切到"计划"tab，面板进入视觉树
+        Dispatcher.UIThread.RunJobs();
+
+        var readyTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var doneTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnReady() => readyTcs.TrySetResult();
+        void OnDone() => doneTcs.TrySetResult();
+        f.PlanVm.PreviewReady += OnReady;
+        f.PlanVm.RunCompleted += OnDone;
+        try
+        {
+            window.GeneratePlanButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await readyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Dispatcher.UIThread.RunJobs();
+            Assert.True(f.PlanVm.IsPreviewVisible);
+            Assert.True(window.PlanPreviewSection!.IsVisible);
+            Assert.Equal(window.PlanIntentInput!.Text, f.PlanVm.Intent);
+            Assert.Contains("R-50001-5.0.2 [Mandatory]", f.PlanVm.Intent);
+            Assert.Contains("R-50001-13.0.1 [Recommended]", f.PlanVm.Intent);
+            // 拒绝收尾（不执行）：编排正常结束，无 tx 落图。
+            window.RejectPlanButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await doneTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal("RejectedByHuman", f.PlanVm.Status);
+        }
+        finally
+        {
+            f.PlanVm.PreviewReady -= OnReady;
+            f.PlanVm.RunCompleted -= OnDone;
+        }
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_SameRuleTargetsCollision_CheckedOne_AdoptedCountOne_CheckPreserved()
+    {
+        // I1（合并前 ISTQB fixwave2）：mode 省略标高规则 → 同 RuleId 同 Targets 异 Message
+        // 两条 issue。旧 key 碰撞 → 勾其一刷新后两条全勾 → adopted 重复/count 失真。
+        // 修复后：仅勾选项入意图与采纳审计（count=1 无重复），刷新后仅该条保持勾选。
+        using var f = new IssueIntentFixture(elevationCollision: true);
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        List<IssueEntry> elev = window.Issues!.Issues.Where(i => i.RuleId == "R-TEST-ELEV").ToList();
+        Assert.Equal(2, elev.Count);
+        Assert.Equal(elev[0].Targets, elev[1].Targets); // 同目标句柄
+        Assert.NotEqual(elev[0].Message, elev[1].Message); // 异消息（小数位 vs 符号）
+        IssueEntry sign = elev.Single(i => i.Message.Contains("正数"));
+        sign.IsChecked = true;
+        // 刷新 → 仅该条保持勾选（key 含 Message 区分因子）；旧 key 碰撞此处两条全勾。
+        await f.RefreshIssuesAsync();
+        Assert.True(window.Issues.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("正数")).IsChecked);
+        Assert.False(window.Issues.Issues.Single(i => i.RuleId == "R-TEST-ELEV" && i.Message.Contains("小数位")).IsChecked);
+        ClickFillIntent(window);
+
+        // 采纳审计：仅勾选的一条（count=1，adopted 数组无重复）——旧 key 碰撞时
+        // 刷新后两条全勾 → count=2 失真，此处钉住修复后口径。
+        AuditRecord rec = Assert.Single(f.Audit.ReadAll(), r => r.Entry.Kind == "rule-adopted");
+        using (JsonDocument doc = JsonDocument.Parse(rec.Entry.ParamsJson))
+        {
+            JsonElement p = doc.RootElement;
+            Assert.Equal(1, p.GetProperty("count").GetInt32());
+            Assert.Equal(1, p.GetProperty("adopted").GetArrayLength());
+            Assert.Equal("R-TEST-ELEV", p.GetProperty("adopted")[0].GetProperty("ruleId").GetString());
+        }
+        // 意图仅勾选项一行（未勾选的小数位条不混入）。
+        Assert.Equal($"R-TEST-ELEV [Recommended]: {sign.Suggestion}", window.PlanIntentInput!.Text);
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_DuringInFlightEdit_BusyGate_NoFillNoAudit()
+    {
+        // I2（合并前 ISTQB fixwave2）：注入会话闸持闸 → 编辑确定性在途（_editBusy 置位，
+        // 镜像 IntegrationHeadlessTests 持闸构造法）。RaiseEvent 绕过 IsEnabled →
+        // 结构闸必须拦截：意图框哨兵不变 + 无 rule-adopted（TryAppendRuleAdoptedAudit
+        // 的 ComputeHash 无闸读点不得在途触达）。
+        using var f = new IssueIntentFixture();
+        await f.RefreshIssuesAsync();
+        MainWindow window = f.Window;
+        window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1").IsChecked = true;
+        window.PlanIntentInput!.Text = "既有意图哨兵"; // 钉住"不填充"
+        ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Dispatcher.UIThread.RunJobs();
+        ClickCanvasAtWorld(window, 20, 20); // 锚点
+        await f.Gate.WaitAsync(); // 持闸：提交后的编辑确定性停在会话闸上
+        var tcs = new TaskCompletionSource();
+        // EditCompleted 先于 RunEditAsync finally 清 busy——Background 优先级续体确保清 busy 先跑。
+        void Handler() => Dispatcher.UIThread.Post(() => tcs.TrySetResult(), DispatcherPriority.Background);
+        window.Edit!.EditCompleted += Handler;
+        try
+        {
+            ClickCanvasAtWorld(window, 80, 30); // 提交 → busy，阻塞在会话闸
+            Dispatcher.UIThread.RunJobs();
+            Assert.False(window.EditToolbar!.IsEnabled); // busy 已确立
+            Assert.False(window.FillIntentButton!.IsEnabled); // ② busy 时按钮同步禁用
+            ClickFillIntent(window); // RaiseEvent 绕过禁用态 → 结构闸拦截
+            Assert.Equal("既有意图哨兵", window.PlanIntentInput.Text); // 不填充
+            Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "rule-adopted"); // 不审计
+            f.Gate.Release();
+            await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Dispatcher.UIThread.RunJobs();
+        }
+        finally
+        {
+            window.Edit.EditCompleted -= Handler;
+            if (f.Gate.CurrentCount == 0) f.Gate.Release();
+        }
+        Assert.True(window.FillIntentButton!.IsEnabled); // busy 清除后恢复
+    }
+
+    [AvaloniaFact]
+    public async Task FillIntent_InformationalOnlyChecked_ForceTag_NoRuleAdopted()
+    {
+        // M2（fixwave2）：第三分支钉住——Informational-only 勾选入意图带 [Informational]
+        // 标签，但不入采纳审计（仅 Recommended 采纳；Mandatory 义务已由他测钉住）。
+        using var f = new IssueIntentFixture();
+        // 裁定降级 R-50001-13.0.1 → Informational（Refresh 每次重读裁定文件）。
+        string adjPath = Path.Combine(f.ProjectDir, ".cadagent", "adjudications.json");
+        var set = AdjudicationSet.Load(adjPath);
+        set.Upsert(new Adjudication("R-50001-13.0.1", "tester", DateTimeOffset.UtcNow,
+            "测试降级", ForceOverride: RuleForce.Informational));
+        set.Save(adjPath);
+        await f.RefreshIssuesAsync();
+        IssueEntry info = f.Window.Issues!.Issues.Single(i => i.RuleId == "R-50001-13.0.1");
+        Assert.Equal(RuleForce.Informational, info.Force);
+        info.IsChecked = true;
+        ClickFillIntent(f.Window);
+        Assert.Equal($"{info.RuleId} [Informational]: {info.Suggestion}", f.Window.PlanIntentInput!.Text);
+        Assert.DoesNotContain(f.Audit.ReadAll(), r => r.Entry.Kind == "rule-adopted");
+    }
 }
