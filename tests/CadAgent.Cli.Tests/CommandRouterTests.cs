@@ -187,6 +187,34 @@ public class CommandRouterTests : IDisposable
     }
 
     [Fact]
+    public void Intake_MisusedOptionForm_UsageError_ExitOne_NoAuditDb()
+    {
+        // fix wave（intake 用法守卫）：误用选项形态 intake --drawing x——图纸路径是 positional
+        // 而非 --drawing 选项。StripOptionValues 剥选项后 positional=["intake"]，此前
+        // positional[1] 裸抛 IndexOutOfRange（Run 兜底打印原生英文消息 exit 1，无用法指引）。
+        // 现守卫先于 Intake/OpenAudit：友好用法提示 + exit 1，audit.db 不创建
+        // （用法错误不留审计——RequireOption/semantic 子命令守卫先例；.cadagent 目录
+        // 由 Run 统一创建属既有行为，不在此断言）。
+        var (code, stdout, stderr) = Run("intake", "--drawing", _drawing);
+        Assert.Equal(1, code);
+        Assert.Contains("用法", stderr);
+        Assert.Contains("intake", stderr);
+        Assert.Equal("", stdout);
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "audit.db")));
+    }
+
+    [Fact]
+    public void Intake_NoPositional_UsageError_ExitOne_NoAuditDb()
+    {
+        // 同型误用：裸 intake（无图纸路径）——同样走用法守卫，不裸抛、不建 audit.db。
+        var (code, stdout, stderr) = Run("intake");
+        Assert.Equal(1, code);
+        Assert.Contains("用法", stderr);
+        Assert.Equal("", stdout);
+        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "audit.db")));
+    }
+
+    [Fact]
     public void UnknownCommand_ExitOne_WithUsage()
     {
         var outW = new StringWriter();

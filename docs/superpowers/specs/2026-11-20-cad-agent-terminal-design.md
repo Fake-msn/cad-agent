@@ -584,6 +584,13 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **标本只读**：源/副本 SHA-256 前后一致（intake/scan/run-refusal 全程零触碰，working/sidecar 全落临时项目）；证据 `outputs/tarch-t3/`（intake.json/census-distribution.txt/scan-stats.txt/scan-electrical-stats.txt/mapping-reuse-check.txt/audit-records.txt/hashes-{before,after-scan,after-run}.txt/audit-evidence/）。
 - **门禁**：Cli.Tests 全量 + 全 sln 一次（基线 1279 + 本切片 2 新测试；Acad 真机跳过口径保持——RUNASADMIN 阻断未解除，勿触 AutoCAD COM；ZWCAD 前后 tasklist 核查无残留）。
 
+**TExport T3 部分转换实证 + intake 用法守卫（fix wave，2026-11-23 记录；追加式更正，旧文 0 删）**：
+
+- **标本替换实证（部分转换，非全炸开）**：用户将 `outputs/tarch-t3/1#配套用房0928_t3.dwg` 替换为真天正电气 5.0【文件布图→图形导出】TExport 件（旧"另存为"件存档 `1#配套用房0928_t3-resave-not-exploded.dwg` 留作对照）。实测 **census 残留 2769/29 类（TCH_WALL 962）**，实体 3636/Unknowns 0/AC1018（证据 `outputs/tarch-t3/intake-positional.log`）——较旧另存为件（3257/30 类，TCH_WALL 968）**部分转换**（488 对象/1 类被转换）但未全炸开 → intake 仍 **Yellow（exit 2）**，非 Green。**🟢 闭环仍未闭合**：待真正全炸开件（天正炸开选项/分解对象路径待用户核定）后重取。上条"逐类一致/仅重存"结论仅对旧另存为件成立，对现 TExport 件以本条为准。
+- **测试口径更正（稳健断言，不赌精确总数）**：`RealT3SpecimenTests` 原钉 3257/30/968/3636 精确值，标本替换后红。改稳健口径——Yellow exit 2 + census>0 + TCH_WALL 类存在 + sidecar 回写总数与 stdout 一致 + run-rejected 留痕（unparsedCount>0）+ working/副本只读字节一致 + 验链绿；测试名 `RealT3Specimen_IntakeYellow_CensusResidualMatchesNative` → `…CensusResidualPartialConversion`（现标本与 native2 不再逐类一致，旧名不成立）；两变体数字（3257/30 与 2769/29）及来源注释留档。
+- **intake 用法守卫修复（根因已核定）**：误用选项形态 `intake --drawing x --project y`（图纸路径应为 positional：`intake <path> --project y`）→ StripOptionValues 剥选项后 positional=["intake"] → CommandRouter intake 分支 `positional[1]` 裸抛 IndexOutOfRange（Run 兜底打印原生英文消息 exit 1，无用法指引）。修：intake 分支 positional.Length<2 → stderr「用法: intake <图纸路径> [--project <目录>]」+ exit 1，守卫先于 Intake/OpenAudit（**audit.db 不创建**——用法错误不留审计，RequireOption/semantic 子命令守卫先例；.cadagent 目录由 Run 统一创建属既有行为）。**仅修 intake 分支**——run/rollback 等其他命令同型问题留后续切片（不扩 scope）。覆盖：`CommandRouterTests.Intake_MisusedOptionForm_UsageError_ExitOne_NoAuditDb` + `Intake_NoPositional_UsageError_ExitOne_NoAuditDb`（先红后绿，RED 证据 `outputs/tarch-t3/fixwave-red.log`）。
+- **门禁**：Cli.Tests 全量 **246**/0 失败/0 跳过 + 全 sln 一次 **1283 通过/0 失败/3 跳过**（基线 1281 + 2 新测试；Llm 33/Core 235/Data 368/View 381/Cli 246/Zwcad 10 真机实跑/Acad 10+3 跳过）。Acad 真机跳过口径保持（勿触 AutoCAD COM——用户会话可能开着）；ZWCAD 前后 tasklist 无残留；post-tasklist 出现 acad.exe（pre 无）——Acad 3 真机测试均 skip-gated 未激活 COM，判定为用户运行期间自开会话，零触碰诚实记录。证据 `outputs/tarch-t3/fixwave-{red,green-targeted,cli,sln}.log` / `fixwave-tasklist-{pre,post}.txt`。
+
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
 **动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。

@@ -47,7 +47,20 @@ public static partial class CommandRouter
 
             switch (positional[0])
             {
-                case "intake": return Intake(positional[1], agentDir, session, stdout, stderr);
+                case "intake":
+                    // fix wave（intake 用法守卫）：图纸路径是 positional（intake <path>），
+                    // 误用选项形态（intake --drawing x）经 StripOptionValues 剥选项后
+                    // positional=["intake"]——此前 positional[1] 裸抛 IndexOutOfRange
+                    // （Run 兜底打印原生消息，无用法指引）。守卫先于 Intake/OpenAudit：
+                    // 友好用法提示 + exit 1，不建 audit.db（用法错误不留审计——
+                    // RequireOption/semantic 子命令守卫先例）。仅修 intake 分支，
+                    // 其他命令同型问题留后续切片（不扩 scope）。
+                    if (positional.Length < 2)
+                    {
+                        stderr.WriteLine("用法: intake <图纸路径> [--project <目录>]");
+                        return 1;
+                    }
+                    return Intake(positional[1], agentDir, session, stdout, stderr);
                 case "run": return RunPlan(args, positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "rollback": return Rollback(positional[1], RequireOption(args, "--drawing"), agentDir, session, stdout, stderr);
                 case "audit": return positional.Length > 1 && positional[1] == "package"

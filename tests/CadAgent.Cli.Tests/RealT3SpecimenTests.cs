@@ -5,19 +5,24 @@ using CadAgent.Data;
 namespace CadAgent.Cli.Tests;
 
 /// <summary>
-/// 真实 T3 标本 🟢 闭环重取（用户天正电气 5.0 转换件，skip-gated）——诚实钉住实测口径。
+/// 真实 T3 标本 🟢 闭环重取（用户天正电气 5.0 图形导出件，skip-gated）——诚实钉住实测口径。
 ///
 /// 背景：长期搁置项"真实 🟢 待用户 T3 转换"。此前 🟢 闭环跑在 ACadSharp UnknownEntity
-/// 盲子集上（census 切片作废该证据，spec §12 注记）。用户提供转换件
-/// outputs/tarch-t3/1#配套用房0928_t3.dwg（源 D: 零触碰副本），预期 T3=plain 实体 census 0 → Green。
+/// 盲子集上（census 切片作废该证据，spec §12 注记）。
 ///
-/// 实测结论（2026-11-23，诚实记录非预期）：该转换件**仅重存未炸开**——对象图 3636 实体句柄
-/// 与 native2 原图逐一一致，census 残留 3257/30 类（TCH_WALL 968），与 native2 重普查
-/// （outputs/tarch-gate-recombat/intake-s2.json）逐类一致 → intake **Yellow**（exit 2），非 Green。
-/// 故本测试按实测口径钉住 Yellow + census 残留（不赌 Green）；🟢 闭环重取仍待真正炸开的 T3 件。
+/// 标本变体沿革（fix wave 更正，两变体数字均留档不赌精确值）：
+/// ① 旧"另存为"件（现存档 outputs/tarch-t3/1#配套用房0928_t3-resave-not-exploded.dwg）：
+///    仅重存未炸开——census 3257/30 类（TCH_WALL 968），与 native2 重普查逐类一致
+///    （outputs/tarch-gate-recombat/intake-s2.json；旧证据 outputs/tarch-t3/intake.json）。
+/// ② 现标本（outputs/tarch-t3/1#配套用房0928_t3.dwg，用户真【图形导出】TExport 件）：
+///    **部分转换未全炸开**——census 2769/29 类（TCH_WALL 962 残留），实体 3636/Unknowns 0
+///    （outputs/tarch-t3/intake-positional.log）→ 仍 intake **Yellow**（exit 2），非 Green。
+/// 两变体 census 总数/类数不同（转换程度不同），故断言改**稳健口径**：Yellow + census&gt;0
+/// + TCH_WALL 类存在 + 只读字节一致，不赌精确总数（标本再替换不假红）。
+/// 🟢 闭环重取仍待真正全炸开的 T3 件（天正炸开选项/分解对象路径待用户核定）。
 ///
 /// 实现先行口径（诚实记录）：census 感知准入闸口已于防假 Green 切片（UG-T1..T5）交付，
-/// 本测试为真实标本实证钉住（非驱动新实现），首跑即绿——镜像 SheetTilerTests/UnparsedGateCliTests
+/// 本测试为真实标本实证钉住（非驱动新实现）——镜像 SheetTilerTests/UnparsedGateCliTests
 /// 真实标本测试"实现先行、实证钉住非驱动"先例。
 ///
 /// 标本只读硬约束：.dwg 一律复制到临时项目再 intake（working/sidecar 全落临时目录，
@@ -61,9 +66,11 @@ public class RealT3SpecimenTests : IDisposable
     }
 
     [SkippableFact]
-    public void RealT3Specimen_IntakeYellow_CensusResidualMatchesNative()
+    public void RealT3Specimen_IntakeYellow_CensusResidualPartialConversion()
     {
-        // 实测钉住：转换件未炸开 TCH 对象 → census 残留 → Yellow（非预期 Green）。
+        // 实测钉住（稳健口径，fix wave 更正）：真 TExport 件部分转换未全炸开 → census 残留
+        // → Yellow（非预期 Green）。不赌精确总数——旧另存为件 3257/30（TCH_WALL 968）与
+        // 现 TExport 件 2769/29（TCH_WALL 962）均满足本口径（数字来源见类注释）。
         string specimen = CopySpecimen();
         byte[] sourceBefore = File.ReadAllBytes(specimen);
 
@@ -78,11 +85,11 @@ public class RealT3SpecimenTests : IDisposable
         Assert.Contains("图形导出", guidance); // T3 指引文案
         Assert.Contains("T3", guidance);
         var summary = doc.RootElement.GetProperty("summary");
-        Assert.Equal(3636, summary.GetProperty("Entities").GetArrayLength()); // 与 native2 对象图一致
-        Assert.Equal(0, summary.GetProperty("Unknowns").GetArrayLength()); // 对象图盲区实证
-        // census 残留钉住（类×计数口径，与 native2 重普查逐类一致）。
+        Assert.True(summary.GetProperty("Entities").GetArrayLength() > 0); // 有原生实体（Yellow 非 Red 前提）
+        Assert.Equal(0, summary.GetProperty("Unknowns").GetArrayLength()); // 对象图盲区实证（两变体均 0）
+        // census 残留稳健钉住：非空 + TCH_WALL 类存在（天正墙体未炸开的特征类，两变体均在）。
         var classes = doc.RootElement.GetProperty("unparsed");
-        Assert.Equal(30, classes.GetArrayLength());
+        Assert.True(classes.GetArrayLength() > 0);
         int total = 0, wall = 0;
         foreach (var c in classes.EnumerateArray())
         {
@@ -90,10 +97,10 @@ public class RealT3SpecimenTests : IDisposable
             total += n;
             if (c.GetProperty("CppClassName").GetString() == "TCH_WALL") wall = n;
         }
-        Assert.Equal(3257, total);
-        Assert.Equal(968, wall);
-        // sidecar 回写（LoadWithCensus）：二次加载 census 仍可恢复。
-        Assert.Equal(3257, UnparsedCensusStore.Load(_project, specimen).TotalCount);
+        Assert.True(total > 0);
+        Assert.True(wall > 0); // TCH_WALL 残留（旧件 968 / 现件 962，不赌精确值）
+        // sidecar 回写（LoadWithCensus）：二次加载 census 总数与 stdout 一致（不赌精确值）。
+        Assert.Equal(total, UnparsedCensusStore.Load(_project, specimen).TotalCount);
         // 标本只读：副本字节前后一致（intake 不改源 .dwg）。
         Assert.Equal(sourceBefore, File.ReadAllBytes(specimen));
     }
@@ -132,7 +139,9 @@ public class RealT3SpecimenTests : IDisposable
         using (var p = JsonDocument.Parse(rejected.Entry.ParamsJson))
         {
             Assert.Equal("Yellow", p.RootElement.GetProperty("level").GetString());
-            Assert.Equal(3257, p.RootElement.GetProperty("unparsedCount").GetInt32());
+            // 稳健口径（fix wave）：census 残留计数 >0 即阻断证据，不赌精确总数
+            // （旧另存为件 3257 / 现 TExport 部分转换件 2769，见类注释）。
+            Assert.True(p.RootElement.GetProperty("unparsedCount").GetInt32() > 0);
             Assert.Contains("只读审查", p.RootElement.GetProperty("guidance").GetString());
         }
         Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
