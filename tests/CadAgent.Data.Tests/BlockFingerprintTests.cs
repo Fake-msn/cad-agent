@@ -108,4 +108,26 @@ public class BlockFingerprintTests
         (l.StartPoint, l.EndPoint) = (l.EndPoint, l.StartPoint);
         Assert.Equal(0, BlockFingerprint.Distance(a, BlockFingerprint.Extract(rev)!), 9);
     }
+
+    // BF-T2 顺带闭合 T1 遗留 minor：弧夹具覆盖 MatchArcs/AngDiff 绕回。
+    // 弧角跨 0/2π：起角 2π-0.1（≈355°）vs 0.05（≈3°）——环形短弧差≈0.15 rad，
+    // 而非朴素差≈6.13 rad；若无绕回处理距离会被钳到 1.0。
+    [Fact]
+    public void Distance_ArcAnglesAcrossZeroWrap_ShortCircularDiff()
+    {
+        var a = BlockFingerprint.Extract(new List<Entity>
+        {
+            new Arc { Center = new XYZ(0, 0, 0), Radius = 5, StartAngle = 2 * Math.PI - 0.1, EndAngle = 2 * Math.PI - 0.05 },
+        })!;
+        var b = BlockFingerprint.Extract(new List<Entity>
+        {
+            new Arc { Center = new XYZ(0, 0, 0), Radius = 5, StartAngle = 0.05, EndAngle = 0.1 },
+        })!;
+        Assert.NotEqual(a.Hash, b.Hash); // 角度原样入哈希——跨 0 表示不同串
+        Assert.True(BlockFingerprint.Compatible(a, b));
+        double d = BlockFingerprint.Distance(a, b);
+        // 量化后角差各≈0.1502 → d = 0.5×(0.1502+0.1502)/2 ≈ 0.0751（绕回短弧）
+        Assert.InRange(d, 0.07, 0.08);
+        Assert.True(d < BlockFingerprint.NearThreshold);
+    }
 }

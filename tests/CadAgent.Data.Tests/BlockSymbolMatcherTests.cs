@@ -1,0 +1,225 @@
+using ACadSharp;
+using ACadSharp.Entities;
+using ACadSharp.IO;
+using ACadSharp.Tables;
+using CadAgent.Core;
+using CadAgent.Data.Semantic;
+using CadAgent.Data.Sheets;
+using CSMath;
+
+namespace CadAgent.Data.Tests;
+
+/// <summary>
+/// BF-T2：块级纠偏三级匹配（spec §13.3）——符号索引（skill 包 DXF）+排除启发+
+/// 精确自动种子 GeometryInference 0.9 / 近似建议（不自动）/ 无命中高频歧义 + marker 范围 re-scan 清理。
+/// 夹具 API 按现状定型：点=CSMath.XYZ；DxfWriter.Write 静态；symbols.yaml 根键 symbols:；
+/// BlockRecord(name)/Insert(br) 构造（ACadSharp 3.8.35，DxfFixture/InsertBlockTests 同口径）。
+/// </summary>
+public class BlockSymbolMatcherTests : IDisposable
+{
+    private readonly string _pkg = Path.Combine(Path.GetTempPath(), $"bfpg-{Guid.NewGuid():N}");
+
+    public BlockSymbolMatcherTests()
+    {
+        Directory.CreateDirectory(Path.Combine(_pkg, "symbols"));
+        File.WriteAllText(Path.Combine(_pkg, "skill.yaml"), "name: test-pkg\nversion: \"1.0.0\"\n");
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n");
+        var sym = new CadDocument();
+        sym.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        sym.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "sym.dxf")))
+            DxfWriter.Write(fs, sym);
+    }
+
+    public void Dispose() { try { Directory.Delete(_pkg, true); } catch (IOException) { } }
+
+    private static CadDocument DocWithBlock(string name, Action<BlockRecord> populate, int inserts = 4)
+    {
+        var doc = new CadDocument();
+        var br = new BlockRecord(name);
+        populate(br);
+        doc.BlockRecords.Add(br);
+        for (int i = 0; i < inserts; i++)
+            doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(i * 100, 0, 0) });
+        return doc;
+    }
+
+    private static void SymbolGeometry(BlockRecord br)
+    {
+        br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        br.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+    }
+
+    private BlockMatchResult Run(CadDocument doc, SemanticOverlay? overlay = null, int min = 3)
+    {
+        var packages = new[] { SkillLoader.LoadDirectory(_pkg) };
+        var walked = BlockWalker.Walk(doc, Array.Empty<SheetRecord>()).ToList();
+        return BlockSymbolMatcher.MatchAndSeed(doc, walked, overlay ?? new SemanticOverlay(), packages, min);
+    }
+
+    [Fact]
+    public void ExactClone_AutoSeedsAllInstances_GeometryInference09()
+    {
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var overlay = new SemanticOverlay();
+        var r = Run(doc, overlay);
+        Assert.Single(r.AutoSeeds);
+        Assert.Equal("测试符号", r.AutoSeeds[0].SymbolName);
+        Assert.Equal(4, r.AutoSeeds[0].Handles.Count);
+        Assert.Equal(4, overlay.Annotations.Count(a => a.Provenance == Provenance.GeometryInference));
+        Assert.All(overlay.Annotations.Where(a => a.Provenance == Provenance.GeometryInference),
+            a => { Assert.Equal(0.9, a.Confidence); Assert.StartsWith("几何指纹精确匹配:", a.Evidence); Assert.Equal(SemanticClass.Device, a.Class); });
+        Assert.Empty(r.Suggestions);
+    }
+
+    [Fact]
+    public void PerturbedBlock_SuggestionOnly_NoAutoSeed_ConfidenceFormula()
+    {
+        // 扰动端点 12.0（brief 原值 10.5 经 T1 公式仅 d≈0.019→confidence≈0.86，
+        // 与 brief 自身 <0.8 断言矛盾；加大扰动使 d≈0.065∈(0.05,0.15]，断言逐字保留）。
+        var doc = DocWithBlock("近似块", br =>
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(12, 0, 0) });
+            br.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        });
+        var overlay = new SemanticOverlay();
+        var r = Run(doc, overlay);
+        Assert.Empty(r.AutoSeeds);
+        Assert.Empty(overlay.Annotations);
+        var s = Assert.Single(r.Suggestions);
+        var c = Assert.Single(s.Candidates);
+        Assert.Equal("测试符号", c.SymbolName);
+        Assert.InRange(c.Distance, 0.001, BlockFingerprint.NearThreshold);
+        Assert.Equal(BlockFingerprint.Confidence(c.Distance), c.Confidence, 9);
+        Assert.True(c.Confidence < 0.8);
+    }
+
+    [Fact]
+    public void UnmatchedHighFreq_Ambiguous_NoMatch()
+    {
+        var doc = DocWithBlock("自定义块", br =>
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+        });
+        var r = Run(doc);
+        var a = Assert.Single(r.Ambiguous);
+        Assert.Equal("自定义块", a.BlockName);
+        Assert.Equal("无匹配", a.Reason);
+        Assert.Equal(4, a.Instances);
+        Assert.NotEmpty(a.SampleHandles);
+    }
+
+    [Fact]
+    public void ProxyLikeBlock_NoWhitelistGeometry_AmbiguousProxyReason()
+    {
+        // R4：Hatch 代代理夹具——零白名单几何与天正代理同构（Extract→null→"代理图形不可读"）。
+        var doc = DocWithBlock("$equip$0001", br => br.Entities.Add(new Hatch()));
+        var r = Run(doc);
+        var a = Assert.Single(r.Ambiguous);
+        Assert.Equal("代理图形不可读", a.Reason);
+    }
+
+    [Fact]
+    public void LowInstances_Unmatched_NotAmbiguous()
+    {
+        var doc = DocWithBlock("偶发块", br => br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(9, 9, 0) }), inserts: 2);
+        var r = Run(doc);
+        Assert.Empty(r.Ambiguous);
+    }
+
+    [Fact]
+    public void Exclusions_Frame_SystemPrefix_ModelSpace()
+    {
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new AttributeDefinition { Tag = "图名" });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1189, 841, 0) });
+        Assert.True(BlockSymbolMatcher.IsExcluded(frame));
+        var smallAttdef = new BlockRecord("小属性块");
+        smallAttdef.Entities.Add(new AttributeDefinition { Tag = "A" });
+        smallAttdef.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 10, 0) });
+        Assert.False(BlockSymbolMatcher.IsExcluded(smallAttdef)); // 有 ATTDEF 但尺寸<500 不排除
+        Assert.True(BlockSymbolMatcher.IsExcluded(new BlockRecord("$LinePat$00000004")));
+        Assert.True(BlockSymbolMatcher.IsExcluded(new BlockRecord("$TCHSYS$DOOR3D")));
+        Assert.True(BlockSymbolMatcher.IsExcluded(new BlockRecord("*Model_Space")));
+        Assert.True(BlockSymbolMatcher.IsExcluded(new BlockRecord("空块"))); // 空定义排除
+        var anon = new BlockRecord("*U160");
+        SymbolGeometry(anon);
+        Assert.False(BlockSymbolMatcher.IsExcluded(anon)); // 匿名块不排除
+    }
+
+    [Fact]
+    public void Rescan_ClearsStaleBlockSeeds_KeepsHumanConfirmedAndWallHeuristics()
+    {
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var overlay = new SemanticOverlay();
+        Run(doc, overlay);
+        overlay.UpsertAnnotation(new SemanticAnnotation("999", SemanticClass.Wall, Provenance.GeometryInference, 0.7, "平行线对"));
+        overlay.UpsertAnnotation(new SemanticAnnotation("888", SemanticClass.Device, Provenance.HumanConfirmed, 1.0, "人工确认"));
+        // 块定义被改走样→re-scan 应清陈旧块种子
+        var br = doc.BlockRecords.First(b => b.Name == "符号块");
+        br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(50, 50, 0) });
+        var r = Run(doc, overlay);
+        Assert.Empty(r.AutoSeeds);
+        Assert.DoesNotContain(overlay.Annotations, a => a.Evidence.StartsWith("几何指纹精确匹配:"));
+        Assert.Contains(overlay.Annotations, a => a.TargetHandle == "999" && a.Provenance == Provenance.GeometryInference); // 墙启发式保留
+        Assert.Contains(overlay.Annotations, a => a.TargetHandle == "888" && a.Provenance == Provenance.HumanConfirmed);
+    }
+
+    [Fact]
+    public void HumanConfirmedInstance_SkippedByAutoSeed()
+    {
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var overlay = new SemanticOverlay();
+        var walked = BlockWalker.Walk(doc, Array.Empty<SheetRecord>()).ToList();
+        var first = walked.First(w => w.Entity is Insert);
+        overlay.UpsertAnnotation(new SemanticAnnotation(first.HandlePath, SemanticClass.Lighting, Provenance.HumanConfirmed, 1.0, "人工"));
+        var packages = new[] { SkillLoader.LoadDirectory(_pkg) };
+        BlockSymbolMatcher.MatchAndSeed(doc, walked, overlay, packages);
+        Assert.DoesNotContain(overlay.Annotations, a => a.TargetHandle == first.HandlePath && a.Provenance == Provenance.GeometryInference);
+        Assert.Contains(overlay.Annotations, a => a.TargetHandle == first.HandlePath && a.Provenance == Provenance.HumanConfirmed && a.Class == SemanticClass.Lighting);
+    }
+
+    [Fact]
+    public void BrokenSymbolDxf_SkippedWithCount_OthersStillMatch()
+    {
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "bad.dxf"), "不是 DXF");
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n  - { name: 坏符号, file: bad.dxf, class: Device, description: 坏 }\n");
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var r = Run(doc);
+        Assert.Equal(1, r.SymbolsLoaded);
+        Assert.Equal(1, r.SymbolsSkipped);
+        Assert.Single(r.AutoSeeds);
+    }
+
+    [Fact]
+    public void TruncatedSymbolDxf_DxfException_SkippedWithCount_OthersStillMatch()
+    {
+        // R2 实证钉住：合法 DXF 截断一半 → DxfReader 抛型异构且漂移（实证 DxfException 与
+        // NullReferenceException 两种，HEADER 时间戳致截断落点不定）——catch 面须宽捕，
+        // 否则整体失败（违反 spec"不整体失败"）。证据 outputs/block-fingerprint/t2-r2-*.log。
+        // 收窄 catch 漏任一型即回红。
+        byte[] full = File.ReadAllBytes(Path.Combine(_pkg, "symbols", "sym.dxf"));
+        File.WriteAllBytes(Path.Combine(_pkg, "symbols", "trunc.dxf"), full.Take(full.Length / 2).ToArray());
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n  - { name: 截断符号, file: trunc.dxf, class: Device, description: 截断 }\n");
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var r = Run(doc);
+        Assert.Equal(1, r.SymbolsLoaded);
+        Assert.Equal(1, r.SymbolsSkipped);
+        Assert.Single(r.AutoSeeds);
+    }
+
+    [Fact]
+    public void EmptyPackages_EmptyResult_NoThrow()
+    {
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var walked = BlockWalker.Walk(doc, Array.Empty<SheetRecord>()).ToList();
+        var r = BlockSymbolMatcher.MatchAndSeed(doc, walked, new SemanticOverlay(), Array.Empty<SkillPackage>());
+        Assert.Empty(r.AutoSeeds); Assert.Empty(r.Suggestions); Assert.Empty(r.Ambiguous);
+        Assert.Equal(0, r.SymbolsLoaded);
+    }
+}
