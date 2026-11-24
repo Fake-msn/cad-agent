@@ -116,9 +116,9 @@ public class NativeLiveAdmissionTests : IDisposable
             """{"planId":"NL-1","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
         byte[] before = File.ReadAllBytes(_drawing);
 
-        var (code, stdout, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, stdout, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("change-layer:21E00:WALL", _rt.Calls);
         Assert.Equal(_drawing + ".live.dwg", _rt.SavedPath);
         Assert.True(File.Exists(_drawing + ".live.dwg"));
@@ -171,7 +171,7 @@ public class NativeLiveAdmissionTests : IDisposable
         var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
 
         Assert.Equal(1, code);
-        Assert.NotEmpty(stderr);
+        Assert.Contains("StaleMismatch", stderr);
         Assert.DoesNotContain(_rt.Calls, c => c.StartsWith("change-layer"));
         Assert.DoesNotContain(_rt.Calls, c => c == "saveas");
         Assert.False(File.Exists(_drawing + ".live.dwg"));
@@ -213,9 +213,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-4","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("move:21E00:10:20", _rt.Calls);
         Assert.True(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
@@ -230,9 +230,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-5","steps":[{"kind":"delete","params":{"handle":"21E00"}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("delete:21E00", _rt.Calls);
         Assert.Empty(_rt.ReadResults); // 句柄已删除（读回缺失即 Pass）
         Assert.True(File.Exists(_drawing + ".live.dwg"));
@@ -247,9 +247,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-6","steps":[{"kind":"change-layer","params":{"handle":"138752","layer":"WALL"}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         // 运行时 op 与 Evaluate 同用命中的 overlay 形态（21E00），不得被 HandleToHex 二转。
         Assert.Contains("change-layer:21E00:WALL", _rt.Calls);
         using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
@@ -268,9 +268,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-7","steps":[{"kind":"change-layer","params":{"handle":"21000","layer":"WALL"}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("change-layer:21000:WALL", _rt.Calls);
         Assert.DoesNotContain(_rt.Calls, c => c.Contains("5208"));
     }
@@ -287,7 +287,7 @@ public class NativeLiveAdmissionTests : IDisposable
         var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
 
         Assert.Equal(1, code);
-        Assert.Contains("layer", stderr);
+        Assert.Contains("InvalidLayer", stderr);
         Assert.DoesNotContain(_rt.Calls, c => c.StartsWith("change-layer"));
         Assert.False(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
@@ -370,9 +370,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-12","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.True(_rt.Calls.Count > 0, "无运行时调用");
         Assert.Equal("read-native:path", _rt.Calls[0]);
         int openIdx = _rt.Calls.IndexOf("open:" + Path.GetFileName(_drawing));
@@ -394,9 +394,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-13","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":0}},{"kind":"move","params":{"handle":"21E00","dx":5,"dy":0}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("move:21E00:10:0", _rt.Calls);
         Assert.Contains("move:21E00:5:0", _rt.Calls);
         Assert.True(File.Exists(_drawing + ".live.dwg"));
@@ -417,7 +417,7 @@ public class NativeLiveAdmissionTests : IDisposable
         var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
 
         Assert.Equal(1, code);
-        Assert.NotEmpty(stderr);
+        Assert.Contains("句柄参数形态非法", stderr);
         Assert.Empty(_rt.Calls);
         Assert.False(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
@@ -439,9 +439,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-15","steps":[{"kind":"move-entity","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("move:21E00:10:20", _rt.Calls);
         Assert.True(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
@@ -461,9 +461,9 @@ public class NativeLiveAdmissionTests : IDisposable
         string plan = WritePlan(
             """{"planId":"NL-16","steps":[{"kind":"delete-entity","params":{"handle":"21E00"}}]}""");
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
 
-        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Equal(0, code);
         Assert.Contains("delete:21E00", _rt.Calls);
         Assert.Empty(_rt.ReadResults);
         Assert.True(File.Exists(_drawing + ".live.dwg"));
@@ -610,12 +610,196 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
     }
 
+    // ---- ISTQB 合并前审查修复波：准入拒绝面补全（I1）/零写入复核时序（I3）/聚合组合（Minor 6）----
+
+    [Fact]
+    public void Yellow_HandleNotInOverlay_NotRead_Refused_NoOps()
+    {
+        // I1a：overlay 只含**另一**句柄（目标实体未读参）→ NotRead 拒绝；运行时从不触达。
+        WriteOverlay(Wall(handle: "21F00"));
+        SeedNative(Wall(handle: "21F00"));
+        string plan = WritePlan(
+            """{"planId":"NL-24","steps":[{"kind":"delete","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("NotRead", stderr);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
+        Assert.Equal(new[] { "NotRead" }, VerdictsOf(refused));
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+            Assert.Equal("21E00", p.RootElement.GetProperty("verdicts")[0].GetProperty("handle").GetString());
+        Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
+    }
+
+    [Fact]
+    public void HandleOpFails_NativeLiveFailedStep_NoSaveAs_NoCommitted()
+    {
+        // I1b：句柄 op 抛 CadRuntimeException("op-fail") → native-live-failed{step,error}，
+        // 不 SaveAs、不交付、committed 不落。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        _rt.FailOps = true;
+        string plan = WritePlan(
+            """{"planId":"NL-25","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("op-fail", stderr);
+        Assert.Contains("change-layer:21E00:WALL", _rt.Calls);
+        Assert.DoesNotContain("saveas", _rt.Calls);
+        Assert.Null(_rt.SavedPath);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
+        using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+        {
+            Assert.Equal("change-layer", p.RootElement.GetProperty("step").GetString());
+            Assert.Equal("21E00", p.RootElement.GetProperty("handle").GetString());
+            Assert.Contains("op-fail", p.RootElement.GetProperty("error").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    [Fact]
+    public void NoAvailableRuntime_NativeLiveFailed_Exit1_NoDelivery()
+    {
+        // I1c：RuntimeFactory=null 返回（无可用厂商运行时）→ 响亮失败，无会话副作用。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        CommandRouter.RuntimeFactory = () => null;
+        string plan = WritePlan(
+            """{"planId":"NL-26","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("无可用厂商运行时", stderr);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
+        using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+            Assert.Contains("无可用厂商运行时", p.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    [Fact]
+    public void WhitelistedKindWithoutHandle_FallsBackToRunRejected_NoNativeAudit()
+    {
+        // I1d：白名单 kind（delete）但无 handle 参数 → 不属句柄寻址准入 → 回落既有
+        // run-rejected（exit 1、run-rejected 审计），无任何 native-* 审计、无运行时调用。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-27","steps":[{"kind":"delete","params":{}}]}""");
+
+        var (code, stdout, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("只读审查", stderr);
+        Assert.DoesNotContain("\"ok\"", stdout);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        Assert.Contains(records, r => r.Entry.Kind == "run-rejected");
+        Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-"));
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
+    }
+
+    [Fact]
+    public void DisposeWritesSourcePath_ZeroWriteRecheckAfterDispose_Exit1()
+    {
+        // I3：缺陷运行时在 Dispose（SaveAs/Close 之后）回写源图——零写入复核必须在 Dispose
+        // 之后重算才能捕获；失败退出、无 committed、.live.dwg 保留口径不变。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-28","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+        byte[] before = File.ReadAllBytes(_drawing);
+        _rt.SabotageOnDispose = true; // Dispose 时向 Open 打开的源图回写破坏字节
+
+        var (code, stdout, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("原图零写入契约破坏", stderr);
+        Assert.DoesNotContain("\"ok\"", stdout);
+        Assert.NotEqual(before, File.ReadAllBytes(_drawing)); // 破坏确实发生（证明复核有效）
+        // 已执行到交付（SaveAs+Close）之后才复核：破坏在 Dispose 阶段，前置窗口抓不到。
+        Assert.Contains("change-layer:21E00:WALL", _rt.Calls);
+        Assert.Contains("saveas", _rt.Calls);
+        Assert.True(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
+        using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+        {
+            Assert.Equal("sourceSha-changed", p.RootElement.GetProperty("reason").GetString());
+            Assert.Equal(ShaOf(before), p.RootElement.GetProperty("sourceSha").GetString());
+            Assert.Contains("源图字节被改动", p.RootElement.GetProperty("error").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    [Fact]
+    public void Yellow_MoveWithBboxNullAfter_ReadbackDegrades_Committed()
+    {
+        // Minor 6a：move 后读回 bbox=null 且 params 不变 → 诚实降级读回通过并交付；
+        // native-live-step 审计如实披露 readback="reread-bbox-null"。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        _rt.MoveNullsBbox = true;
+        string plan = WritePlan(
+            """{"planId":"NL-29","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
+
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(0, code);
+        Assert.Contains("move:21E00:10:20", _rt.Calls);
+        Assert.True(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var step = Assert.Single(records, r => r.Entry.Kind == "native-live-step");
+        using (var p = JsonDocument.Parse(step.Entry.ParamsJson))
+        {
+            Assert.Equal("move", p.RootElement.GetProperty("kind").GetString());
+            Assert.Equal("reread-bbox-null", p.RootElement.GetProperty("readback").GetString());
+        }
+        Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    [Fact]
+    public void Yellow_ChangeLayerThenMoveSameHandle_Aggregated_Committed()
+    {
+        // Minor 6b：同句柄 change-layer→move 组合，读回按终态聚合（layer=末步+bbox 位移）一次通过。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-30","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"LAYER-A"}},{"kind":"move","params":{"handle":"21E00","dx":10,"dy":0}}]}""");
+
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(0, code);
+        Assert.Contains("change-layer:21E00:LAYER-A", _rt.Calls);
+        Assert.Contains("move:21E00:10:0", _rt.Calls);
+        Assert.True(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        Assert.Equal(2, records.Count(r => r.Entry.Kind == "native-live-step"));
+        Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
     /// <summary>
     /// Fake 厂商运行时（零 COM）：ReadNativeParams 按形态区分——path≠null=天正自开自关
     /// 副本的只读快照（准入重读事实，独立于执行窗口状态）；null=当前活文档（ops 落状态，
     /// 读回看到执行后事实）。调用串记录形态（read-native:path/doc）供顺序断言；
     /// handle op 记录调用串；SaveAs 落合成 .live.dwg 字节；SabotageSourcePath 置位时
-    /// SaveAs 还向该路径回写破坏字节（finding 2c 恶意/缺陷运行时回归）。
+    /// SaveAs 还向该路径回写破坏字节（finding 2c 恶意/缺陷运行时回归）；
+    /// FailOps=True 时 handle op 抛 CadRuntimeException("op-fail")（I1b 执行失败面）；
+    /// SabotageOnDispose=True 时 Dispose 向 Open 打开的源图路径回写破坏字节（I3：证明零写入
+    /// 复核发生在 Dispose 之后——SaveAs/Close 之后才写，前置窗口抓不到）；MoveNullsBbox=True
+    /// 时 move 落位移但把读回 bbox 置 null（Minor 6a bbox 不可得降级面）。
     /// </summary>
     private sealed class FakeNativeRuntime : ICadRuntime
     {
@@ -624,10 +808,18 @@ public class NativeLiveAdmissionTests : IDisposable
         public List<NativeEntityParam> ReadResults { get; } = new();
         public string? SavedPath { get; private set; }
         public bool IgnoreHandleOps { get; set; }
+        public bool FailOps { get; set; }
         public string? SabotageSourcePath { get; set; }
+        public bool SabotageOnDispose { get; set; }
+        public bool MoveNullsBbox { get; set; }
+        private string? _openedPath;
 
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
-        public void Open(string path) => Calls.Add("open:" + Path.GetFileName(path));
+        public void Open(string path)
+        {
+            _openedPath = path; // Dispose 破坏缝写入的"源图"= 本会话打开的图纸
+            Calls.Add("open:" + Path.GetFileName(path));
+        }
 
         public void SaveAs(string path)
         {
@@ -657,6 +849,7 @@ public class NativeLiveAdmissionTests : IDisposable
         public void ChangeLayerByHandle(string hexHandle, string layer)
         {
             Calls.Add($"change-layer:{hexHandle}:{layer}");
+            if (FailOps) throw new CadRuntimeException("op-fail");
             if (IgnoreHandleOps) return;
             int i = ReadResults.FindIndex(n => n.Handle == hexHandle);
             if (i >= 0) ReadResults[i] = ReadResults[i] with { Layer = layer };
@@ -665,22 +858,34 @@ public class NativeLiveAdmissionTests : IDisposable
         public void MoveByHandle(string hexHandle, double dx, double dy)
         {
             Calls.Add($"move:{hexHandle}:{dx}:{dy}");
+            if (FailOps) throw new CadRuntimeException("op-fail");
             if (IgnoreHandleOps) return;
             int i = ReadResults.FindIndex(n => n.Handle == hexHandle);
-            if (i >= 0 && ReadResults[i].Bbox is { Length: 6 } b)
-                ReadResults[i] = ReadResults[i] with
-                {
-                    Bbox = new[] { b[0] + dx, b[1] + dy, b[2], b[3] + dx, b[4] + dy, b[5] }
-                };
+            if (i < 0) return;
+            ReadResults[i] = MoveNullsBbox
+                ? ReadResults[i] with { Bbox = null }  // 位移后读回 bbox 不可得（params 不变）
+                : ReadResults[i].Bbox is { Length: 6 } b
+                    ? ReadResults[i] with
+                    {
+                        Bbox = new[] { b[0] + dx, b[1] + dy, b[2], b[3] + dx, b[4] + dy, b[5] }
+                    }
+                    : ReadResults[i];
         }
 
         public void DeleteByHandle(string hexHandle)
         {
             Calls.Add($"delete:{hexHandle}");
+            if (FailOps) throw new CadRuntimeException("op-fail");
             if (IgnoreHandleOps) return;
             ReadResults.RemoveAll(n => n.Handle == hexHandle);
         }
 
-        public void Dispose() { }
+        public void Dispose()
+        {
+            // I3：模拟缺陷运行时在 Dispose（Close+Quit 之后）回写源图——零写入复核若早于
+            // Dispose 或只在成功会话的最后读一次（而非 Dispose 后）都抓不到此漂移。
+            if (SabotageOnDispose && _openedPath != null)
+                File.WriteAllBytes(_openedPath, new byte[] { 0x44, 0x49, 0x53 });
+        }
     }
 }

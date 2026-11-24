@@ -65,6 +65,8 @@ public class NativeGateRefinementTests
     [Theory]
     [InlineData("params-value-differs", NativeGateVerdict.StaleMismatch)]
     [InlineData("params-key-differs", NativeGateVerdict.StaleMismatch)]
+    [InlineData("params-superset", NativeGateVerdict.StaleMismatch)]
+    [InlineData("params-subset", NativeGateVerdict.StaleMismatch)]
     [InlineData("bbox-both-null", NativeGateVerdict.Pass)]
     [InlineData("bbox-one-null", NativeGateVerdict.StaleMismatch)]
     [InlineData("class-differs", NativeGateVerdict.Pass)]
@@ -81,6 +83,20 @@ public class NativeGateRefinementTests
             case "params-key-differs":  // 同键数、键集不同（练 TryGetValue 缺键路径而非 Count 短路）
                 stored = P("21E00");
                 reread = P("21E00") with { Params = new Dictionary<string, string> { ["RightWidth"] = "100" } };
+                break;
+            case "params-superset":  // 重读多键（Count 不等）→ StaleMismatch（Count 短路路径）
+                stored = P("21E00");
+                reread = P("21E00") with
+                {
+                    Params = new Dictionary<string, string> { ["LeftWidth"] = "100", ["Extra"] = "1" }
+                };
+                break;
+            case "params-subset":  // 重读缺键（Count 不等）→ StaleMismatch（Count 短路路径）
+                stored = P("21E00") with
+                {
+                    Params = new Dictionary<string, string> { ["LeftWidth"] = "100", ["RightWidth"] = "100" }
+                };
+                reread = P("21E00");
                 break;
             case "bbox-both-null":
                 stored = P("21E00") with { Bbox = null };

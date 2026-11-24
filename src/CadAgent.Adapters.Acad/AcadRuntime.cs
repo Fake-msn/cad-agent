@@ -640,8 +640,15 @@ public sealed class AcadRuntime : ICadRuntime
                 n, System.Reflection.BindingFlags.GetProperty, null, (object)e, null));
             return v == null ? null : Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
         }
-        catch (System.Runtime.InteropServices.COMException ce) when (ce.HResult == unchecked((int)0x80020006))
-        { return null; }  // UNKNOWNNAME→缺省；忙窗耗尽上抛不在此吞（RetryBusy 已重试）
+        catch (Exception ex)
+        {
+            // 复审 ISTQB I4：反射包装链（TargetInvocationException 等）内层 COMException 才带
+            // 真实 HRESULT——沿 InnerException 链判定（镜像 IsBusyRejection 先例）：
+            // UNKNOWNNAME=该属性不存在 → null（缺省，不重试）；其余（含忙拒绝——RetryBusy 已
+            // 耗尽重试）一律上抛：忙窗耗尽≠属性缺省，不得静默吞成 null。
+            if (ContainsHResult(ex, UnknownNameHResult)) return null;
+            throw;
+        }
     };
     internal static Func<dynamic, double[]?> BboxReader = e =>
     {
@@ -649,9 +656,29 @@ public sealed class AcadRuntime : ICadRuntime
         {
             return RetryBusy(() => ReadBbox(e));
         }
-        catch (Exception)
-        { return null; }  // bbox 尽力读（无此面/类型不匹配→null，ReadOk 仍 true；spec §4 诚实边界）
+        catch (Exception ex)
+        {
+            // spec §4 bbox nullable 尽力读：无此面（UNKNOWNNAME）/类型不匹配 → null（ReadOk
+            // 仍 true）。但复审 ISTQB Minor 13：忙拒绝耗尽≠"face 不存在"（空读≠空义）——
+            // RetryBusy 已重试仍被拒=整读失败，诚实上抛（不得把读失败伪装成"无 bbox"）。
+            if (ContainsHResult(ex, UnknownNameHResult)) return null;
+            if (IsBusyRejection(ex)) throw;
+            return null;
+        }
     };
+
+    // UNKNOWNNAME（IDispatch 属性不存在）HRESULT：逐属性缺省口径（spec §4.1 不重试）。
+    private const int UnknownNameHResult = unchecked((int)0x80020006);
+
+    // COMException 链判定（复审 ISTQB I4/13）：反射/包装异常须沿 InnerException 链找真实
+    // HRESULT；命中即返回 true（镜像 IsBusyRejection 的链式先例）。
+    private static bool ContainsHResult(Exception ex, int hresult)
+    {
+        for (Exception? e = ex; e != null; e = e.InnerException)
+            if (e is System.Runtime.InteropServices.COMException com && com.HResult == hresult)
+                return true;
+        return false;
+    }
 
     // GetBoundingBox([ref]min,[ref]max)：IDispatch 出参**必须**以 object[] 占位 + by-ref
     // ParameterModifier 传递——T10 真机实证：仅传 double[3] 占位（不标 by-ref）时 COM 不回写，

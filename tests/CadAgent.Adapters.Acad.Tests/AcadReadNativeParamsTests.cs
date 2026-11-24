@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using CadAgent.Adapters.Acad;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
@@ -216,5 +217,114 @@ public class AcadReadNativeParamsTests : IDisposable
         Assert.Contains("ReadNativeParams(path)", ex.Message);
         // 只有执行窗口那一次 Open；path 形态未再开第二份（守卫先于 EnsureAppTArch）。
         Assert.Single(calls, c => c.StartsWith("Documents.Open", StringComparison.Ordinal));
+    }
+
+    // ---- ISTQB 合并前审查修复波：Gate2 空图守卫（I2）/读参 HRESULT 双路径（I4）/bbox（Minor 13）----
+
+    /// <summary>
+    /// I2：path 形态打开后 ModelSpace.Count==0 → 有界 Gate2 重试（2 次/10ms）耗尽 →
+    /// CadRuntimeException("Gate2 超时")；读参失败仍自开自关（不残留开文档）。
+    /// </summary>
+    [Fact]
+    public void ReadNativeParams_WithPath_EmptyModelSpace_Gate2Timeout()
+    {
+        var calls = new List<string>();
+        var doc = new FakeNativeDoc(new FakeNativeModelSpace(), calls); // Count==0 空图
+        var app = new FakeNativeApp(doc, calls);
+        AcadRuntime.ProcessLauncher = p => { calls.Add($"Launch({p})"); return new Process(); };
+        AcadAttach.ActiveObjectResolver = _ => app;
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            using var rt = new AcadRuntime();
+            var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadNativeParams("empty.dwg"));
+            Assert.Contains("Gate2 超时", ex.Message);
+        }
+        finally
+        {
+            AcadRuntime.StartupRetryAttempts = _origAttempts;
+            AcadRuntime.StartupRetryDelay = _origDelay;
+        }
+        Assert.True(doc.Closed); // 失败路径自开自关（best-effort 关闭本方文档）
+    }
+
+    /// <summary>反射属性面：getter 抛 COMException（经 InvokeMember 必被包装为
+    /// TargetInvocationException——考核链式 HRESULT 归类而非直判）。</summary>
+    public sealed class ThrowingPropertyEntity
+    {
+        private readonly int _hresult;
+        public ThrowingPropertyEntity(int hresult) => _hresult = hresult;
+        public string Height => throw new COMException("fake-param", _hresult);
+    }
+
+    /// <summary>反射 bbox 面：与 ReadBbox 同形的 by-ref 出参签名，内部抛 COMException。</summary>
+    public sealed class ThrowingBboxEntity
+    {
+        private readonly int _hresult;
+        public ThrowingBboxEntity(int hresult) => _hresult = hresult;
+        public void GetBoundingBox(ref object min, ref object max)
+            => throw new COMException("fake-bbox", _hresult);
+    }
+
+    private static void AssertChainContainsHResult(Exception ex, int hresult)
+    {
+        bool found = false;
+        for (Exception? e = ex; e != null; e = e.InnerException)
+            if (e is COMException com && com.HResult == hresult) { found = true; break; }
+        Assert.True(found, $"异常链未含 HRESULT 0x{hresult:X8}: {ex}");
+    }
+
+    [Fact]
+    public void ParamReader_UnknownNameInsideWrapperChain_ReturnsNull()
+    {
+        // I4：UNKNOWNNAME(0x80020006) 被反射包装后仍判"属性缺省"→null（不重试）。
+        Assert.Null(AcadRuntime.ParamReader(
+            new ThrowingPropertyEntity(unchecked((int)0x80020006)), "Height"));
+    }
+
+    [Fact]
+    public void ParamReader_BusyRejectionSurvivesRetry_PropagatesWithChain()
+    {
+        // I4：忙拒绝（0x80010001）经 RetryBusy 有界重试仍被拒 → 整读上抛（不得吞成缺省 null）。
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            var ex = Assert.ThrowsAny<Exception>(() => AcadRuntime.ParamReader(
+                new ThrowingPropertyEntity(unchecked((int)0x80010001)), "Height"));
+            AssertChainContainsHResult(ex, unchecked((int)0x80010001));
+        }
+        finally
+        {
+            AcadRuntime.StartupRetryAttempts = _origAttempts;
+            AcadRuntime.StartupRetryDelay = _origDelay;
+        }
+    }
+
+    [Fact]
+    public void BboxReader_UnknownNameInsideWrapperChain_ReturnsNull()
+    {
+        // Minor 13：bbox 面缺失(0x80020006)→null（spec §4 nullable，ReadOk 仍 true）。
+        Assert.Null(AcadRuntime.BboxReader(new ThrowingBboxEntity(unchecked((int)0x80020006))));
+    }
+
+    [Fact]
+    public void BboxReader_BusyRejectionSurvivesRetry_Propagates()
+    {
+        // Minor 13：忙拒绝耗尽≠面不存在——整读上抛（空读不得伪装成"无 bbox"）。
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            var ex = Assert.ThrowsAny<Exception>(() =>
+                AcadRuntime.BboxReader(new ThrowingBboxEntity(unchecked((int)0x8001010A))));
+            AssertChainContainsHResult(ex, unchecked((int)0x8001010A));
+        }
+        finally
+        {
+            AcadRuntime.StartupRetryAttempts = _origAttempts;
+            AcadRuntime.StartupRetryDelay = _origDelay;
+        }
     }
 }

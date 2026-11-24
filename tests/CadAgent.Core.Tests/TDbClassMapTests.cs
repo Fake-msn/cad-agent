@@ -14,6 +14,7 @@ public class TDbClassMapTests
     [InlineData("TDbDrawingName", SemanticClass.Annotation)]
     [InlineData("TDbSymbArrow", SemanticClass.Annotation)]
     [InlineData("TDbUnknownNew", SemanticClass.Unknown)]
+    [InlineData("tdbwall", SemanticClass.Unknown)]  // 大小写口径：映射精确匹配（小写→Unknown）
     [InlineData("AcDbLine", SemanticClass.Unknown)]
     public void ClassFor_MapsObjectName(string objectName, SemanticClass expected)
         => Assert.Equal(expected, TDbClassMap.ClassFor(objectName));

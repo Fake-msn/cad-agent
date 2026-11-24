@@ -116,7 +116,7 @@ CLI semantic scan --native
 - `SemanticOverlay`：NativeEntities null 归一/UpsertNative 幂等（同 Handle 覆盖+ReadAt 更新）/JSON 往返（旧 overlay 无字段→空；新字段读写保真）/Save 原子写沿用。
 - `NativeParamSeeder`：Class!=Unknown&&ReadOk→产 Annotation(NativeParameter 0.95)；Unknown 或 ReadOk=false→只记 NativeEntities 不产 Annotation；幂等重扫不重复。
 - `NativeGateRefinement`：句柄∈NativeEntities&&ReadOk→放行；不在/ReadOk=false→拒；重读校验不一致→拒（stale 防护）。
-- `AcadRuntime` 读参编排（fake COM seam，镜像现有 `AcadRuntimeTests` 的 ProgIdResolver/CreateComInstance 缝）：ObjectName 分类/TDb 读参/UNKNOWNNAME 记缺省不重试/忙窗重试耗尽→ReadOk=false/非 TDb 跳过。
+- `AcadRuntime` 读参编排（fake COM seam，镜像现有 `AcadRuntimeTests` 的 ProgIdResolver/CreateComInstance 缝）：ObjectName 分类/TDb 读参/UNKNOWNNAME=属性缺省不重试；忙窗耗尽→整读上抛（ReadOk=false 仅 null 通道可达——与 §4.1「空读≠不存在」口径一致，2026-11-27 ISTQB 修复波更正）/非 TDb 跳过。
 
 **条件真机测试**（`Category=RequiresAutoCAD`，显式跳过无 AutoCAD，镜像 AcadLiveTests）：
 - /p 启动+ROT 附着→ReadNativeParams 读真实 16#1116.dwg 副本：TDbWall LeftWidth=100/Height=3000/Volume=2.895 跨轮逐字闭合（spike 基准值）；ObjectName 分类 TDb vs AcDb 计数与 census 398 对照。

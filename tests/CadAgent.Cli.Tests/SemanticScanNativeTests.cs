@@ -100,6 +100,30 @@ public class SemanticScanNativeTests : IDisposable
         public void Dispose() => Disposed = true;
     }
 
+    /// <summary>Minor 5 fake：一条已分类读参成功（TDbWall/ReadOk=true）+ 一条 ReadOk=false
+    /// （ObjectName 可分类=Wall 但读参不完整）——考核 nativeReadFailed&gt;0 的等价类与标注分离。</summary>
+    private sealed class FakeMixedRuntime : ICadRuntime
+    {
+        public RuntimeInfo GetInfo() => new("Fake", "1", true);
+        public IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) => new[]
+        {
+            new NativeEntityParam("21E00", "TDbWall", SemanticClass.Wall,
+                new Dictionary<string, string> { ["LeftWidth"] = "100" },
+                new[] { 0.0, 0, 0, 1, 1, 1 }, DateTimeOffset.UtcNow, true, "0dt"),
+            new NativeEntityParam("22A00", "TDbWall", SemanticClass.Wall,
+                new Dictionary<string, string>(), null, DateTimeOffset.UtcNow, false, null)
+        };
+        public void Open(string p) { } public void SaveAs(string p) { }
+        public void Close(bool s) { } public void Restart() { }
+        public void AddLine(double a, double b, double c, double d, string? l = null) { }
+        public void AddText(double x, double y, string t, double h, string? l = null) { }
+        public void AddCircle(double x, double y, double r, string? l = null) { }
+        public void AddInsert(string n, double x, double y, double s = 1, double r = 0, string? l = null) { }
+        public void EnsureBlock(string n, IReadOnlyList<BlockPrimitive> p) { }
+        public int EntityCount() => 0;
+        public void Dispose() { }
+    }
+
     private static (int read, int classified, int failed) NativeCounts(string stdout)
     {
         using var doc = JsonDocument.Parse(stdout);
@@ -253,6 +277,39 @@ public class SemanticScanNativeTests : IDisposable
             Assert.NotNull(rec);
             using var p = JsonDocument.Parse(rec!.Entry.ParamsJson);
             Assert.Contains("fake 构造失败（激活异常）", p.RootElement.GetProperty("error").GetString());
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    /// <summary>Minor 5：nativeReadFailed&gt;0 等价类——2 条读参（1 条 ReadOk/1 条 ReadOk=false）
+    /// → 三键 2/1/1；NativeEntities 含两句柄；NativeParameter 标注仅给 ReadOk 成功实体。</summary>
+    [Fact]
+    public void ScanNative_OneReadOkFalse_CountsSplit_AnnotationOnlyForGood()
+    {
+        CommandRouter.RuntimeFactory = () => new FakeMixedRuntime();
+        try
+        {
+            var (code, stdout, _) = Run("semantic", "scan", "--drawing", _drawing, "--native");
+            Assert.Equal(0, code);
+            Assert.Equal((2, 1, 1), NativeCounts(stdout));
+
+            var overlay = SemanticOverlay.Load(OverlayPath);
+            Assert.Equal(2, overlay.NativeEntities.Count);
+            Assert.Contains(overlay.NativeEntities, n => n.Handle == "21E00" && n.ReadOk);
+            Assert.Contains(overlay.NativeEntities, n => n.Handle == "22A00" && !n.ReadOk);
+            var annotation = Assert.Single(overlay.Annotations, a => a.Provenance == Provenance.NativeParameter);
+            Assert.Equal("21E00", annotation.TargetHandle);
+
+            // 审计加性三键同口径：2/1/1。
+            using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+            var scan = audit.ReadAll().Single(r => r.Entry.Kind == "semantic-scan");
+            using var p = JsonDocument.Parse(scan.Entry.ParamsJson);
+            Assert.Equal(2, p.RootElement.GetProperty("nativeRead").GetInt32());
+            Assert.Equal(1, p.RootElement.GetProperty("nativeClassified").GetInt32());
+            Assert.Equal(1, p.RootElement.GetProperty("nativeReadFailed").GetInt32());
         }
         finally
         {

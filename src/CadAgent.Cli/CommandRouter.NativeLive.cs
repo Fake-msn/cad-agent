@@ -150,6 +150,93 @@ public static partial class CommandRouter
         if (verdicts.Count > 0) return RefuseVerdicts(verdicts);
 
         string outPath = drawingPath + ".live.dwg";
+
+        // 会话工作（4a–7）收进局部函数：各失败早退只返回码，不再绕过零写入复核
+        // （I3 复审修复）——运行时一旦创建（存在副作用可能），成功/失败路径一律在
+        // Dispose（Close+Quit+进程退出）之后重算源件 SHA 并与初值比对；失败文案不得
+        // 仅凭声称"原图零写入"而未经复核。
+        int RunSession(ICadRuntime rt)
+        {
+            // 4a. 天正会话开路（@T10 修复，顺序不可颠倒）：先 path 形态读参——
+            // ReadNativeParams(path≠null) 内部经 EnsureAppTArch 以 /p 拉起 TArch profile
+            // 并把 _app 缓存；返回值即准入重读事实（以 ReadOnly=true 打开原图读完即关，
+            // 不另建副本——复审 finding 3）。
+            // 若先 Open（EnsureApp 默认 profile 先缓存 _app），EnsureAppTArch 将早退复用
+            // 默认实例、TArch 永不加载→真机 TDb 目标全 StaleMismatch（通道失效）。
+            var reread = rt.ReadNativeParams(drawingPath);
+            var gateVerdicts = new List<(string Handle, string Verdict)>();
+            for (int i = 0; i < plan.Steps.Count; i++)
+            {
+                string handle = matched[i]!;
+                // 台账 T7 守卫：重读记录句柄须等于查询句柄（防管道错配误放行）；
+                // 不等/缺失 → null → Evaluate 判 StaleMismatch。
+                var rec = FindRereadByHandle(reread, handle);
+                var verdict = NativeGateRefinement.Evaluate(overlay, handle, rec);
+                if (verdict != NativeGateVerdict.Pass)
+                    gateVerdicts.Add((handle, verdict.ToString()));
+            }
+            if (gateVerdicts.Count > 0) return RefuseVerdicts(gateVerdicts);
+
+            // 台账 T7@T9：准入重读指纹（定序 "handle|objectName|bbox|params" 的 SHA256）
+            // 加性落 native-gate-pass，供审计复核"放行所依据的重读事实"。
+            string rereadHash = RereadHash(reread, matched);
+            Audit("native-gate-pass", drawingPath, new { handles = matched, sourceSha, rereadHash });
+
+            // 4b. 执行窗口：Open 原图读改写（执行侧需要）——EnsureApp 复用 4a 已缓存的
+            // TArch _app（同一实例开原始 DWG，TDb 存活）；实例启动已由 4a 完成。
+            rt.Open(drawingPath);
+
+            // 5. 全 Pass → 句柄/kind 归一替换副本执行（Replay 内置归一不得再改写已命中形态）。
+            var replayPlan = ReplaceStepHandles(plan, matched);
+            var results = new ComReplayService(rt).Replay(replayPlan, drawing);
+            for (int i = 0; i < results.Count; i++)
+            {
+                var r = results[i];
+                if (!r.Ok)
+                {
+                    Audit("native-live-failed", matched[i]!,
+                        new { step = r.Kind, handle = matched[i], error = r.Error });
+                    stderr.WriteLine($"native-live 执行失败: {r.Kind}: {r.Error}（未交付 .live.dwg，原图零写入）");
+                    return 1;
+                }
+            }
+
+            // 6. 读回闸：after 读一次，期望按句柄**终态聚合**比对（同句柄多步不得按
+            // 首快照逐 step 误拒）：delete 支配（句柄须消失）；change-layer 末步层名胜出；
+            // move 位移按句柄求和后作用于该句柄 before-bbox。
+            var after = rt.ReadNativeParams();
+            var expectations = AggregateReadback(plan, matched);
+            foreach (var exp in expectations)
+            {
+                string? detail = CheckReadback(exp, FindRereadByHandle(reread, exp.Handle),
+                    after, out bool bboxNull);
+                if (detail != null)
+                {
+                    Audit("native-live-failed", drawingPath, new { readback = detail });
+                    stderr.WriteLine($"native-live 读回不符: {detail}（未交付 .live.dwg，原图零写入）");
+                    return 1;
+                }
+                exp.BboxNull = bboxNull;
+            }
+            // 逐 step 审计（按句柄首现+计划内顺序；kind 记运行时口径）；move 的 bbox
+            // 不可得降级如实披露。
+            foreach (var exp in expectations)
+                foreach (var step in exp.Steps)
+                {
+                    string kind = NormalizeKind(step.Kind);
+                    Audit("native-live-step", exp.Handle, exp.BboxNull && kind == "move"
+                        ? new { kind, handle = exp.Handle, readback = "reread-bbox-null" }
+                        : new { kind, handle = exp.Handle });
+                }
+
+            // 7. 交付：唯一写出是 .live.dwg 新文件（SaveAs+Close 仍在会话内；证据哈希在
+            //    运行时 Dispose 后读取，见下方零写入复核）。
+            rt.SaveAs(outPath);
+            rt.Close(false);
+            return 0; // committed/收据在零写入复核之后才落（I3）
+        }
+
+        int rc;
         try
         {
             // 4. 活会话对准**原图**（原生 DWG，TDb 存活）。运行时获取镜像 T6 R8 裁定：
@@ -165,86 +252,11 @@ public static partial class CommandRouter
             }
             try
             {
-                // 4a. 天正会话开路（@T10 修复，顺序不可颠倒）：先 path 形态读参——
-                // ReadNativeParams(path≠null) 内部经 EnsureAppTArch 以 /p 拉起 TArch profile
-                // 并把 _app 缓存；返回值即准入重读事实（以 ReadOnly=true 打开原图读完即关，
-                // 不另建副本——复审 finding 3）。
-                // 若先 Open（EnsureApp 默认 profile 先缓存 _app），EnsureAppTArch 将早退复用
-                // 默认实例、TArch 永不加载→真机 TDb 目标全 StaleMismatch（通道失效）。
-                var reread = rt.ReadNativeParams(drawingPath);
-                var gateVerdicts = new List<(string Handle, string Verdict)>();
-                for (int i = 0; i < plan.Steps.Count; i++)
-                {
-                    string handle = matched[i]!;
-                    // 台账 T7 守卫：重读记录句柄须等于查询句柄（防管道错配误放行）；
-                    // 不等/缺失 → null → Evaluate 判 StaleMismatch。
-                    var rec = FindRereadByHandle(reread, handle);
-                    var verdict = NativeGateRefinement.Evaluate(overlay, handle, rec);
-                    if (verdict != NativeGateVerdict.Pass)
-                        gateVerdicts.Add((handle, verdict.ToString()));
-                }
-                if (gateVerdicts.Count > 0) return RefuseVerdicts(gateVerdicts);
-
-                // 台账 T7@T9：准入重读指纹（定序 "handle|objectName|bbox|params" 的 SHA256）
-                // 加性落 native-gate-pass，供审计复核"放行所依据的重读事实"。
-                string rereadHash = RereadHash(reread, matched);
-                Audit("native-gate-pass", drawingPath, new { handles = matched, sourceSha, rereadHash });
-
-                // 4b. 执行窗口：Open 原图读改写（执行侧需要）——EnsureApp 复用 4a 已缓存的
-                // TArch _app（同一实例开原始 DWG，TDb 存活）；实例启动已由 4a 完成。
-                rt.Open(drawingPath);
-
-                // 5. 全 Pass → 句柄/kind 归一替换副本执行（Replay 内置归一不得再改写已命中形态）。
-                var replayPlan = ReplaceStepHandles(plan, matched);
-                var results = new ComReplayService(rt).Replay(replayPlan, drawing);
-                for (int i = 0; i < results.Count; i++)
-                {
-                    var r = results[i];
-                    if (!r.Ok)
-                    {
-                        Audit("native-live-failed", matched[i]!,
-                            new { step = r.Kind, handle = matched[i], error = r.Error });
-                        stderr.WriteLine($"native-live 执行失败: {r.Kind}: {r.Error}（未交付 .live.dwg，原图零写入）");
-                        return 1;
-                    }
-                }
-
-                // 6. 读回闸：after 读一次，期望按句柄**终态聚合**比对（同句柄多步不得按
-                // 首快照逐 step 误拒）：delete 支配（句柄须消失）；change-layer 末步层名胜出；
-                // move 位移按句柄求和后作用于该句柄 before-bbox。
-                var after = rt.ReadNativeParams();
-                var expectations = AggregateReadback(plan, matched);
-                foreach (var exp in expectations)
-                {
-                    string? detail = CheckReadback(exp, FindRereadByHandle(reread, exp.Handle),
-                        after, out bool bboxNull);
-                    if (detail != null)
-                    {
-                        Audit("native-live-failed", drawingPath, new { readback = detail });
-                        stderr.WriteLine($"native-live 读回不符: {detail}（未交付 .live.dwg，原图零写入）");
-                        return 1;
-                    }
-                    exp.BboxNull = bboxNull;
-                }
-                // 逐 step 审计（按句柄首现+计划内顺序；kind 记运行时口径）；move 的 bbox
-                // 不可得降级如实披露。
-                foreach (var exp in expectations)
-                    foreach (var step in exp.Steps)
-                    {
-                        string kind = NormalizeKind(step.Kind);
-                        Audit("native-live-step", exp.Handle, exp.BboxNull && kind == "move"
-                            ? new { kind, handle = exp.Handle, readback = "reread-bbox-null" }
-                            : new { kind, handle = exp.Handle });
-                    }
-
-                // 7. 交付：唯一写出是 .live.dwg 新文件（SaveAs+Close 仍在会话内；证据哈希在
-                //    运行时 Dispose 后读取，见 finally 之后的零写入断言）。
-                rt.SaveAs(outPath);
-                rt.Close(false);
+                rc = RunSession(rt);
             }
             finally
             {
-                // 证据窗口闭合（复审 finding 2a）：Dispose 内部 Close(false)+Quit+等待进程退出。
+                // 证据窗口闭合（复审 finding 2a / I3）：Dispose 内部 Close(false)+Quit+等待进程退出。
                 // 源件/交付件哈希必须在文档关闭且实例退出后读取——Open 期间源文件句柄由
                 // AutoCAD 持有，此时读到的不完整/被拒字节会污染零写入断言。Dispose 自身不抛。
                 rt.Dispose();
@@ -254,10 +266,11 @@ public static partial class CommandRouter
         {
             Audit("native-live-failed", drawingPath, new { error = ex.Message });
             stderr.WriteLine($"native-live 失败: {ex.Message}（未交付 .live.dwg，原图零写入）");
-            return 1;
+            rc = 1;
         }
 
-        // 8. 原图零写入断言（源件 SHA256 前后比对；窗口已闭合）→ 唯一写出是 .live.dwg。
+        // 8. 原图零写入复核（源件 SHA256 前后比对；窗口已闭合；成功/失败路径一律复核——
+        //    I3：失败路径同样不得未经复核声称零写入）→ 唯一写出是 .live.dwg。
         //    空 SHA 不得 ""=="" 假通过（fail-open）：哈希不可得即视为验证失败。
         string sourceShaNow = Sha256File(drawingPath);
         if (string.IsNullOrEmpty(sourceShaNow))
@@ -269,11 +282,15 @@ public static partial class CommandRouter
         }
         if (sourceShaNow != sourceSha)
         {
+            // I3：失败路径已留原失败痕；此处追加漂移证据并强制失败（committed 不落、.live.dwg
+            // 保留口径不变）。成功路径同样在此被拦下（如 Dispose 内被恶意/缺陷运行时回写源图）。
             Audit("native-live-failed", drawingPath,
-                new { error = "源图字节被改动（原图零写入契约破坏）", sourceSha, sourceShaNow });
+                new { error = "源图字节被改动（原图零写入契约破坏）", reason = "sourceSha-changed", sourceSha, sourceShaNow },
+                sourceShaNow);
             stderr.WriteLine($"native-live 失败: 源图字节被改动（原图零写入契约破坏；{outPath} 已产出但按失败退出）");
             return 1;
         }
+        if (rc != 0) return rc; // 原失败路径：复核无漂移，保持原失败码/原审计，不追加成功动作
         // 交付件证据（复审 finding 2b）：liveSha 不可验证同样按失败退出——交付件可读性
         // 未证不得报成功；保留 .live.dwg 作为诊断证据但审计/退出码诚实报失败。
         string liveSha = Sha256File(outPath);

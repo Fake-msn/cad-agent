@@ -77,6 +77,30 @@ public class ComReplayHandleKindTests
     [InlineData("138752", "21E00")]
     [InlineData("21e00", "21E00")]
     [InlineData("0x21E00", "21E00")]
+    [InlineData("", "")]                                        // 空串：解析失败→大写原样（恒等）
+    [InlineData("ZZZ", "ZZZ")]                                   // 非数值：大写原样
+    [InlineData("18446744073709551616", "18446744073709551616")] // ulong 上界+1 溢出：两侧解析均失败→恒等
     public void HandleToHex_Normalizes(string input, string expected)
         => Assert.Equal(expected, ComReplayService.HandleToHex(input));
+
+    // ISTQB Minor 4：HandleString 数值形态边界——Number 走 GetUInt64（非字符串通道）。
+
+    [Fact]
+    public void HandleString_NumberForm_ReturnsDecimalString()
+    {
+        using var doc = JsonDocument.Parse("""{"handle":138752}""");
+        Assert.Equal("138752", ComReplayService.HandleString(doc.RootElement));
+    }
+
+    [Theory]
+    [InlineData("""{"handle":-5}""")]
+    [InlineData("""{"handle":1.5}""")]
+    public void HandleString_NonUInt64Number_FailsClosed(string json)
+    {
+        // 负数/小数不属于合法句柄形态：GetUInt64 抛 FormatException——fail-closed 链的
+        // 实际异常类型钉住（不得静默成 "" 而把非法句柄当合法空句柄）。
+        using var doc = JsonDocument.Parse(json);
+        var ex = Assert.ThrowsAny<Exception>(() => ComReplayService.HandleString(doc.RootElement));
+        Assert.IsType<FormatException>(ex);
+    }
 }
