@@ -15,7 +15,9 @@ public sealed record ReplayStepResult(string Kind, bool Ok, string? Error);
 /// 3j 计划级 COM 重放（"agent 操作 CAD 绘制"第二执行通道）：步骤计划→活厂商会话绘制操作。
 /// 几何数学与 handler 同源（GeometryKit）；影子副本（DrawingSession）仍为审计事实源，
 /// 本通道逐 step 结果交 CLI 审计（com-replay/com-replay-failed），读回计数闸口守分歧。
-/// 不支持的 kind（编辑类 delete/move/change-layer）响亮失败——第一 slice 仅生成类。
+/// 生成类 kind + 切片A 编辑类 kind（change-layer/move/delete）按句柄寻址作用于活厂商会话
+/// （handle 十进制/已 hex 两种形态经 HandleToHex 归一）；其余 kind 响亮失败。
+/// 编辑类只走运行时句柄 op，不读不写影子副本（shadow-agnostic）。
 /// insert-symbol 经 skill 包解析+源 DXF 白名单基元→EnsureBlock+AddInsert。
 /// </summary>
 public sealed class ComReplayService
@@ -149,8 +151,39 @@ public sealed class ComReplayService
                     HandlerHelpers.OptString(p, "layer"));
                 break;
             }
+            // 切片A §4.2：编辑类 kind——句柄寻址，经运行时 op 作用存活实体（不改影子副本）。
+            // handle 契约与 handler Find 同源（数字/十进制字符串皆可），再归一为 COM 十六进制。
+            case "change-layer":
+                _rt.ChangeLayerByHandle(HandleToHex(HandleString(p)),
+                    p.GetProperty("layer").GetString() ?? "");
+                break;
+            case "move":
+                _rt.MoveByHandle(HandleToHex(HandleString(p)),
+                    HandlerHelpers.Req(p, "dx"), HandlerHelpers.Req(p, "dy"));
+                break;
+            case "delete":
+                _rt.DeleteByHandle(HandleToHex(HandleString(p)));
+                break;
             default:
-                throw new CadRuntimeException($"COM 重放不支持步骤类型 {kind}（第一 slice 仅生成类）");
+                throw new CadRuntimeException($"COM 重放不支持步骤类型 {kind}");
         }
+    }
+
+    // R10：public static——CLI 准入（Task 9）须复用同一归一实现（Data→Cli 无 IVT 先例，禁重实现）。
+    public static string HandleString(JsonElement p) => p.GetProperty("handle").ValueKind switch
+    {
+        JsonValueKind.Number => p.GetProperty("handle").GetUInt64().ToString(),
+        _ => p.GetProperty("handle").GetString() ?? "",
+    };
+
+    // 句柄归一（裁定）：剥 0x/0X 前缀→十进制串按 InvariantCulture Integer 解析→X 大写；
+    // 已是 hex 串（含字母）或非法形态→ToUpperInvariant 原样大写返回。
+    public static string HandleToHex(string handle)
+    {
+        if (handle.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) handle = handle[2..];
+        if (ulong.TryParse(handle, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var dec))
+            return dec.ToString("X");
+        return handle.ToUpperInvariant();
     }
 }

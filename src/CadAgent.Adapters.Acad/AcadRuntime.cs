@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using CadAgent.Core;
 using CadAgent.Core.Cad;
 
 namespace CadAgent.Adapters.Acad;
@@ -23,6 +25,11 @@ public sealed class AcadRuntime : ICadRuntime
     private dynamic? _doc;
     private bool _disposed;
 
+    // 复审 finding 4：本方 /p 启动的进程句柄（EnsureAppTArch 内赋值，仅用于 ROT 附着后归属
+    // 校验与失败清理）。归属不符=附着到的实例非本方启动（用户同时开了 AutoCAD）——
+    // 清理只对本进程，绝不 Quit 他方实例。
+    private Process? _launchedProc;
+
     // 重名碰撞守卫（复审微修复波）：本文档会话经 EnsureBlock 成功创建的块名集合。
     // 重入补全只对"本方创建"的块清除重建；预存用户块（名不在集合）一律复用早退——
     // skill 符号名与用户图纸自有块重名（如 "DOOR"）时不得删除用户内容（恢复旧非破坏行为）。
@@ -32,6 +39,134 @@ public sealed class AcadRuntime : ICadRuntime
 
     internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
+
+    // 切片A §4.1：天正 profile 感知启动的 exe 启动缝（测试注入；单元测试不得拉起真机）。
+    // T10 真机核定收紧（2026-11-25）：原假定「安装 AutoCAD 2014 的真机环境 PATH 可解析
+    // acad.exe」**实证失败**——Workstation 安装不写 PATH，裸 Process.Start("acad.exe")
+    // 抛 Win32Exception「系统找不到指定的文件」（诊断经本缝透传，见 EnsureAppTArch）。
+    // 故启动前解析安装路径：① 注册表 AcadLocation（HKLM/HKCU ...\Autodesk\AutoCAD\R*\ACAD-*，
+    // 版本降序，每根独立容错）；② %ProgramFiles%/%ProgramFiles(x86)%\Autodesk\AutoCAD *\acad.exe
+    // 目录扫描（版本降序）；③ 兜底裸 "acad.exe"（PATH 可解析环境保持旧行为；仍失败由
+    // EnsureAppTArch 响亮上抛）。
+    internal static Func<string?> AcadExecutableResolver = DefaultResolveAcadExecutable;
+
+    private const string DefaultAcadExecutableName = "acad.exe";
+
+    // 返回 null=启动失败（UseShellExecute 时 Process.Start 亦可能返回 null）。
+    internal static Func<string, Process?> ProcessLauncher = profileName =>
+        Process.Start(BuildStartInfo(profileName, AcadExecutableResolver() ?? DefaultAcadExecutableName));
+
+    // /p 启动参数构造（纯函数，单测钉住 FileName/Arguments/UseShellExecute，不拉起进程）。
+    internal static ProcessStartInfo BuildStartInfo(string profileName, string executable) =>
+        new ProcessStartInfo
+        {
+            FileName = executable,
+            Arguments = $"/p \"{profileName}\"",
+            UseShellExecute = true,
+        };
+
+    // 安装路径解析纯逻辑（单测注入候选表；仅 File.Exists 探测，无进程/无 COM 副作用）。
+    internal static string? ResolveAcadExecutable(
+        IReadOnlyList<string> registryLocations, IReadOnlyList<string> installDirs)
+    {
+        foreach (var loc in registryLocations)
+        {
+            if (string.IsNullOrWhiteSpace(loc)) continue;
+            string exe = Path.Combine(loc, DefaultAcadExecutableName);
+            if (File.Exists(exe)) return exe;
+        }
+        foreach (var dir in installDirs)
+        {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
+            string exe = Path.Combine(dir, DefaultAcadExecutableName);
+            if (File.Exists(exe)) return exe;
+        }
+        return null;
+    }
+
+    private static string? DefaultResolveAcadExecutable() =>
+        ResolveAcadExecutable(DefaultAcadRegistryLocations(), DefaultAcadInstallDirs());
+
+    // 注册表候选位置（只读）：本机实证布局 HKLM\SOFTWARE\Autodesk\AutoCAD\R19.1\ACAD-D001:804
+    // → AcadLocation=C:\Program Files\Autodesk\AutoCAD 2014。
+    // 复审 finding 9a：**每根独立 try/catch**——HKLM 不可读（权限/布局差异/权限位拒绝）不得
+    // 连带跳过 HKCU（用户级覆盖键在缺 HKLM 值时是唯一来源）；某根内部某 release/product 抛
+    // 错亦仅终止该根枚举，已收集候选保留、继续下一根。全部不可读→空表回退目录扫描。
+    // 复审 finding 9c（信任边界）：注册表给出的安装路径会以**当前用户身份**执行（Process.Start
+    // /p）；HKCU 用户可写——本通道只用于定位本机已安装 acad.exe，非安全边界，调用方信任
+    // 范围为"同用户已可信的注册表配置"。
+    private static IReadOnlyList<string> DefaultAcadRegistryLocations()
+    {
+        var locations = new List<string>();
+        foreach (var root in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
+        {
+            try
+            {
+                using var acadRoot = root.OpenSubKey(@"SOFTWARE\Autodesk\AutoCAD");
+                if (acadRoot == null) continue;
+                var releases = acadRoot.GetSubKeyNames()
+                    .Where(n => n.StartsWith("R", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(VersionRank);
+                foreach (string release in releases)
+                {
+                    using var rk = acadRoot.OpenSubKey(release);
+                    if (rk == null) continue;
+                    foreach (string product in rk.GetSubKeyNames())
+                    {
+                        using var pk = rk.OpenSubKey(product);
+                        if (pk?.GetValue("AcadLocation") is string loc && !string.IsNullOrWhiteSpace(loc))
+                            locations.Add(loc);
+                    }
+                }
+            }
+            catch
+            {
+                // 该根不可读（权限/布局差异）→ 继续下一根（不得连带吞掉 HKCU 候选），
+                // 不静默当"未安装"（空表回退目录扫描）。
+            }
+        }
+        return locations;
+    }
+
+    // 常见安装目录扫描（版本降序；本机实证 %ProgramFiles%\Autodesk\AutoCAD 2014）。
+    // 复审 finding 9b：补 Program Files (x86)（32 位安装布局）；两根全部候选合并后按版本降序
+    // （同版本按路径 Ordinal 定序，结果确定）。
+    private static IReadOnlyList<string> DefaultAcadInstallDirs()
+    {
+        var dirs = new List<string>();
+        foreach (var root in new[]
+                 {
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+                 })
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(root)) continue;
+                string autodesk = Path.Combine(root, "Autodesk");
+                if (!Directory.Exists(autodesk)) continue;
+                dirs.AddRange(Directory.EnumerateDirectories(autodesk, "AutoCAD *"));
+            }
+            catch
+            {
+                // 该根不可枚举 → 跳过（下一根/调用方兜底裸名），不影响已收集候选。
+            }
+        }
+        return dirs
+            .OrderByDescending(VersionRank)
+            .ThenBy(d => d, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    // 名称版本排序键：取名称首个数字串（"R19.1"→19、"AutoCAD 2014"→2014）；无数字→0。
+    internal static int VersionRank(string name)
+    {
+        int i = 0;
+        while (i < name.Length && !char.IsDigit(name[i])) i++;
+        int j = i;
+        while (j < name.Length && char.IsDigit(name[j])) j++;
+        return j > i && int.TryParse(name.AsSpan(i, j - i), out int v) ? v : 0;
+    }
 
     // 真机核定（2026-11-24，AutoCAD 2014 R19.1）：CreateInstance 返回≠初始化完成，
     // 启动窗口内 COM 调用抛 RPC_E_CALL_REJECTED(0x80010001)/RPC_E_SERVERCALL_RETRYLATER(0x8001010A)
@@ -145,6 +280,148 @@ public sealed class AcadRuntime : ICadRuntime
                 Thread.Sleep(StartupRetryDelay);
             }
         }
+    }
+
+    // ---- 切片A §4.1：天正 profile 感知启动（/p 启动 + ROT 附着 + Gate1）----
+    // 与既有 EnsureApp（普通 COM 激活→默认 profile，无 TArch）互斥：_app 已存在即复用，
+    // 不得再拉起第二实例（双实例共享用户 profile 会竞态损坏 CUIX，VendorGuard 语义）。
+    // 流程：守卫→/p "profileName" 启动 acad.exe→ROT 附着（AcadAttach）→归属校验→Gate1 就绪等待。
+    // 归属校验（复审 finding 4）：ROT AttachOnly 取的是"当前注册的活动实例"——若用户同时
+    // 开了 AutoCAD，可能附着到他方实例；此时后续 Cleanup/Dispose 的 Quit 会误杀外人实例并
+    // 留下本方孤儿进程。故附着后比对实例 HWND 与本方进程主窗句柄，不符→只清本方进程、
+    // 置空 _app 并响亮拒绝（绝不 Quit 附着实例）。
+    // 失败路径不残留进程（spec §5）：经 CleanupTArchFailure 优雅 Quit / 兜底 Kill 本方进程。
+    // 调用方（ReadNativeParams，Task 5）经 Run 在 STA 队列内执行。
+    internal dynamic EnsureAppTArch(string profileName)
+    {
+        if (_app != null) return _app;
+        VendorGuard.EnsureNoForeignInstance(Profile);
+        Process? proc = null;
+        try
+        {
+            // 复审修复波：默认 launcher 异常已透传（不再吞 Win32 原因），此处统一包装并
+            // 拼入 ex.Message（inner 保留），保证真机可见"acad.exe 未找到/权限拒绝"诊断。
+            try { proc = ProcessLauncher(profileName); }
+            catch (Exception ex) { throw new CadRuntimeException($"天正实例启动失败: {ex.Message}", ex); }
+            if (proc == null)
+                throw new CadRuntimeException("天正实例启动失败");
+            _launchedProc = proc;
+            _app = AcadAttach.AttachOnly(Profile.ProgId);
+            // 归属校验（findings 4）：_launchedProc 恒非空于本路径（复用早退走上方 _app!=null）。
+            // 不符→清空 _app 后抛出，外层 catch 的 CleanupTArchFailure 只见 proc（不 Quit）。
+            if (!OwnershipMatches(_app, proc))
+            {
+                _app = null;
+                throw new CadRuntimeException("ROT 附着实例非本方启动（归属校验失败）");
+            }
+            WaitTArchGate1();
+            return _app;
+        }
+        catch
+        {
+            // best-effort 清理（内部吞异常）；rethrow 保持原异常与堆栈，清理不掩盖根因。
+            CleanupTArchFailure(proc);
+            throw;
+        }
+    }
+
+    // 失败路径进程清理（spec §5「启动失败不残留进程」）。仅处置本方经 ProcessLauncher
+    // 拿到的 Process 句柄——守卫前置已保证无他方实例，绝不强杀外人进程。
+    // 已附着（_app 已由 ROT 赋值）→ 优先优雅 Quit（RetryBusy 覆盖忙拒绝）；Quit 失败
+    // 或未附着 → 进程兜底 CloseMainWindow→有界 WaitForExit→Kill。
+    // _app/_doc 无论清理成败一律置空：否则残留缓存会让下一次 EnsureAppTArch 早退返回
+    // 已失效对象（Gate1 失败后重试须真正重启，复审 finding 3）。
+    private void CleanupTArchFailure(Process? proc)
+    {
+        var app = _app;
+        _app = null;
+        _doc = null;
+        _launchedProc = null; // 失败清理后下次 EnsureAppTArch 须真正重启（不残留失效句柄）
+        bool quit;
+        if (app != null)
+        {
+            try { RetryBusy(() => { app.Quit(); }); quit = true; }
+            catch { quit = false; /* 优雅失败→走进程兜底；吞异常不掩盖原异常 */ }
+        }
+        else quit = false;
+        if (!quit && proc != null)
+        {
+            try { TarchProcessCleanup(proc); }
+            catch { /* 清理 best-effort：异常不影响原失败诊断 */ }
+        }
+    }
+
+    // 失败路径进程清理缝（测试注入；单元测试不得操作真进程）。
+    // 默认步骤：CloseMainWindow（温和关窗）→ 有界 WaitForExit → Kill 兜底；
+    // 每步独立吞异常（进程未启动/已退出/无主窗口均属常态），返回是否确认清理完成。
+    internal static Func<Process, bool> TarchProcessCleanup = DefaultTarchProcessCleanup;
+    private static readonly TimeSpan TarchCleanupWait = TimeSpan.FromSeconds(10);
+
+    // 复审 finding 4：ROT 附着归属校验缝。HwndReader=实例主窗口句柄（默认 e.HWND）；
+    // OwnershipMatches=归属判定可注入（单测注入 true/false，fake Process 无法携带真实 HWND）。
+    internal static Func<dynamic, int> HwndReader = e => (int)e.HWND;
+    internal static Func<dynamic, Process, bool> OwnershipMatches = DefaultOwnershipMatches;
+
+    // 默认归属判定：实例 HWND 须等于本方进程主窗句柄（Refresh 后取实时值）。
+    // 不可判定即放行（fail-open 到既有行为）：HWND==0（实例未建主窗/无该属性面）、进程
+    // 主窗句柄==0（ShellExecute 启动后主窗尚未创建）、进程句柄未关联（fake/non-started）
+    // 或 COM 读拒——此时无法否认归属，沿用旧行为（守卫 EnsureNoForeignInstance 已前置，
+    // 归属校验是纵深防御，不是唯一防线）。
+    private static bool DefaultOwnershipMatches(dynamic app, Process proc)
+    {
+        try
+        {
+            int hwnd = HwndReader(app);
+            if (hwnd == 0) return true;
+            proc.Refresh();
+            long main = proc.MainWindowHandle.ToInt64();
+            if (main == 0) return true;
+            return hwnd == unchecked((int)main);
+        }
+        catch { return true; }
+    }
+
+    private static bool DefaultTarchProcessCleanup(Process proc)
+    {
+        try { if (proc.HasExited) return true; /* 已自行退出：无残留 */ }
+        catch { return false; /* 未启动/句柄失效：无可清理 */ }
+        try
+        {
+            if (proc.CloseMainWindow() && proc.WaitForExit((int)TarchCleanupWait.TotalMilliseconds))
+                return true;
+        }
+        catch { /* 无主窗口/关闭被拒：Kill 兜底 */ }
+        try { proc.Kill(); return true; }
+        catch { return false; /* 已退出或权限受限：best-effort 终止 */ }
+    }
+
+    // Gate1（spike 协议步骤3）：ROT 附着成功≠天正初始化完成——Version 非空字符串且
+    // 至少 1 个文档（/p 启动默认开 Drawing1.dwg）才可安全读参。就绪条件不满足→按
+    // StartupRetryDelay 有界重试（StartupRetryAttempts 次）；忙拒绝由内层 RetryBusy
+    // 自行有界重试，其耗尽即"确实未就绪"→直接 Gate1 终局（不叠加外层重试放大总时长）。
+    // 耗尽→响亮拒绝（不无限挂起，CLI 据此降级）。
+    private void WaitTArchGate1()
+    {
+        Exception? last = null;
+        for (int i = 0; i < StartupRetryAttempts; i++)
+        {
+            try
+            {
+                var version = RetryBusy(() => (string)_app!.Version);
+                if (!string.IsNullOrEmpty(version) && RetryBusy(() => (int)_app!.Documents.Count) >= 1)
+                    return;
+            }
+            catch (Exception ex) when (IsBusyRejection(ex))
+            {
+                // RetryBusy 已用完 StartupRetryAttempts 次忙重试仍被拒——终局不再叠加。
+                throw new CadRuntimeException("天正实例未就绪（Gate1 超时）", ex);
+            }
+            catch (Exception ex) { last = ex; /* 其他未就绪错误：按 Gate1 预算重试到界 */ }
+            Thread.Sleep(StartupRetryDelay);
+        }
+        throw last == null
+            ? new CadRuntimeException("天正实例未就绪（Gate1 超时）")
+            : new CadRuntimeException("天正实例未就绪（Gate1 超时）", last);
     }
 
     // 孤儿注册/激活失败/守卫超时均优雅降级 Available=false（CLI 据此走 DXF 降级+警示）。
@@ -342,6 +619,284 @@ public sealed class AcadRuntime : ICadRuntime
             }
         }
     }
+
+    // ---- 切片A §4.1：COM 原生读参编排（Task 5）----
+    // 天正 profile 名（spike 实证值）：/p 启动仅此 profile 加载 TArch 自定义面。
+    private const string TArchProfileName = "TElec20V5";
+
+    // 逐实体读缝（spec 切片A §5）：默认走 dynamic COM + RetryBusy；测试注入 fake。
+    // UNKNOWNNAME(0x80020006)=属性不存在→记缺省不重试；忙窗拒绝经 RetryBusy 内层处理。
+    // 用 InvokeMember 拿真实 COMException.HResult 以区分 UNKNOWNNAME 与忙窗（dynamic 属性访问
+    // 对未知成员抛 RuntimeBinderException 不含 HRESULT）——与既有 AddLine 纯 dynamic 不同，此处需 hr 判定。
+    internal static Func<dynamic, string?> ObjectNameReader = e =>
+        RetryBusy(() => (string?)e.ObjectName);
+    internal static Func<dynamic, string?> LayerReader = e =>
+        RetryBusy(() => (string?)e.Layer);
+    internal static Func<dynamic, string, string?> ParamReader = (e, n) =>
+    {
+        try
+        {
+            object? v = RetryBusy(() => e.GetType().InvokeMember(
+                n, System.Reflection.BindingFlags.GetProperty, null, (object)e, null));
+            return v == null ? null : Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (Exception ex)
+        {
+            // 复审 ISTQB I4：反射包装链（TargetInvocationException 等）内层 COMException 才带
+            // 真实 HRESULT——沿 InnerException 链判定（镜像 IsBusyRejection 先例）：
+            // UNKNOWNNAME=该属性不存在 → null（缺省，不重试）；其余（含忙拒绝——RetryBusy 已
+            // 耗尽重试）一律上抛：忙窗耗尽≠属性缺省，不得静默吞成 null。
+            if (ContainsHResult(ex, UnknownNameHResult)) return null;
+            throw;
+        }
+    };
+    internal static Func<dynamic, double[]?> BboxReader = e =>
+    {
+        try
+        {
+            return RetryBusy(() => ReadBbox(e));
+        }
+        catch (Exception ex)
+        {
+            // spec §4 bbox nullable 尽力读：无此面（UNKNOWNNAME）/类型不匹配 → null（ReadOk
+            // 仍 true）。但复审 ISTQB Minor 13：忙拒绝耗尽≠"face 不存在"（空读≠空义）——
+            // RetryBusy 已重试仍被拒=整读失败，诚实上抛（不得把读失败伪装成"无 bbox"）。
+            if (ContainsHResult(ex, UnknownNameHResult)) return null;
+            if (IsBusyRejection(ex)) throw;
+            return null;
+        }
+    };
+
+    // UNKNOWNNAME（IDispatch 属性不存在）HRESULT：逐属性缺省口径（spec §4.1 不重试）。
+    private const int UnknownNameHResult = unchecked((int)0x80020006);
+
+    // COMException 链判定（复审 ISTQB I4/13）：反射/包装异常须沿 InnerException 链找真实
+    // HRESULT；命中即返回 true（镜像 IsBusyRejection 的链式先例）。
+    private static bool ContainsHResult(Exception ex, int hresult)
+    {
+        for (Exception? e = ex; e != null; e = e.InnerException)
+            if (e is System.Runtime.InteropServices.COMException com && com.HResult == hresult)
+                return true;
+        return false;
+    }
+
+    // GetBoundingBox([ref]min,[ref]max)：IDispatch 出参**必须**以 object[] 占位 + by-ref
+    // ParameterModifier 传递——T10 真机实证：仅传 double[3] 占位（不标 by-ref）时 COM 不回写，
+    // 读回恒为全零假 bbox（handle-ops 真机首跑 move 分量 before=0/after=0 即此根因）；
+    // spike phasea 已实证 by-ref 形态（min/max 回写为真实 3D 点）。非常规返回形态→null（诚实降级）。
+    internal static double[]? ReadBbox(object entity)
+    {
+        object[] args = { null!, null! };
+        var byRef = new System.Reflection.ParameterModifier(2);
+        byRef[0] = true; byRef[1] = true;
+        entity.GetType().InvokeMember("GetBoundingBox",
+            System.Reflection.BindingFlags.InvokeMethod, null, entity, args,
+            new System.Reflection.ParameterModifier[] { byRef }, null, null);
+        double[]? min = ToVec3(args[0]);
+        double[]? max = ToVec3(args[1]);
+        if (min == null || max == null) return null;
+        return new[] { min[0], min[1], min[2], max[0], max[1], max[2] };
+    }
+
+    // COM SAFEARRAY(double)×3 → double[3]（I4 归一）。非 3 元数组/不可转数值→null。
+    internal static double[]? ToVec3(object? value)
+    {
+        if (value is Array arr && arr.Length == 3)
+        {
+            var v = new double[3];
+            for (int i = 0; i < 3; i++)
+                v[i] = Convert.ToDouble(arr.GetValue(i), System.Globalization.CultureInfo.InvariantCulture);
+            return v;
+        }
+        return null;
+    }
+
+    // spec 切片A §4.1：逐实体 ObjectName 分类→TDb 读自定义名参数；非 TDb 返回 null 跳过。
+    // ObjectName 不可读（忙窗耗尽）→ ReadOk=false 占位（不静默当"无此实体"）；单属性缺不降 ReadOk。
+    internal static NativeEntityParam? ReadOneEntity(dynamic entity, string handle, DateTimeOffset readAt)
+    {
+        string? objName = ObjectNameReader(entity);
+        if (objName == null)
+            return new NativeEntityParam(handle, "", SemanticClass.Unknown,
+                new Dictionary<string, string>(), null, readAt, ReadOk: false);
+        if (!objName.StartsWith("TDb", StringComparison.Ordinal))
+            return null;
+        var cls = TDbClassMap.ClassFor(objName);
+        var parms = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in ParamNamesFor(objName))
+        {
+            string? v = ParamReader(entity, name);
+            if (v != null) parms[name] = v;
+        }
+        return new NativeEntityParam(handle, objName, cls, parms, BboxReader(entity), readAt, ReadOk: true,
+            Layer: LayerReader(entity));
+    }
+
+    // 自定义名读参清单（初版=probe 实证面；新类增量补，未知 TDb 类仍记实参为空表不分类）。
+    internal static string[] ParamNamesFor(string objName) => objName switch
+    {
+        "TDbWall" => new[] { "LeftWidth", "RightWidth", "Height", "Volume", "IsArc", "TotalWidth" },
+        "TDbText" or "TDbDrawingName" => new[] { "Text" },
+        "TDbColumn" => new[] { "Width", "Volume" },
+        "TDbEquipment" => new[] { "PScale", "LRotation" },
+        _ => Array.Empty<string>(),
+    };
+
+    // Gate2（spike 协议 open 后）：Open 返回≠实体可读——ModelSpace.Count>0 才可逐实体读参。
+    // 与 Gate1 同预算：忙拒绝由 RetryBusy 内层有界重试，耗尽即终局（不叠加外层放大挂死）；
+    // 其他未就绪错误按 Gate 预算重试到界。耗尽→响亮拒绝（CLI 据此降级）。
+    private void WaitTArchGate2()
+    {
+        Exception? last = null;
+        for (int i = 0; i < StartupRetryAttempts; i++)
+        {
+            try
+            {
+                if (RetryBusy(() => (int)_doc!.ModelSpace.Count) > 0) return;
+            }
+            catch (Exception ex) when (IsBusyRejection(ex))
+            { throw new CadRuntimeException("天正实例未就绪（Gate2 超时）", ex); }
+            catch (Exception ex) { last = ex; /* 其他未就绪错误：按 Gate2 预算重试到界 */ }
+            Thread.Sleep(StartupRetryDelay);
+        }
+        throw last == null
+            ? new CadRuntimeException("天正实例未就绪（Gate2 超时）")
+            : new CadRuntimeException("天正实例未就绪（Gate2 超时）", last);
+    }
+
+    // 逐实体遍历（索引访问，COM ModelSpace 标准口径）：Handle 按 COM 原样读（spike 实证大写
+    // "21E00"）——不强制大小写：overlay Upsert 键精确匹配，消费端按需 OrdinalIgnoreCase。
+    private List<NativeEntityParam> ReadModelSpaceEntities()
+    {
+        var result = new List<NativeEntityParam>();
+        dynamic ms = RetryBusy<object?>(() => ModelSpace())!;
+        int count = RetryBusy(() => (int)ms.Count);
+        for (int i = 0; i < count; i++)
+        {
+            int index = i;  // 闭包快照（RetryBusy 同步调用，取局部副本防捕获变异）
+            dynamic entity = RetryBusy<object?>(() => ms.Item(index))!;
+            string handle = RetryBusy(() => (string)entity.Handle);
+            var p = ReadOneEntity(entity, handle, DateTimeOffset.UtcNow);
+            if (p != null) result.Add(p);
+        }
+        return result;
+    }
+
+    // 读完即关（spec §4.1 自开自关）：正常路径关闭失败响亮上抛（调用方不得以为已关）；
+    // 仅成功后清空 _doc（与公开 Close 同语义：失败保留引用）。
+    private void CloseTArchDoc()
+    {
+        try { RetryBusy(() => { _doc!.Close(false); }); _doc = null; }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"Close 失败: {ex.Message}", ex); }
+    }
+
+    // 读参失败路径：仅关本方本次开启的文档（best-effort）；异常吞掉不掩盖读参根因。
+    private void CloseTArchDocBestEffort()
+    {
+        if (_doc == null) return;
+        try { RetryBusy(() => { _doc!.Close(false); }); _doc = null; }
+        catch { /* best-effort：不掩盖已上抛的读参根因 */ }
+    }
+
+    // R1 消歧形态：path!=null=CLI 自启自读读完关（**ReadOnly=true 打开原图**，不另建副本——
+    // 设计承诺只读；复审 finding 3 更正原读改写实现）；null=native-live 会话读当前已开文档。
+    // 全程在 Run<T> STA 队列内；体内只调私有内部件——公开 Open/Close/EntityCount 自身包 Run，
+    // 队列内再调 Run 会等待自身→死锁。
+    public IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) =>
+        Run<IReadOnlyList<NativeEntityParam>>(() =>
+        {
+            if (drawingPath == null)
+            {
+                if (_doc == null) throw new CadRuntimeException("无打开的图纸");
+                return ReadModelSpaceEntities();  // 不启不开不关（native-live 形态）
+            }
+            // 复审 finding 3 守卫：path 形态要求无打开文档——native-live 执行窗口已有 _doc 时
+            // 再开第二份会覆盖 _doc 引用（前一份文档失锚、句柄层操作错文档）。
+            if (_doc != null)
+                throw new CadRuntimeException("已有打开的图纸；ReadNativeParams(path) 须在无打开文档时调用");
+
+            var app = EnsureAppTArch(TArchProfileName);  // /p 启动+ROT 附着+归属校验+Gate1（须在 Run 内）
+            bool opened = false;
+            try
+            {
+                // Documents.Open(FileName, ReadOnly, Password)：第二位置参=true 即只读打开。
+                // 读参是理解侧只读通道——原图必须只读打开（设计 §4.1 承诺；复审 finding 3）。
+                _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath, true));
+                opened = true;
+                _createdBlocks.Clear();  // 换文档即失效本方创建块名集合（与 Open 同口径）
+                WaitTArchGate2();
+                var list = ReadModelSpaceEntities();
+                CloseTArchDoc();
+                return list;
+            }
+            catch
+            {
+                // 读参失败仍关本方本次开启的副本（自开自关不泄漏）；仅本方 opened 才动 _doc
+                // （不得误关 native-live 会话原有文档）。
+                if (opened) CloseTArchDocBestEffort();
+                throw;
+            }
+        });
+
+    // ---- 切片A §4.2：句柄寻址执行器（Task 8）----
+    // 定位口径：ModelSpace 逐实体读 .Handle（RetryBusy 单读缝，测试注入 fake），
+    // OrdinalIgnoreCase 比对（COM 原样大写 "21E00"，调用方可能传小写归一形态）；
+    // 找不到→响亮拒绝（消息逐字按 spec，Task 9 准入按此判定 stale 并拒绝执行）。
+    // 执行口径：每个 COM 基元各自独立忙重试（I2 单调用口径）——定位是只读组合无副作用，
+    // 写入基元被拒（=未执行）仅重试该基元，不重复副作用。
+    internal static Func<dynamic, string?> HandleReader = e =>
+        RetryBusy(() => (string?)e.Handle);
+
+    private dynamic FindByHandle(string hexHandle)
+    {
+        // ModelSpace getter 为只读基元（与 ReadModelSpaceEntities 同口径：同组忙重试安全）。
+        dynamic ms = RetryBusy<object?>(() => ModelSpace())!;
+        int count = RetryBusy(() => (int)ms.Count);
+        for (int i = 0; i < count; i++)
+        {
+            int index = i;  // 闭包快照（RetryBusy 同步调用，取局部副本防捕获变异）
+            dynamic item = RetryBusy<object?>(() => ms.Item(index))!;
+            string? h = HandleReader(item);
+            if (string.Equals(h, hexHandle, StringComparison.OrdinalIgnoreCase)) return item;
+        }
+        throw new CadRuntimeException($"句柄不存在于模型空间: {hexHandle}");
+    }
+
+    public void ChangeLayerByHandle(string hexHandle, string layer) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            EnsureLayer(layer);                        // 层不存在→创建（既有基元，建层单写独立忙重试）
+            RetryBusy(() => { e.Layer = layer; });      // 单写调用独立忙重试（I2 口径）
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"ChangeLayerByHandle 失败: {ex.Message}", ex); }
+    });
+
+    public void MoveByHandle(string hexHandle, double dx, double dy) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            // IAcadEntity.Move(Point1, Point2)：位移=Point2−Point1；此处 (0,0)→(dx,dy)。
+            RetryBusy(() => { e.Move(Pt(0, 0), Pt(dx, dy)); });
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"MoveByHandle 失败: {ex.Message}", ex); }
+    });
+
+    public void DeleteByHandle(string hexHandle) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            RetryBusy(() => { e.Delete(); });
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"DeleteByHandle 失败: {ex.Message}", ex); }
+    });
 
     public int EntityCount() => Run(() =>
     {
