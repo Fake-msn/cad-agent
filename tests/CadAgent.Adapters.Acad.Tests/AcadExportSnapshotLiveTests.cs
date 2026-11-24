@@ -39,7 +39,7 @@ public class AcadExportSnapshotLiveTests
             using var fs = File.OpenRead(outDwg);
             var doc = new DwgReader(fs).Read();
             Assert.Contains(doc.Entities.OfType<TextEntity>(), t => t.Value == Cjk);
-            Assert.Equal(1, doc.Entities.Count());
+            Assert.Single(doc.Entities);
         }
         finally
         {

@@ -36,6 +36,12 @@ public static partial class CommandRouter
         "AutoCAD 2014 无法解析 ACadSharp 写入的 DXF（内容级不兼容，实证崩溃 0xE0000001）；请用默认 zwcad 运行时或 T3 转换件";
 
     /// <summary>
+    /// I2 保真锚闸指引（微修复波）：working→DWG 快照转换丢实体（或读回失败）时拒绝交付。
+    /// </summary>
+    internal const string AcadSnapshotCountMismatchGuidance =
+        "DWG 快照实体数与 working 源不一致（转换丢实体或读回失败），保真锚漂移拒绝交付；请用默认 zwcad 运行时或 T3 转换件";
+
+    /// <summary>
     /// I1 fail-closed 闸（PR#24 修复波，单点化，镜像 GateRefusesRun 先例）：
     /// runtime=acad 且输入为 working 派生 DXF → 拒绝。export（ExportService.Open(sourceDxf)）
     /// 与 --live（事务前快照同源 working DXF→rt.Open(snap)）两条生产流均把 ACadSharp
@@ -62,6 +68,13 @@ public static partial class CommandRouter
     }
 
     /// <summary>
+    /// DWG 快照写出步 seam（微修复波 I1）：默认 ACadSharp DwgWriter.Write；Func 化供测试
+    /// 注入"建目录后抛"（真实转换器已 CreateDirectory + 部分写出）钉住失败自清临时目录。
+    /// </summary>
+    internal static Action<Stream, ACadSharp.CadDocument> WriteAcadDwgSnapshot =
+        (fs, doc) => ACadSharp.IO.DwgWriter.Write(fs, doc);
+
+    /// <summary>
     /// DWG 快照转换器（解除 acad fail-closed 停用，用户批准设计）：working 派生 DXF →
     /// DxfReader 读入 → doc.Header.Version 钉 AC1027 → DwgWriter 写临时 .dwg → 返回快照路径。
     /// 探针实证（outputs/api-probe/compat-probe-report.md）：ACadSharp DwgWriter AC1027 产物
@@ -70,7 +83,8 @@ public static partial class CommandRouter
     /// AC1027/AC1032 保真——故快照版本固定 AC1027（2014 可读上限，AC1032 默认会被 2014 拒）。
     /// 版本设置方式经 API 核实：DwgWriter 构造仅 (path/stream, CadDocument)，DwgWriterConfiguration
     /// 无 Version 属性——版本唯一来源是 doc.Header.Version（反射 + 往返实证）。
-    /// 临时快照置于独立 GUID 子目录，调用方用后即清（Directory.Delete 整目录）。
+    /// 临时快照置于独立 GUID 子目录，调用方用后即清（Directory.Delete 整目录）；
+    /// 建目录后写出失败则转换器内部自清（I1 微修复波：调用方拿不到路径，防 %TEMP% 孤儿目录）。
     /// Func 化供测试注入失败（fake DwgWriter 抛）钉住转换失败 fail-closed 安全侧。
     /// </summary>
     internal static Func<string, string> ConvertAcadDwgSnapshot = workingDxfPath =>
@@ -80,9 +94,20 @@ public static partial class CommandRouter
         doc.Header.Version = ACadSharp.ACadVersion.AC1027; // CJK 钉住（AC1015/AC1018 有损）
         string dir = Path.Combine(Path.GetTempPath(), "cadagent-acad-snap-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
-        string snapPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(workingDxfPath) + ".dwg");
-        using (var fs = File.Create(snapPath)) ACadSharp.IO.DwgWriter.Write(fs, doc);
-        return snapPath;
+        try
+        {
+            string snapPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(workingDxfPath) + ".dwg");
+            using (var fs = File.Create(snapPath)) WriteAcadDwgSnapshot(fs, doc);
+            return snapPath;
+        }
+        catch
+        {
+            // I1（微修复波）：部分失败自清——CreateDirectory 后写出抛时调用方拿不到快照路径
+            // （acadSnapDir 仍 null，外层 finally 清理不可达），不自清则 %TEMP% 孤儿 GUID
+            // 目录+部分 .dwg 永不清理。best-effort 清理不掩盖原始异常；再上抛保持 fail-closed 拒绝。
+            try { Directory.Delete(dir, recursive: true); } catch { /* 清理失败不二次抛 */ }
+            throw;
+        }
     };
 
     /// <summary>清理 DWG 快照临时目录（用后即清；best-effort，清理失败不影响交付/拒绝终态）。</summary>
@@ -157,6 +182,30 @@ public static partial class CommandRouter
                     JsonSerializer.Serialize(new { reason = "acad-working-dxf", guidance = AcadWorkingDxfGuidance, conversionError = ex.Message }),
                     acadHash, acadHash, "", ""));
                 stderr.WriteLine(AcadWorkingDxfGuidance);
+                return 1;
+            }
+            // I2 保真锚校验（微修复波）：ExportService.Export 的 sourceCount 以快照为锚——
+            // working→快照转换丢实体时 export 双闸口（源==导出）看不见（live 有影子计数兜底，
+            // export 无）。Open 前校验 working↔快照实体计数相等；不等/读回失败（-1）→
+            // fail-closed 拒绝+审计（reason=snapshot-count-mismatch）+guidance，先于运行时
+            // 创建不激活 COM；拒绝路径临时快照亦清。
+            int workingCount = CountEntities(drawing.SourcePath);
+            int snapCount = CountEntities(exportSource);
+            if (workingCount < 0 || snapCount < 0 || workingCount != snapCount)
+            {
+                CleanupAcadDwgSnapshot(acadSnapDir);
+                string acadHash = drawing.ComputeHash();
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "export", "export-rejected", drawingPath,
+                    JsonSerializer.Serialize(new
+                    {
+                        reason = "snapshot-count-mismatch",
+                        guidance = AcadSnapshotCountMismatchGuidance,
+                        workingEntities = workingCount,
+                        snapshotEntities = snapCount
+                    }),
+                    acadHash, acadHash, "", ""));
+                stderr.WriteLine(AcadSnapshotCountMismatchGuidance);
                 return 1;
             }
         }

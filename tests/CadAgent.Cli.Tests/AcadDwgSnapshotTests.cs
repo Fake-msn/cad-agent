@@ -13,7 +13,7 @@ namespace CadAgent.Cli.Tests;
 /// 转换失败仍 fail-closed 拒绝+审计+guidance（安全侧保持）。zwcad 路径零改动（回归钉住）。
 /// fake seam 单测（非真机）：ConvertAcadDwgSnapshot 注入失败钉住 fail-closed；真实转换器
 /// （默认 seam）+ fake runtime 钉住快照=.dwg 后缀+AC1027 头+CJK 保真。
-/// 静态 seam（RuntimeSelector/RuntimeFactory/ConvertAcadDwgSnapshot）用完即还原（本程序集已禁并行）。
+/// 静态 seam（RuntimeSelector/RuntimeFactory/ConvertAcadDwgSnapshot/WriteAcadDwgSnapshot）用完即还原（本程序集已禁并行）。
 /// CJK 夹具口径：DxfWriter 在 AC1015/AC1018 写中文有损（??????，抽检实证），AC1027 保真——
 /// 故 CJK working DXF 夹具钉 AC1027 写出（共享 DxfFixture 不动，本类自带夹具）。
 /// </summary>
@@ -26,6 +26,7 @@ public class AcadDwgSnapshotTests : IDisposable
     private readonly Func<string?> _originalSelector = CommandRouter.RuntimeSelector;
     private readonly Func<ICadRuntime?>? _originalFactory = CommandRouter.RuntimeFactory;
     private readonly Func<string, string> _originalConverter = CommandRouter.ConvertAcadDwgSnapshot;
+    private readonly Action<Stream, CadDocument> _originalWriter = CommandRouter.WriteAcadDwgSnapshot;
 
     public AcadDwgSnapshotTests()
     {
@@ -42,6 +43,7 @@ public class AcadDwgSnapshotTests : IDisposable
         CommandRouter.RuntimeSelector = _originalSelector;
         CommandRouter.RuntimeFactory = _originalFactory;
         CommandRouter.ConvertAcadDwgSnapshot = _originalConverter;
+        CommandRouter.WriteAcadDwgSnapshot = _originalWriter;
         Directory.Delete(_project, true);
         File.Delete(_drawing);
         if (File.Exists(_drawing + ".live.dwg")) File.Delete(_drawing + ".live.dwg");
@@ -152,6 +154,65 @@ public class AcadDwgSnapshotTests : IDisposable
         Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "com-replay-failed"
             && r.Entry.ParamsJson.Contains("acad-working-dxf"));
         Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "com-replay-committed");
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    // ---- I1（微修复波）：建目录后写出抛 → 转换器自清临时目录（无 %TEMP% 孤儿 GUID 目录） ----
+
+    [Fact]
+    public void Export_Acad_WriterThrowsAfterDirCreated_TempDirSelfCleaned_Refused()
+    {
+        CommandRouter.RuntimeSelector = () => "acad";
+        CommandRouter.RuntimeFactory = MustNotCreateRuntime;
+        // 写出步 seam 注入失败：真实转换器已 CreateDirectory（且部分写出 .dwg）后抛——
+        // 调用方拿不到快照路径（acadSnapDir 仍 null），清理责任在转换器内部。
+        CommandRouter.WriteAcadDwgSnapshot = (fs, _) =>
+        {
+            fs.WriteByte(0x41); // 模拟部分写出（残留部分 .dwg 内容，钉住整目录自清）
+            throw new InvalidOperationException("fake DwgWriter 建目录后抛");
+        };
+        string[] before = Directory.GetDirectories(Path.GetTempPath(), "cadagent-acad-snap-*");
+        var (code, _, stderr) = Run("export", "--drawing", _drawing, "--out", Path.Combine(_project, "out.dwg"));
+        Assert.Equal(1, code); // fail-closed 保持（再上抛 → 拒绝+审计+guidance）
+        Assert.Contains("0xE0000001", stderr);
+        // I1 钉住：失败后无新增孤儿 GUID 临时目录（部分 .dwg 随整目录自清）。
+        Assert.Empty(Directory.GetDirectories(Path.GetTempPath(), "cadagent-acad-snap-*").Except(before));
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "export-rejected"
+            && r.Entry.ParamsJson.Contains("acad-working-dxf"));
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    // ---- I2（微修复波）：working↔快照计数相等闸（转换丢实体 → 拒绝，保真锚不漂移） ----
+
+    [Fact]
+    public void Export_Acad_ConverterDropsEntities_CountMismatchRefused_NoCom()
+    {
+        CommandRouter.RuntimeSelector = () => "acad";
+        CommandRouter.RuntimeFactory = MustNotCreateRuntime;
+        // fake 转换器丢实体：working 源 1 实体 → 返回空文档 DWG 快照（0 ≠ 1）。
+        // ExportService sourceCount 以快照为锚——若无前置相等闸，双闸口（源==导出）看不见丢失。
+        string snapDir = Path.Combine(Path.GetTempPath(), "cadagent-acad-snap-" + Guid.NewGuid().ToString("N"));
+        CommandRouter.ConvertAcadDwgSnapshot = _ =>
+        {
+            Directory.CreateDirectory(snapDir);
+            string p = Path.Combine(snapDir, "dropped.dwg");
+            var empty = new CadDocument();
+            empty.Header.Version = ACadVersion.AC1027;
+            using var fs = File.Create(p);
+            DwgWriter.Write(fs, empty);
+            return p;
+        };
+        var (code, _, stderr) = Run("export", "--drawing", _drawing, "--out", Path.Combine(_project, "out.dwg"));
+        Assert.Equal(1, code);
+        Assert.Contains("实体数", stderr); // guidance 披露计数不等
+        Assert.False(Directory.Exists(snapDir)); // 拒绝路径临时快照亦清
+        Assert.Empty(Directory.GetFiles(_project, "*.dwg", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(_project, "*.dxf", SearchOption.AllDirectories));
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "export-rejected"
+            && r.Entry.ParamsJson.Contains("snapshot-count-mismatch"));
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "export-committed");
         Assert.True(audit.VerifyChain(out _));
     }
 
