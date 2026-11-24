@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using CadAgent.Core;
 using CadAgent.Core.Cad;
 
 namespace CadAgent.Adapters.Acad;
@@ -463,6 +464,168 @@ public sealed class AcadRuntime : ICadRuntime
             }
         }
     }
+
+    // ---- 切片A §4.1：COM 原生读参编排（Task 5）----
+    // 天正 profile 名（spike 实证值）：/p 启动仅此 profile 加载 TArch 自定义面。
+    private const string TArchProfileName = "TElec20V5";
+
+    // 逐实体读缝（spec 切片A §5）：默认走 dynamic COM + RetryBusy；测试注入 fake。
+    // UNKNOWNNAME(0x80020006)=属性不存在→记缺省不重试；忙窗拒绝经 RetryBusy 内层处理。
+    // 用 InvokeMember 拿真实 COMException.HResult 以区分 UNKNOWNNAME 与忙窗（dynamic 属性访问
+    // 对未知成员抛 RuntimeBinderException 不含 HRESULT）——与既有 AddLine 纯 dynamic 不同，此处需 hr 判定。
+    internal static Func<dynamic, string?> ObjectNameReader = e =>
+        RetryBusy(() => (string?)e.ObjectName);
+    internal static Func<dynamic, string?> LayerReader = e =>
+        RetryBusy(() => (string?)e.Layer);
+    internal static Func<dynamic, string, string?> ParamReader = (e, n) =>
+    {
+        try
+        {
+            object? v = RetryBusy(() => e.GetType().InvokeMember(
+                n, System.Reflection.BindingFlags.GetProperty, null, (object)e, null));
+            return v == null ? null : Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (System.Runtime.InteropServices.COMException ce) when (ce.HResult == unchecked((int)0x80020006))
+        { return null; }  // UNKNOWNNAME→缺省；忙窗耗尽上抛不在此吞（RetryBusy 已重试）
+    };
+    internal static Func<dynamic, double[]?> BboxReader = e =>
+    {
+        try
+        {
+            return RetryBusy(() =>
+            {
+                // GetBoundingBox([ref]min,[ref]max)：IDispatch 出参经 object[] args 传递（spike phasea 实证）。
+                object[] args = { new double[3], new double[3] };
+                e.GetType().InvokeMember("GetBoundingBox",
+                    System.Reflection.BindingFlags.InvokeMethod, null, (object)e, args);
+                var min = (double[])args[0]; var max = (double[])args[1];
+                return new[] { min[0], min[1], min[2], max[0], max[1], max[2] };
+            });
+        }
+        catch (Exception)
+        { return null; }  // bbox 尽力读（无此面/类型不匹配→null，ReadOk 仍 true；spec §4 诚实边界）
+    };
+
+    // spec 切片A §4.1：逐实体 ObjectName 分类→TDb 读自定义名参数；非 TDb 返回 null 跳过。
+    // ObjectName 不可读（忙窗耗尽）→ ReadOk=false 占位（不静默当"无此实体"）；单属性缺不降 ReadOk。
+    internal static NativeEntityParam? ReadOneEntity(dynamic entity, string handle, DateTimeOffset readAt)
+    {
+        string? objName = ObjectNameReader(entity);
+        if (objName == null)
+            return new NativeEntityParam(handle, "", SemanticClass.Unknown,
+                new Dictionary<string, string>(), null, readAt, ReadOk: false);
+        if (!objName.StartsWith("TDb", StringComparison.Ordinal))
+            return null;
+        var cls = TDbClassMap.ClassFor(objName);
+        var parms = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in ParamNamesFor(objName))
+        {
+            string? v = ParamReader(entity, name);
+            if (v != null) parms[name] = v;
+        }
+        return new NativeEntityParam(handle, objName, cls, parms, BboxReader(entity), readAt, ReadOk: true,
+            Layer: LayerReader(entity));
+    }
+
+    // 自定义名读参清单（初版=probe 实证面；新类增量补，未知 TDb 类仍记实参为空表不分类）。
+    internal static string[] ParamNamesFor(string objName) => objName switch
+    {
+        "TDbWall" => new[] { "LeftWidth", "RightWidth", "Height", "Volume", "IsArc", "TotalWidth" },
+        "TDbText" or "TDbDrawingName" => new[] { "Text" },
+        "TDbColumn" => new[] { "Width", "Volume" },
+        "TDbEquipment" => new[] { "PScale", "LRotation" },
+        _ => Array.Empty<string>(),
+    };
+
+    // Gate2（spike 协议 open 后）：Open 返回≠实体可读——ModelSpace.Count>0 才可逐实体读参。
+    // 与 Gate1 同预算：忙拒绝由 RetryBusy 内层有界重试，耗尽即终局（不叠加外层放大挂死）；
+    // 其他未就绪错误按 Gate 预算重试到界。耗尽→响亮拒绝（CLI 据此降级）。
+    private void WaitTArchGate2()
+    {
+        Exception? last = null;
+        for (int i = 0; i < StartupRetryAttempts; i++)
+        {
+            try
+            {
+                if (RetryBusy(() => (int)_doc!.ModelSpace.Count) > 0) return;
+            }
+            catch (Exception ex) when (IsBusyRejection(ex))
+            { throw new CadRuntimeException("天正实例未就绪（Gate2 超时）", ex); }
+            catch (Exception ex) { last = ex; /* 其他未就绪错误：按 Gate2 预算重试到界 */ }
+            Thread.Sleep(StartupRetryDelay);
+        }
+        throw last == null
+            ? new CadRuntimeException("天正实例未就绪（Gate2 超时）")
+            : new CadRuntimeException("天正实例未就绪（Gate2 超时）", last);
+    }
+
+    // 逐实体遍历（索引访问，COM ModelSpace 标准口径）：Handle 按 COM 原样读（spike 实证大写
+    // "21E00"）——不强制大小写：overlay Upsert 键精确匹配，消费端按需 OrdinalIgnoreCase。
+    private List<NativeEntityParam> ReadModelSpaceEntities()
+    {
+        var result = new List<NativeEntityParam>();
+        dynamic ms = RetryBusy<object?>(() => ModelSpace())!;
+        int count = RetryBusy(() => (int)ms.Count);
+        for (int i = 0; i < count; i++)
+        {
+            int index = i;  // 闭包快照（RetryBusy 同步调用，取局部副本防捕获变异）
+            dynamic entity = RetryBusy<object?>(() => ms.Item(index))!;
+            string handle = RetryBusy(() => (string)entity.Handle);
+            var p = ReadOneEntity(entity, handle, DateTimeOffset.UtcNow);
+            if (p != null) result.Add(p);
+        }
+        return result;
+    }
+
+    // 读完即关（spec §4.1 自开自关）：正常路径关闭失败响亮上抛（调用方不得以为已关）；
+    // 仅成功后清空 _doc（与公开 Close 同语义：失败保留引用）。
+    private void CloseTArchDoc()
+    {
+        try { RetryBusy(() => { _doc!.Close(false); }); _doc = null; }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"Close 失败: {ex.Message}", ex); }
+    }
+
+    // 读参失败路径：仅关本方本次开启的文档（best-effort）；异常吞掉不掩盖读参根因。
+    private void CloseTArchDocBestEffort()
+    {
+        if (_doc == null) return;
+        try { RetryBusy(() => { _doc!.Close(false); }); _doc = null; }
+        catch { /* best-effort：不掩盖已上抛的读参根因 */ }
+    }
+
+    // R1 消歧形态：path!=null=CLI 自启自开读完关；null=native-live 会话读当前已开文档。
+    // 全程在 Run<T> STA 队列内；体内只调私有内部件——公开 Open/Close/EntityCount 自身包 Run，
+    // 队列内再调 Run 会等待自身→死锁。
+    public IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) =>
+        Run<IReadOnlyList<NativeEntityParam>>(() =>
+        {
+            if (drawingPath == null)
+            {
+                if (_doc == null) throw new CadRuntimeException("无打开的图纸");
+                return ReadModelSpaceEntities();  // 不启不开不关（native-live 形态）
+            }
+
+            var app = EnsureAppTArch(TArchProfileName);  // /p 启动+ROT 附着+Gate1（须在 Run 内）
+            bool opened = false;
+            try
+            {
+                _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath));  // 镜像 Open 体内件
+                opened = true;
+                _createdBlocks.Clear();  // 换文档即失效本方创建块名集合（与 Open 同口径）
+                WaitTArchGate2();
+                var list = ReadModelSpaceEntities();
+                CloseTArchDoc();
+                return list;
+            }
+            catch
+            {
+                // 读参失败仍关本方本次开启的副本（自开自关不泄漏）；仅本方 opened 才动 _doc
+                // （不得误关 native-live 会话原有文档）。
+                if (opened) CloseTArchDocBestEffort();
+                throw;
+            }
+        });
 
     public int EntityCount() => Run(() =>
     {
