@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using CadAgent.Core.Cad;
 
 namespace CadAgent.Adapters.Acad.Tests;
@@ -38,8 +39,21 @@ internal static class AcadProbe
         try
         {
             app = Activator.CreateInstance(type)!;
-            app.Visible = false;
-            app.Quit();
+            // 真机核定（2026-11-24，AutoCAD 2014）：激活返回≠初始化完成，启动窗口内
+            // Visible=false 被拒（实测约 0.4s 后恢复）。拒绝有两种包装形态：
+            // Invoke 层→COMException(0x80010001)；GetIDsOfNames 层→MissingMemberException
+            // （消息含 HRESULT）。xunit 工作线程非 STA，消息过滤器不适用→双形态有界重试。
+            // M1（PR#24 修复波）：上限/延迟引用 AcadRuntime 同一 internal 常量
+            // （默认 60×500ms=30s，与 SetVisibleStartupReady 同款语义，不再硬编码漂移）。
+            for (int i = 0; ; i++)
+            {
+                try { app!.Visible = false; break; }
+                catch (Exception ex) when (IsStartupRejection(ex) && i < AcadRuntime.StartupRetryAttempts - 1)
+                {
+                    Thread.Sleep(AcadRuntime.StartupRetryDelay);
+                }
+            }
+            app!.Quit();
             VendorGuard.WaitForProcessExit(VendorProfiles.Acad, TimeSpan.FromSeconds(20));
             return (true, string.Empty);
         }
@@ -69,4 +83,11 @@ internal static class AcadProbe
 
     /// <summary>四态跳过原因（与 Available 同一次 Lazy 求值记录；先读 Available 再读本属性）。</summary>
     public static string SkipReason => _probe.Value.Reason;
+
+    // 启动窗口拒绝双形态判定（COMException HRESULT 直判；MissingMemberException 消息含 HRESULT）。
+    private static bool IsStartupRejection(Exception ex) =>
+        ex is COMException com
+            ? com.HResult == unchecked((int)0x80010001) || com.HResult == unchecked((int)0x8001010A)
+            : ex is MissingMemberException mm
+              && (mm.Message.Contains("0x80010001") || mm.Message.Contains("0x8001010A"));
 }

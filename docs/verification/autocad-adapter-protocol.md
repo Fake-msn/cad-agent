@@ -4,6 +4,53 @@
 > 无 LocalServer32）。AcadRuntime 已实现但 **CompatibleUnverified**。
 > 本协议在工作环境（实装 AutoCAD 2024-2026）执行，产出 Verified 升级证据。
 
+> **更正注记（2026-11-23，追加式，上文旧状态保留存档）**：本机已实装 AutoCAD 2014
+> （R19.1.18.0.0，chs profile）+ 天正电气 5.0。注册态已核实有效：
+> HKCR\AutoCAD.Application → CLSID {BD0DEB94-63DB-4392-9420-6EEE05094B1F} →
+> LocalServer32 = `C:\Program Files\Autodesk\AutoCAD 2014\acad.exe /Automation`
+> （64 位视图，acad.exe PE Machine=0x8664）——头部"孤儿 ProgID 无 LocalServer32"描述已过时。
+> 但真机验证 **BLOCKED**：HKCU\Software\Microsoft\Windows NT\CurrentVersion\
+> AppCompatFlags\Layers 存在 `acad.exe : RUNASADMIN` 兼容层（用户/安装器设置），
+> 强制 acad.exe 提升启动；非提升测试宿主 COM 激活即抛 0x800702E4
+> （ERROR_ELEVATION_REQUIRED），未启动任何进程。acad.exe 内嵌 manifest 为 asInvoker，
+> CLSID 无 Elevation 键——RUNASADMIN 兼容层是唯一提升源。
+> 解除需用户决策（取消 acad.exe"以管理员身份运行"兼容设置，或授权提升运行自动化会话；
+> 擅自移除可能破坏用户许可/破解环境，不在验证代理权限内）。
+> 本次执行证据：outputs/autocad-verify-20261123/（3 真机测试显式跳过，矩阵不升级，
+> Blocks.Add 签名序仍未核定）。
+
+> **更正注记（2026-11-24 续轮，追加式，上文旧状态保留存档）**：RUNASADMIN 兼容层与
+> 前代理 HKCU TypeLib 覆盖键均已由用户移除；COM 激活可用（非提升宿主直接激活成功）。
+> 本轮真机 **3 绿/1 环境败**：GetInfo（Version=19.1s (LMS Tech)）/OpenSaveAs（R12→DWG
+> 往返实体数保持）/CUIX 金丝雀绿；DrawingOps 败于 **TYPE_E_CANTLOADLIBRARY 0x80029C4A**
+> （ModelSpace dispatch）。新核定环境根因：HKLM TypeLib {AB513495-C0DC-4E03-AD6E-E851E08428D1}
+> 全部 lcid 路径指向 `Autodesk Sync\RealDwg\axdb19*.tlb`（该目录无 tlb 文件，仅 tbb.dll）；
+> 真实 tlb 在 `Common Files\Autodesk Shared\`。前代理 HKCU 覆盖正是修此缺陷，移除后复现。
+> **修复需用户授权**（重建 HKCU 覆盖或修正 HKLM 注册），本轮零触碰。
+> DXF 夹具口径更正：Open 败因非版本标签——ACadSharp 3.8.35 DxfWriter 内容被 AutoCAD 2014
+> 一律拒绝（AC1015 降级/手写最小 AC1015 均拒）；AcadLive 夹具改**手写最小 R12 DXF**
+> （仅本地，共享 DxfFixture 默认不变）。适配器增 Run 层忙拒绝有界重试 + Dispose/Restart
+> 忙拒绝上抛重试（Quit 残留修复）。Blocks.Add 探针被 TypeLib 缺陷阻断**仍未核定**
+> （BlocksAddNameFirst=true 原值保持）。SaveAs 锚部分（COM 产出 ops-anchor.dwg + DwgReader
+> 读回绿；COM 计数锚被阻）；人工目视 deferred。CUIX 哈希与备份逐字一致。
+> 逐套件回归 1296 绿/1 环境败/0 跳过。**矩阵不升级**（AutoCAD 维持 CompatibleUnverified）。
+> 解锁：用户授权 TypeLib 修复 → 重跑 DrawingOps + 步骤 4 探针 → 全绿后升级。
+> 证据：outputs/autocad-verify-20261123/（f1-f23 + final-verify-report.md）。
+
+> **更正注记（2026-11-24 收尾轮，追加式，上文旧状态保留存档）**：TypeLib 修复已由用户批准落地
+> （HKCU 覆盖 {AB513495-C0DC-4E03-AD6E-E851E08428D1}\1.0\{0,804}\{win32,win64} →
+> `Common Files\Autodesk Shared\axdb19chs.tlb`；HKLM 零触碰）。实测发现 controller 落地仅写
+> 1.0 版本级默认值、缺 lcid/platform 叶键（g1 仍 0x80029C4A），按批准布局补全后 dispatch 全通（g2）。
+> **AcadLive 4/4 真机绿（g4）**：GetInfo=19.1s (LMS Tech)/DrawingOps 全链（含 EnsureBlock+Insert+
+> SaveAs DWG 读回 5 实体）/OpenSaveAs R12 往返/CUIX 金丝雀（哈希与备份逐字一致）。
+> **步骤 4 探针核定：AutoCAD 2014 Blocks.Add 实测序=(origin, Name)，与 Autodesk 文档序相反，
+> 与 ZWCAD 一致**——`BlocksAddNameFirst` 翻 false（g3 参数 0 转换失败实证→g4 绿）。
+> 全 sln 回归 **1297 绿/0 败/0 跳过**（Acad 4 真机不再跳过）。**矩阵已升级 Verified**
+> （verifiedAt 2026-11-24，versionRange "19.1"=实测 GetInfo 前缀；未实测版本 export gating 照旧警示）。
+> 上文「3 绿/1 环境败」「探针未核定」「矩阵不升级」状态自此闭合。SaveAs 人工目视仍 deferred。
+> 环境依赖：移除 HKCU 覆盖即复现 0x80029C4A（HKLM 坏值未修）；回滚指令见
+> outputs/autocad-verify-20261123/c3-typelib-fix-record.txt。证据：g1-g7 + matrix-upgrade-report.md。
+
 ## 前置约束（CUIX 竞态根因 b，PR#17 事故教训）
 
 1. 验证期间**禁止**并行运行任何 AutoCAD 自动化或人工会话——并发实例共享用户

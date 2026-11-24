@@ -41,6 +41,16 @@ public static partial class CommandRouter
             stderr.WriteLine("--live 失败: 事务前快照缺失");
             return (false, null, "事务前快照缺失");
         }
+        // I1 fail-closed 闸（PR#24 修复波，与 export 共用 AcadWorkingDxfGateRefuses 单点）：
+        // 事务前快照=working DXF 同源拷贝（SnapshotStore.Take 保留 basename）——acad 运行时
+        // 打开即喂 ACadSharp 产物给 AutoCAD 2014（实证崩溃 0xE0000001）。先于运行时创建拒绝
+        // （不激活 COM），审计 com-replay-failed + guidance，exit 非零；影子审计链不受影响。
+        if (AcadWorkingDxfGateRefuses(snap, drawing.SourcePath))
+        {
+            Audit("com-replay-failed", plan.PlanId, new { reason = "acad-working-dxf", error = AcadWorkingDxfGuidance });
+            stderr.WriteLine($"--live 失败: {AcadWorkingDxfGuidance}");
+            return (false, null, AcadWorkingDxfGuidance);
+        }
         ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateRuntimeIfAvailable(stderr);
         if (rt == null)
         {

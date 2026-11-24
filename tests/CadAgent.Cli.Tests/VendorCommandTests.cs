@@ -61,7 +61,19 @@ public class VendorCommandTests : IDisposable
         Assert.Equal(0, code);
         Assert.Contains("ZWCAD", stdout);
         Assert.Contains("Verified", stdout);
-        Assert.Contains("CompatibleUnverified", stdout);
+        // 2026-11-24 矩阵升级：AutoCAD 2014 真机 4 绿 + Blocks.Add 探针核定 → Verified，
+        // 矩阵不再有 CompatibleUnverified 条目；改钉 AutoCAD Verified + TArch Unsupported。
+        Assert.Contains("AutoCAD", stdout);
+        Assert.Contains("Unsupported", stdout);
+        Assert.DoesNotContain("CompatibleUnverified", stdout);
+        // M2（PR#24 修复波）行级收紧：全局 Contains 会被他厂商行掩盖——逐行钉住
+        // AutoCAD 条目自身 status=Verified + versionRange=19.1 + verifiedAt 非空。
+        using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+        var acad = doc.RootElement.GetProperty("entries").EnumerateArray()
+            .Single(e => e.GetProperty("vendor").GetString() == "AutoCAD");
+        Assert.Equal("Verified", acad.GetProperty("status").GetString());
+        Assert.Equal("19.1", acad.GetProperty("versionRange").GetString());
+        Assert.Equal("2026-11-24", acad.GetProperty("verifiedAt").GetString());
     }
 
     [Fact]

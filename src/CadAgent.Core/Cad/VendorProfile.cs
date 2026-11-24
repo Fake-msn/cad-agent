@@ -11,7 +11,9 @@ public static class VendorProfiles
     // ZWCAD Blocks.Add 实测签名序=(origin, Name)（2026-11-20 真机探针核定，与 AutoCAD 文档序相反）
     public static readonly VendorProfile Zwcad = new("ZWCAD", "ZWCAD.Application", "ZWCAD", BlocksAddNameFirst: false);
 
-    // AutoCAD Blocks.Add 按 Autodesk 文档序=(Name, origin)；开发机无 AutoCAD，待工作环境真机探针核定
-    // （docs/verification/autocad-adapter-protocol.md）。若实测相反，翻此标志即可，无需改适配器代码。
-    public static readonly VendorProfile Acad = new("AutoCAD", "AutoCAD.Application", "acad", BlocksAddNameFirst: true);
+    // AutoCAD Blocks.Add 实测签名序=(origin, Name)（2026-11-24 真机探针核定，AutoCAD 2014 R19.1）：
+    // 文档序 (Name, origin) 调用抛「Could not convert argument 0 for call to Add」
+    // （g3 证据：CallSite ComObject,String,Double[] 参数 0 转换失败）——与 ZWCAD 实测一致，
+    // 与 Autodesk 文档相反。不赌文档，两厂商均真机核定（docs/verification/autocad-adapter-protocol.md 步骤 4）。
+    public static readonly VendorProfile Acad = new("AutoCAD", "AutoCAD.Application", "acad", BlocksAddNameFirst: false);
 }
