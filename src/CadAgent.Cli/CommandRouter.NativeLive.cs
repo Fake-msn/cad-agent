@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CadAgent.Core;
@@ -13,12 +14,16 @@ namespace CadAgent.Cli;
 /// <summary>
 /// 切片A §4.2：run 主闸逐实体精准松绑准入 + native-live 独执行（spec §4.2）。
 /// census Yellow 图纸全图级拦截（GateRefusesRun）的精准旁路：仅当 `--live` + 计划**全部**
-/// 步骤为句柄寻址（含 handle 参数）且每个目标句柄对 overlay.NativeEntities 通过
-/// NativeGateRefinement 判据（本轮 live 重读一致）时，对原生 DWG 原文开活厂商会话执行
-/// change-layer/move/delete，读回校验通过后交付 &lt;drawing&gt;.live.dwg。
-/// **原图零写入**（源件 SHA256 前后比对；唯一写出是 .live.dwg 新文件）；不创建 tx 快照、
-/// 不调 StepEngine（native-live 独执行）。审计全部落 area "run"（同 store/session/op/planId）：
-/// native-gate-pass{handles,sourceSha}/native-gate-refused{verdicts|reason}/
+/// 步骤为 kind ∈ {change-layer,move,delete} 且含 handle 参数，且每个目标句柄对
+/// overlay.NativeEntities 通过 NativeGateRefinement 判据（本轮 live 重读一致）时，对原生
+/// DWG 原文开活厂商会话执行，读回校验通过后交付 &lt;drawing&gt;.live.dwg。
+/// **会话顺序**（@T10 修复）：先 ReadNativeParams(path≠null)（经 EnsureAppTArch 以 /p 拉起
+/// 天正并缓存 _app，返回值即准入重读）→ Open 原图（复用同一 _app）→ 执行 →
+/// ReadNativeParams()（null 形态读当前活文档）。颠倒会令默认 profile 缓存使 TArch 永不加载。
+/// **原图零写入**（源件 SHA256 前后比对，两侧空哈希均按验证失败 fail-closed；唯一写出是
+/// .live.dwg 新文件）；不创建 tx 快照、不调 StepEngine（native-live 独执行）。审计全部落
+/// area "run"（同 store/session/op/planId）：
+/// native-gate-pass{handles,sourceSha,rereadHash}/native-gate-refused{verdicts|reason}/
 /// native-live-step{kind,handle}/native-live-committed{outPath,sourceSha,liveSha}/
 /// native-live-failed{step?,error|readback}。
 /// R11（句柄歧义防护）：先"剥 0x+大写"原串查 overlay（全数字串可能是 hex，如 "21000"），
@@ -26,6 +31,8 @@ namespace CadAgent.Cli;
 /// 已替换的计划副本，避免 HandleToHex 二次归一改错实体）。R12：change-layer 空/空白层名
 /// 准入即拒（InvalidLayer，不扩枚举）；层名读回 OrdinalIgnoreCase。R6：move 读回在 bbox
 /// 不可得时退化为 params 不变检查（诚实降级，审计记 readback=reread-bbox-null）。
+/// 同句柄多步读回按**终态聚合**：delete 支配 / change-layer 末步层名胜出 / move 位移求和。
+/// 句柄形态解析异常（bool/数组/超 ulong 数值等）→ native-gate-refused{MalformedHandle}。
 /// </summary>
 public static partial class CommandRouter
 {
@@ -35,12 +42,16 @@ public static partial class CommandRouter
     private static int? NativeLivePlan(string drawingPath, StepPlan plan, DrawingSession drawing,
         string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
     {
-        // 1. 准入分类（R5）：零步骤/任一步骤无 handle 参数 → 不适用，回落既有 run-rejected
-        //（生成类/全图级修改不因 Yellow 松绑放开）。
+        // 1. 准入分类（R5）：零步骤/任一步骤无 handle 参数/kind 非句柄寻址编辑类 → 不适用，
+        // 回落既有 run-rejected（生成类/全图级修改不因 Yellow 松绑放开；kind 白名单先于
+        // 一切运行时副作用——生成类步骤即便带 handle 也不得挤进 Replay 通道）。
         if (plan.Steps.Count == 0) return null;
         foreach (var step in plan.Steps)
+        {
+            if (step.Kind is not ("change-layer" or "move" or "delete")) return null;
             if (step.Params.ValueKind != JsonValueKind.Object
                 || !step.Params.TryGetProperty("handle", out _)) return null;
+        }
 
         string sourceSha = SafeSha256File(drawingPath);
         void Audit(string kind, string target, object payload, string? afterHash = null) =>
@@ -68,6 +79,16 @@ public static partial class CommandRouter
             }, message);
         }
 
+        // 1b. 零写入断言前置（fail-closed）：源件不可哈希 → 无法证明原图零写入，
+        // 不得带着 ""=="" 的假通过执行（空 SHA 两侧相等曾 fail-open 放行）。
+        if (string.IsNullOrEmpty(sourceSha))
+        {
+            Audit("native-live-failed", drawingPath,
+                new { error = "源图 SHA 不可验证（无法证明原图零写入）", reason = "sourcesha-unverifiable" });
+            stderr.WriteLine("native-live 失败: 源图 SHA 不可验证（无法证明原图零写入）");
+            return 1;
+        }
+
         // 2. overlay 加载（缺失/损坏 → 拒绝留痕，不静默降级为"无 overlay 放行"）。
         string overlayPath = SemanticOverlayPath(agentDir);
         if (!File.Exists(overlayPath))
@@ -85,29 +106,39 @@ public static partial class CommandRouter
         }
 
         // 3. 句柄预匹配（R11）+ 层名准入（R12）：纯 overlay 判据，先于任何运行时副作用。
+        // 句柄形态解析（bool/数组/对象/超 ulong 数值等）可能抛异常——必须收口为审计拒绝，
+        // 不得未捕获穿透（审计链/退出码须完整）。
         var matched = new string?[plan.Steps.Count];
         var verdicts = new List<(string Handle, string Verdict)>();
-        for (int i = 0; i < plan.Steps.Count; i++)
+        try
         {
-            var step = plan.Steps[i];
-            string raw = ComReplayService.HandleString(step.Params);
-            if (step.Kind == "change-layer" && IsBlankLayer(step.Params))
+            for (int i = 0; i < plan.Steps.Count; i++)
             {
-                verdicts.Add((raw, "InvalidLayer"));
-                continue;
+                var step = plan.Steps[i];
+                string raw = ComReplayService.HandleString(step.Params);
+                if (step.Kind == "change-layer" && IsBlankLayer(step.Params))
+                {
+                    verdicts.Add((raw, "InvalidLayer"));
+                    continue;
+                }
+                string? match = MatchOverlayHandle(overlay, raw);
+                matched[i] = match;
+                if (match == null) verdicts.Add((raw, NativeGateVerdict.NotRead.ToString()));
             }
-            string? match = MatchOverlayHandle(overlay, raw);
-            matched[i] = match;
-            if (match == null) verdicts.Add((raw, NativeGateVerdict.NotRead.ToString()));
+        }
+        catch (Exception ex)
+        {
+            return Refuse(new { reason = "MalformedHandle", error = ex.Message },
+                $"native-live 拒绝: 句柄参数形态非法（{ex.Message}）");
         }
         if (verdicts.Count > 0) return RefuseVerdicts(verdicts);
 
         try
         {
-            // 4. 活会话对准**原图**（原生 DWG，TDb 存活）；ReadNativeParams() 只读一次。
-            // 运行时获取镜像 T6 R8 裁定：测试注入优先；否则按 ResolveRuntimeName 直构
-            // （不调 CreateRuntimeIfAvailable——其 GetInfo 预激活/降级文案与 native-live
-            // 语义不符；构造/Open 失败经下方 catch 响亮留痕）。
+            // 4. 活会话对准**原图**（原生 DWG，TDb 存活）。运行时获取镜像 T6 R8 裁定：
+            // 测试注入优先；否则按 ResolveRuntimeName 直构（不调 CreateRuntimeIfAvailable——
+            // 其 GetInfo 预激活/降级文案与 native-live 语义不符；构造/Open 失败经下方 catch
+            // 响亮留痕）。会话顺序：path 形态读参（拉起 TArch）→ Open 原图 → null 形态读回。
             ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateRuntimeInstance(ResolveRuntimeName());
             if (rt == null)
             {
@@ -117,8 +148,12 @@ public static partial class CommandRouter
             }
             using (rt)
             {
-                rt.Open(drawingPath);
-                var reread = rt.ReadNativeParams();
+                // 4a. 天正会话开路（@T10 修复，顺序不可颠倒）：先 path 形态读参——
+                // ReadNativeParams(path≠null) 内部经 EnsureAppTArch 以 /p 拉起 TArch profile
+                // 并把 _app 缓存；返回值即准入重读事实（自开自关的独立副本，读完即关）。
+                // 若先 Open（EnsureApp 默认 profile 先缓存 _app），EnsureAppTArch 将早退复用
+                // 默认实例、TArch 永不加载→真机 TDb 目标全 StaleMismatch（通道失效）。
+                var reread = rt.ReadNativeParams(drawingPath);
                 var gateVerdicts = new List<(string Handle, string Verdict)>();
                 for (int i = 0; i < plan.Steps.Count; i++)
                 {
@@ -132,7 +167,14 @@ public static partial class CommandRouter
                 }
                 if (gateVerdicts.Count > 0) return RefuseVerdicts(gateVerdicts);
 
-                Audit("native-gate-pass", drawingPath, new { handles = matched, sourceSha });
+                // 台账 T7@T9：准入重读指纹（定序 "handle|objectName|bbox|params" 的 SHA256）
+                // 加性落 native-gate-pass，供审计复核"放行所依据的重读事实"。
+                string rereadHash = RereadHash(reread, matched);
+                Audit("native-gate-pass", drawingPath, new { handles = matched, sourceSha, rereadHash });
+
+                // 4b. 执行窗口：Open 原图——EnsureApp 复用 4a 已缓存的 TArch _app（同一实例
+                // 开原始 DWG，TDb 存活）；实例启动已由 4a 完成，此处不再触发新实例。
+                rt.Open(drawingPath);
 
                 // 5. 全 Pass → 句柄替换副本执行（Replay 内置归一不得再改写已命中形态）。
                 var replayPlan = ReplaceStepHandles(plan, matched);
@@ -149,27 +191,40 @@ public static partial class CommandRouter
                     }
                 }
 
-                // 6. 读回闸：after 读一次，逐 step 期望校验（不符即拒，不 SaveAs）。
+                // 6. 读回闸：after 读一次，期望按句柄**终态聚合**比对（同句柄多步不得按
+                // 首快照逐 step 误拒）：delete 支配（句柄须消失）；change-layer 末步层名胜出；
+                // move 位移按句柄求和后作用于该句柄 before-bbox。
                 var after = rt.ReadNativeParams();
-                for (int i = 0; i < plan.Steps.Count; i++)
+                var expectations = AggregateReadback(plan, matched);
+                foreach (var exp in expectations)
                 {
-                    var step = plan.Steps[i];
-                    string handle = matched[i]!;
-                    var beforeRec = FindRereadByHandle(reread, handle);
-                    string? detail = CheckReadback(step, handle, beforeRec, after, out bool bboxNull);
+                    string? detail = CheckReadback(exp, FindRereadByHandle(reread, exp.Handle),
+                        after, out bool bboxNull);
                     if (detail != null)
                     {
                         Audit("native-live-failed", drawingPath, new { readback = detail });
                         stderr.WriteLine($"native-live 读回不符: {detail}（未交付 .live.dwg，原图零写入）");
                         return 1;
                     }
-                    Audit("native-live-step", handle, bboxNull
-                        ? new { kind = step.Kind, handle, readback = "reread-bbox-null" }
-                        : new { kind = step.Kind, handle });
+                    exp.BboxNull = bboxNull;
                 }
+                // 逐 step 审计（按句柄首现+计划内顺序）；move 的 bbox 不可得降级如实披露。
+                foreach (var exp in expectations)
+                    foreach (var step in exp.Steps)
+                        Audit("native-live-step", exp.Handle, exp.BboxNull && step.Kind == "move"
+                            ? new { kind = step.Kind, handle = exp.Handle, readback = "reread-bbox-null" }
+                            : new { kind = step.Kind, handle = exp.Handle });
 
                 // 7. 原图零写入断言（源件 SHA256 前后比对）→ 唯一写出是 .live.dwg 新文件。
+                //    空 SHA 不得 ""=="" 假通过（fail-open）：哈希不可得即视为验证失败。
                 string sourceShaNow = SafeSha256File(drawingPath);
+                if (string.IsNullOrEmpty(sourceShaNow))
+                {
+                    Audit("native-live-failed", drawingPath,
+                        new { error = "源图 SHA 不可验证（原图零写入契约无法断言）", reason = "sourcesha-unverifiable", sourceSha, sourceShaNow });
+                    stderr.WriteLine("native-live 失败: 源图 SHA 不可验证（原图零写入契约无法断言）");
+                    return 1;
+                }
                 if (sourceShaNow != sourceSha)
                 {
                     Audit("native-live-failed", drawingPath,
@@ -256,50 +311,113 @@ public static partial class CommandRouter
         return matched;
     }
 
-    /// <summary>读回期望校验（返回 null=通过；非 null=不符详情）：
-    /// change-layer→Layer==目标层（R12 OrdinalIgnoreCase）；move→bbox 各分量恰平移 dx/dy
-    /// （容差 1e-6；bbox 不可得→params 不变退化，bboxNull=true 供审计如实披露）；
-    /// delete→句柄消失。</summary>
-    private static string? CheckReadback(StepSpec step, string handle, NativeEntityParam? before,
+    /// <summary>同句柄多步聚合期望（读回按终态一次性比对，不按首快照逐 step 误拒）：
+    /// delete 支配（句柄应消失）；change-layer 以末步层名为准；move 位移按句柄求和。</summary>
+    private sealed class HandleReadback
+    {
+        public string Handle = "";
+        public readonly List<StepSpec> Steps = new();
+        public bool Delete;
+        public string? Layer;
+        public double Dx;
+        public double Dy;
+        public bool HasMove;
+        public bool BboxNull;
+    }
+
+    /// <summary>按规划顺序聚合：每句柄首现固定顺序（审计/失败文案确定性），
+    /// 末次 change-layer 层名覆盖前者，move 的 dx/dy 逐 step 累加，delete 置支配位。</summary>
+    private static List<HandleReadback> AggregateReadback(StepPlan plan, IReadOnlyList<string?> matched)
+    {
+        var byHandle = new Dictionary<string, HandleReadback>(StringComparer.Ordinal);
+        var list = new List<HandleReadback>();
+        for (int i = 0; i < plan.Steps.Count; i++)
+        {
+            string handle = matched[i]!;
+            if (!byHandle.TryGetValue(handle, out var exp))
+            {
+                exp = new HandleReadback { Handle = handle };
+                byHandle.Add(handle, exp);
+                list.Add(exp); // 首现顺序
+            }
+            var step = plan.Steps[i];
+            exp.Steps.Add(step);
+            switch (step.Kind)
+            {
+                case "delete":
+                    exp.Delete = true;
+                    break;
+                case "change-layer":
+                    exp.Layer = step.Params.GetProperty("layer").GetString() ?? "";
+                    break;
+                case "move":
+                    exp.HasMove = true;
+                    exp.Dx += step.Params.GetProperty("dx").GetDouble();
+                    exp.Dy += step.Params.GetProperty("dy").GetDouble();
+                    break;
+            }
+        }
+        return list;
+    }
+
+    /// <summary>句柄聚合期望 vs 终态读回（返回 null=通过；非 null=不符详情）：
+    /// delete→句柄消失（支配其余期望）；change-layer→末步目标层（R12 OrdinalIgnoreCase）；
+    /// move→before-bbox 整体平移位移和 (Dx,Dy)（容差 1e-6；bbox 不可得→params 不变退化，
+    /// bboxNull=true 供审计如实披露）。</summary>
+    private static string? CheckReadback(HandleReadback exp, NativeEntityParam? before,
         IReadOnlyList<NativeEntityParam> after, out bool bboxNull)
     {
         bboxNull = false;
-        var afterRec = FindRereadByHandle(after, handle);
-        switch (step.Kind)
+        var afterRec = FindRereadByHandle(after, exp.Handle);
+        if (exp.Delete)
+            return afterRec == null ? null : $"delete {exp.Handle} 重读仍存在（未删除）";
+        if (afterRec == null)
         {
-            case "change-layer":
-            {
-                string layer = step.Params.GetProperty("layer").GetString() ?? "";
-                if (afterRec == null) return $"change-layer {handle} 重读缺失（句柄不存在）";
-                if (afterRec.Layer == null
-                    || !string.Equals(afterRec.Layer, layer, StringComparison.OrdinalIgnoreCase))
-                    return $"change-layer {handle} 图层不符（期望 {layer}，实际 {afterRec.Layer ?? "null"}）";
-                return null;
-            }
-            case "move":
-            {
-                if (afterRec == null) return $"move {handle} 重读缺失（句柄不存在）";
-                double dx = step.Params.GetProperty("dx").GetDouble();
-                double dy = step.Params.GetProperty("dy").GetDouble();
-                if (before?.Bbox is { Length: 6 } b0 && afterRec.Bbox is { Length: 6 } b1)
-                {
-                    double[] deltas = { dx, dy, 0, dx, dy, 0 };
-                    for (int i = 0; i < 6; i++)
-                        if (Math.Abs(b1[i] - b0[i] - deltas[i]) > BboxTolerance)
-                            return $"move {handle} bbox 位移不符（分量{i} 期望 {b0[i] + deltas[i]} 实际 {b1[i]}）";
-                    return null;
-                }
-                // R6 诚实降级：bbox 不可得（尽力读取面）→ 退化为原生参数不变检查。
-                bboxNull = true;
-                if (!ParamsEqual(before?.Params, afterRec.Params))
-                    return $"move {handle} bbox 不可得且原生参数不一致（reread-bbox-null）";
-                return null;
-            }
-            case "delete":
-                return afterRec == null ? null : $"delete {handle} 重读仍存在（未删除）";
-            default:
-                return $"native-live 不支持读回校验类型 {step.Kind}";
+            string kindLabel = exp.HasMove && exp.Layer != null ? "change-layer/move"
+                : exp.HasMove ? "move" : "change-layer";
+            return $"{kindLabel} {exp.Handle} 重读缺失（句柄不存在）";
         }
+        if (exp.Layer != null
+            && (afterRec.Layer == null
+                || !string.Equals(afterRec.Layer, exp.Layer, StringComparison.OrdinalIgnoreCase)))
+            return $"change-layer {exp.Handle} 图层不符（期望 {exp.Layer}，实际 {afterRec.Layer ?? "null"}）";
+        if (!exp.HasMove) return null;
+        if (before?.Bbox is { Length: 6 } b0 && afterRec.Bbox is { Length: 6 } b1)
+        {
+            double[] deltas = { exp.Dx, exp.Dy, 0, exp.Dx, exp.Dy, 0 };
+            for (int i = 0; i < 6; i++)
+                if (Math.Abs(b1[i] - b0[i] - deltas[i]) > BboxTolerance)
+                    return $"move {exp.Handle} bbox 位移不符（分量{i} 期望 {b0[i] + deltas[i]} 实际 {b1[i]}）";
+            return null;
+        }
+        // R6 诚实降级：bbox 不可得（尽力读取面）→ 退化为原生参数不变检查。
+        bboxNull = true;
+        if (!ParamsEqual(before?.Params, afterRec.Params))
+            return $"move {exp.Handle} bbox 不可得且原生参数不一致（reread-bbox-null）";
+        return null;
+    }
+
+    /// <summary>台账 T7@T9 准入重读指纹：已评估句柄去重+Ordinal 排序后逐条拼
+    /// "handle|objectName|bbox|params"（bbox 分量按序、params 键 Ordinal 排序），
+    /// 以 \n 连接做 SHA256——定长十六进制、完全确定性（仅取参与判据的重读记录；
+    /// Pass 路径必非缺失，null 跳过属防御）。</summary>
+    private static string RereadHash(IReadOnlyList<NativeEntityParam> reread, IReadOnlyList<string?> matched)
+    {
+        var lines = new List<string>();
+        foreach (string handle in matched.Select(h => h!).Distinct(StringComparer.Ordinal)
+                     .OrderBy(h => h, StringComparer.Ordinal))
+        {
+            var rec = FindRereadByHandle(reread, handle);
+            if (rec == null) continue;
+            string bbox = rec.Bbox == null
+                ? "null"
+                : string.Join(",", rec.Bbox.Select(v => v.ToString("R", CultureInfo.InvariantCulture)));
+            string parms = string.Join(";", rec.Params
+                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => kv.Key + "=" + kv.Value));
+            lines.Add($"{handle}|{rec.ObjectName}|{bbox}|{parms}");
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", lines))));
     }
 
     private static bool ParamsEqual(IReadOnlyDictionary<string, string>? a, IReadOnlyDictionary<string, string> b)

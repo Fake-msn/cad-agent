@@ -59,6 +59,17 @@ public class NativeLiveAdmissionTests : IDisposable
         overlay.Save(Path.Combine(_project, ".cadagent", "semantic.json"));
     }
 
+    /// <summary>原生读参种子：path 形态（准入重读=独立副本快照）与 null 形态（执行会话
+    /// 初始事实）各投一份——failsafe：漏投 path 形态则准入必然 StaleMismatch。</summary>
+    private void SeedNative(params NativeEntityParam[] records)
+    {
+        foreach (var r in records)
+        {
+            _rt.PathReadResults.Add(r);
+            _rt.ReadResults.Add(r);
+        }
+    }
+
     private string WritePlan(string json)
     {
         string path = Path.Combine(_project, "plan.json");
@@ -94,7 +105,7 @@ public class NativeLiveAdmissionTests : IDisposable
     public void Yellow_HandleStep_AllPass_ExecutesOps_DeliversLiveDwg()
     {
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         string plan = WritePlan(
             """{"planId":"NL-1","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
         byte[] before = File.ReadAllBytes(_drawing);
@@ -114,6 +125,9 @@ public class NativeLiveAdmissionTests : IDisposable
         {
             Assert.Equal("21E00", p.RootElement.GetProperty("handles")[0].GetString());
             Assert.Equal(ShaOf(before), p.RootElement.GetProperty("sourceSha").GetString());
+            // 台账 T7@T9：准入重读指纹加性落 native-gate-pass（64 位大写 hex，确定性）。
+            string rereadHash = p.RootElement.GetProperty("rereadHash").GetString()!;
+            Assert.Matches("^[0-9A-F]{64}$", rereadHash);
         }
         Assert.Single(records, r => r.Entry.Kind == "native-live-step");
         var committed = Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
@@ -135,7 +149,7 @@ public class NativeLiveAdmissionTests : IDisposable
     {
         WriteOverlay(Wall());
         // 重读 bbox 与 overlay 不符（实体已漂移）→ StaleMismatch 拒绝。
-        _rt.ReadResults.Add(Wall(bbox: new[] { 0.0, 0.0, 0.0, 200.0, 100.0, 3000.0 }));
+        SeedNative(Wall(bbox: new[] { 0.0, 0.0, 0.0, 200.0, 100.0, 3000.0 }));
         string plan = WritePlan(
             """{"planId":"NL-2","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
 
@@ -160,7 +174,7 @@ public class NativeLiveAdmissionTests : IDisposable
     {
         // 松绑不放开全图级修改：无 handle 的 add-line 回落既有 run-rejected（R5）。
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         string plan = WritePlan(
             """{"planId":"NL-3","steps":[{"kind":"add-line","params":{"x1":0,"y1":0,"x2":5,"y2":5}}]}""");
 
@@ -180,7 +194,7 @@ public class NativeLiveAdmissionTests : IDisposable
     public void Yellow_MoveStep_AllPass_ShiftsBbox_ExecutesAndDelivers()
     {
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         string plan = WritePlan(
             """{"planId":"NL-4","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
 
@@ -197,7 +211,7 @@ public class NativeLiveAdmissionTests : IDisposable
     public void Yellow_DeleteStep_AllPass_HandleGone_ExecutesAndDelivers()
     {
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         string plan = WritePlan(
             """{"planId":"NL-5","steps":[{"kind":"delete","params":{"handle":"21E00"}}]}""");
 
@@ -214,7 +228,7 @@ public class NativeLiveAdmissionTests : IDisposable
     {
         // R11：计划句柄 "138752"（21E00 的十进制）=候选1未命中→十进制转 hex→命中 overlay。
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         string plan = WritePlan(
             """{"planId":"NL-6","steps":[{"kind":"change-layer","params":{"handle":"138752","layer":"WALL"}}]}""");
 
@@ -235,7 +249,7 @@ public class NativeLiveAdmissionTests : IDisposable
         // R11 歧义防护：overlay 句柄本身是全数字 hex "21000"——原串大写精确命中即用
         // （不得按十进制解析成 5208 改错实体）。
         WriteOverlay(Wall(handle: "21000"));
-        _rt.ReadResults.Add(Wall(handle: "21000"));
+        SeedNative(Wall(handle: "21000"));
         string plan = WritePlan(
             """{"planId":"NL-7","steps":[{"kind":"change-layer","params":{"handle":"21000","layer":"WALL"}}]}""");
 
@@ -251,7 +265,7 @@ public class NativeLiveAdmissionTests : IDisposable
     {
         // R12：change-layer 空/空白 layer 显式拒绝（Layers.Add("") 抛错且语义分歧）。
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         string plan = WritePlan(
             """{"planId":"NL-8","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"   "}}]}""");
 
@@ -291,7 +305,7 @@ public class NativeLiveAdmissionTests : IDisposable
     {
         // 执行成功但读回不符（fake 不落层变更）→ native-live-failed{readback}，不 SaveAs。
         WriteOverlay(Wall());
-        _rt.ReadResults.Add(Wall());
+        SeedNative(Wall());
         _rt.IgnoreHandleOps = true;
         string plan = WritePlan(
             """{"planId":"NL-10","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
@@ -308,13 +322,106 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.Contains("readback", p.RootElement.EnumerateObject().Select(o => o.Name));
     }
 
+    [Fact]
+    public void Yellow_GenerationStepWithHandle_StillRunRejected()
+    {
+        // kind 白名单：生成类 add-line 即便带 handle 也不得绕过准入（回落既有 run-rejected）。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-11","steps":[{"kind":"add-line","params":{"handle":"21E00","x1":0,"y1":0,"x2":5,"y2":5}}]}""");
+
+        var (code, stdout, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("只读审查", stderr);
+        Assert.DoesNotContain("\"ok\"", stdout);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        Assert.Empty(_rt.Calls); // 准入分类即回落，未触任何运行时调用
+        var records = AuditRecords();
+        Assert.Contains(records, r => r.Entry.Kind == "run-rejected");
+        Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-"));
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
+    }
+
+    [Fact]
+    public void TArchSessionOrder_AdmissionPathRead_ThenOpen()
+    {
+        // @T10 会话开路顺序：ReadNativeParams(path≠null) 才经 EnsureAppTArch 以 /p 拉起
+        // 天正 profile 并缓存 _app；若先 Open（EnsureApp 默认 profile 先缓存），TArch 永不
+        // 加载→真机 TDb 目标全 StaleMismatch。首个运行时调用必须是 path 形态读参。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-12","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.True(_rt.Calls.Count > 0, "无运行时调用");
+        Assert.Equal("read-native:path", _rt.Calls[0]);
+        int openIdx = _rt.Calls.IndexOf("open:" + Path.GetFileName(_drawing));
+        Assert.True(openIdx > 0, $"calls={string.Join("|", _rt.Calls)}");
+        // 执行窗口在读参之后；执行后读回为 null 形态（活文档），亦不得先于 Open。
+        int opIdx = _rt.Calls.IndexOf("change-layer:21E00:WALL");
+        Assert.True(opIdx > openIdx, $"calls={string.Join("|", _rt.Calls)}");
+        int docReadIdx = _rt.Calls.IndexOf("read-native:doc");
+        Assert.True(docReadIdx > opIdx, $"calls={string.Join("|", _rt.Calls)}");
+        Assert.Contains("native-live-committed", AuditRecords().Select(r => r.Entry.Kind));
+    }
+
+    [Fact]
+    public void Yellow_TwoMovesSameHandle_ReadbackAggregated_Committed()
+    {
+        // 同句柄多步：读回按终态聚合（位移求和 +15x），不得按首快照逐 step 期望误拒。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-13","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":0}},{"kind":"move","params":{"handle":"21E00","dx":5,"dy":0}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Contains("move:21E00:10:0", _rt.Calls);
+        Assert.Contains("move:21E00:5:0", _rt.Calls);
+        Assert.True(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        Assert.Equal(2, records.Count(r => r.Entry.Kind == "native-live-step"));
+        Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    [Fact]
+    public void MalformedHandle_RefusedWithAudit_NoRuntime()
+    {
+        // 句柄形态非法（bool 等非字符串/非数值）→ 准入分类异常须收口为审计拒绝，不得未捕获。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-14","steps":[{"kind":"delete","params":{"handle":true}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.NotEmpty(stderr);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
+        using var p = JsonDocument.Parse(refused.Entry.ParamsJson);
+        Assert.Equal("MalformedHandle", p.RootElement.GetProperty("reason").GetString());
+        Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
+    }
+
     /// <summary>
-    /// Fake 厂商运行时（零 COM）：ReadNativeParams 返回当前 ReadResults（可变——ops 落状态，
-    /// 读回通道看到执行后事实）；handle op 记录调用串供断言；SaveAs 落合成 .live.dwg 字节。
+    /// Fake 厂商运行时（零 COM）：ReadNativeParams 按形态区分——path≠null=天正自开自关
+    /// 副本的只读快照（准入重读事实，独立于执行窗口状态）；null=当前活文档（ops 落状态，
+    /// 读回看到执行后事实）。调用串记录形态（read-native:path/doc）供顺序断言；
+    /// handle op 记录调用串；SaveAs 落合成 .live.dwg 字节。
     /// </summary>
     private sealed class FakeNativeRuntime : ICadRuntime
     {
         public List<string> Calls { get; } = new();
+        public List<NativeEntityParam> PathReadResults { get; } = new();
         public List<NativeEntityParam> ReadResults { get; } = new();
         public string? SavedPath { get; private set; }
         public bool IgnoreHandleOps { get; set; }
@@ -341,8 +448,8 @@ public class NativeLiveAdmissionTests : IDisposable
 
         public IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null)
         {
-            Calls.Add("read-native");
-            return ReadResults.ToList();
+            Calls.Add(drawingPath == null ? "read-native:doc" : "read-native:path");
+            return drawingPath == null ? ReadResults.ToList() : PathReadResults.ToList();
         }
 
         public void ChangeLayerByHandle(string hexHandle, string layer)
