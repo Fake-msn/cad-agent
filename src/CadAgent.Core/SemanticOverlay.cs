@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CadAgent.Core.Cad;
 
 namespace CadAgent.Core;
 
@@ -13,12 +14,22 @@ public sealed class SemanticOverlay
 
     public List<SemanticAnnotation> Annotations { get; set; } = new();
     public List<LayerMapping> Mappings { get; set; } = new();
+
+    // 切片A（spec §3）：COM 原生读参独立表——与 Annotations 并列，语义分类与原生参数分离。
+    // JSON 加性：旧 overlay 无此字段→反序列化 null→Load 归一为空 List（消费端免判空）。
+    public List<NativeEntityParam> NativeEntities { get; set; } = new();
+
     public int Version { get; set; }
 
-    public static SemanticOverlay Load(string path) =>
-        File.Exists(path)
+    public static SemanticOverlay Load(string path)
+    {
+        var overlay = File.Exists(path)
             ? JsonSerializer.Deserialize<SemanticOverlay>(File.ReadAllText(path), JsonOpts) ?? new SemanticOverlay()
             : new SemanticOverlay();
+        // JSON 显式 null 亦归一为空表（属性初始化仅覆盖字段缺失场景）。
+        overlay.NativeEntities ??= new();
+        return overlay;
+    }
 
     public void Save(string path)
     {
@@ -37,6 +48,13 @@ public sealed class SemanticOverlay
     {
         int i = Annotations.FindIndex(x => x.TargetHandle == a.TargetHandle && x.Provenance == a.Provenance);
         if (i >= 0) Annotations[i] = a; else Annotations.Add(a);
+    }
+
+    // 切片A：按句柄覆盖（同句柄再读参时整条替换，ReadAt/Params 随之更新）。
+    public void UpsertNative(NativeEntityParam p)
+    {
+        int i = NativeEntities.FindIndex(x => x.Handle == p.Handle);
+        if (i >= 0) NativeEntities[i] = p; else NativeEntities.Add(p);
     }
 
     public void ConfirmMapping(LayerMapping m)
