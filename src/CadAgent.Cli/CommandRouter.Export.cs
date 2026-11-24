@@ -62,6 +62,37 @@ public static partial class CommandRouter
     }
 
     /// <summary>
+    /// DWG 快照转换器（解除 acad fail-closed 停用，用户批准设计）：working 派生 DXF →
+    /// DxfReader 读入 → doc.Header.Version 钉 AC1027 → DwgWriter 写临时 .dwg → 返回快照路径。
+    /// 探针实证（outputs/api-probe/compat-probe-report.md）：ACadSharp DwgWriter AC1027 产物
+    /// AutoCAD 2014 可直接 COM Open（0.5s，CJK 保真）；真实标本 t3 往返零差异。
+    /// **CJK 钉住 AC1027**：DwgWriter/DxfWriter 在 AC1015/AC1018 写中文有损（??????，本轮抽检实证），
+    /// AC1027/AC1032 保真——故快照版本固定 AC1027（2014 可读上限，AC1032 默认会被 2014 拒）。
+    /// 版本设置方式经 API 核实：DwgWriter 构造仅 (path/stream, CadDocument)，DwgWriterConfiguration
+    /// 无 Version 属性——版本唯一来源是 doc.Header.Version（反射 + 往返实证）。
+    /// 临时快照置于独立 GUID 子目录，调用方用后即清（Directory.Delete 整目录）。
+    /// Func 化供测试注入失败（fake DwgWriter 抛）钉住转换失败 fail-closed 安全侧。
+    /// </summary>
+    internal static Func<string, string> ConvertAcadDwgSnapshot = workingDxfPath =>
+    {
+        ACadSharp.CadDocument doc;
+        using (var reader = new ACadSharp.IO.DxfReader(workingDxfPath)) doc = reader.Read();
+        doc.Header.Version = ACadSharp.ACadVersion.AC1027; // CJK 钉住（AC1015/AC1018 有损）
+        string dir = Path.Combine(Path.GetTempPath(), "cadagent-acad-snap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string snapPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(workingDxfPath) + ".dwg");
+        using (var fs = File.Create(snapPath)) ACadSharp.IO.DwgWriter.Write(fs, doc);
+        return snapPath;
+    };
+
+    /// <summary>清理 DWG 快照临时目录（用后即清；best-effort，清理失败不影响交付/拒绝终态）。</summary>
+    internal static void CleanupAcadDwgSnapshot(string? snapDir)
+    {
+        if (snapDir == null) return;
+        try { Directory.Delete(snapDir, recursive: true); } catch { /* 临时目录清理失败不二次抛 */ }
+    }
+
+    /// <summary>
     /// 纯工厂 seam（不做可用性检查；构造不激活 COM）；Func 化供测试注入假 runtime
     /// （PR#18 修复波 Important#2：GetInfo 抛后 Dispose 回归钉住），调用语法不变。
     /// </summary>
@@ -101,18 +132,33 @@ public static partial class CommandRouter
             return 1;
         }
 
-        // I1 fail-closed 闸（PR#24 修复波）：acad + working 派生 DXF → 先于运行时创建拒绝
-        // （ExportService.Open 会把 ACadSharp DXF 喂 AutoCAD 2014 → 实证崩溃 0xE0000001）。
-        // 拒绝留痕复用既有 export-rejected kind（params reason/guidance），不产任何衍生产物。
-        if (AcadWorkingDxfGateRefuses(drawing.SourcePath, drawingPath))
+        // I1 闸口径升级（DWG 快照路径，解除 acad fail-closed 停用，用户批准设计）：
+        // acad + working 派生 DXF → 先转换 DWG 快照（DxfReader→DwgWriter 钉 AC1027，探针实证
+        // 2014 可直接 Open）→ 成功放行（ExportService.Open 喂 DWG）；转换失败仍 fail-closed
+        // 拒绝+审计+guidance（安全侧保持，先于运行时创建不激活 COM）。非 working 派生输入
+        // （原生 .dwg）闸 false → 不转换，直接 Open 不变。zwcad 路径零改动（闸 false）。
+        string exportSource = drawing.SourcePath;
+        string? acadSnapDir = null;
+        bool acadWorking = AcadWorkingDxfGateRefuses(drawing.SourcePath, drawingPath);
+        if (acadWorking)
         {
-            string acadHash = drawing.ComputeHash();
-            audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
-                session, "export", "export-rejected", drawingPath,
-                JsonSerializer.Serialize(new { reason = "acad-working-dxf", guidance = AcadWorkingDxfGuidance }),
-                acadHash, acadHash, "", ""));
-            stderr.WriteLine(AcadWorkingDxfGuidance);
-            return 1;
+            try
+            {
+                exportSource = ConvertAcadDwgSnapshot(drawing.SourcePath);
+                acadSnapDir = Path.GetDirectoryName(exportSource);
+            }
+            catch (Exception ex)
+            {
+                // 转换失败 → fail-closed 拒绝（保留安全侧）：复用既有 export-rejected kind
+                // （params reason/guidance/conversionError），不产任何衍生产物，先于 COM 激活。
+                string acadHash = drawing.ComputeHash();
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "export", "export-rejected", drawingPath,
+                    JsonSerializer.Serialize(new { reason = "acad-working-dxf", guidance = AcadWorkingDxfGuidance, conversionError = ex.Message }),
+                    acadHash, acadHash, "", ""));
+                stderr.WriteLine(AcadWorkingDxfGuidance);
+                return 1;
+            }
         }
 
         ICadRuntime? runtime = RuntimeFactory != null
@@ -120,10 +166,22 @@ public static partial class CommandRouter
             : CreateRuntimeIfAvailable(stderr);
         try
         {
+            // acad working 派生 + 无厂商（降级）：降级产物即 ACadSharp DXF（残余崩溃风险），
+            // fail-closed 不旁路（镜像旧闸口径——acad 显式选择下降级交付同样拒绝）。
+            if (acadWorking && runtime == null)
+            {
+                string acadHash = drawing.ComputeHash();
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "export", "export-rejected", drawingPath,
+                    JsonSerializer.Serialize(new { reason = "acad-working-dxf", guidance = AcadWorkingDxfGuidance }),
+                    acadHash, acadHash, "", ""));
+                stderr.WriteLine(AcadWorkingDxfGuidance);
+                return 1;
+            }
             if (runtime != null)
                 ExportGating(runtime, agentDir, session, audit, op, stderr);
             var svc = new ExportService(runtime, CountEntities);
-            var result = svc.Export(drawing.SourcePath, outPath, session, audit, op);
+            var result = svc.Export(exportSource, outPath, session, audit, op);
             stdout.WriteLine(JsonSerializer.Serialize(new
             {
                 ok = result.Ok,
@@ -137,6 +195,7 @@ public static partial class CommandRouter
         finally
         {
             runtime?.Dispose();
+            CleanupAcadDwgSnapshot(acadSnapDir); // 临时 DWG 快照用后即清
         }
     }
 

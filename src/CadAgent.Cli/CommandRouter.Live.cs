@@ -41,19 +41,31 @@ public static partial class CommandRouter
             stderr.WriteLine("--live 失败: 事务前快照缺失");
             return (false, null, "事务前快照缺失");
         }
-        // I1 fail-closed 闸（PR#24 修复波，与 export 共用 AcadWorkingDxfGateRefuses 单点）：
+        // I1 闸口径升级（DWG 快照路径，与 export 共用 AcadWorkingDxfGateRefuses 单点，用户批准设计）：
         // 事务前快照=working DXF 同源拷贝（SnapshotStore.Take 保留 basename）——acad 运行时
-        // 打开即喂 ACadSharp 产物给 AutoCAD 2014（实证崩溃 0xE0000001）。先于运行时创建拒绝
-        // （不激活 COM），审计 com-replay-failed + guidance，exit 非零；影子审计链不受影响。
+        // 先转换 DWG 快照（DxfReader→DwgWriter 钉 AC1027，探针实证 2014 可直接 Open）→ 成功放行
+        // （rt.Open 喂 DWG）；转换失败仍 fail-closed 拒绝（先于运行时创建不激活 COM）+审计
+        // com-replay-failed + guidance，exit 非零；影子审计链不受影响。zwcad 路径零改动。
+        string liveSource = snap;
+        string? acadSnapDir = null;
         if (AcadWorkingDxfGateRefuses(snap, drawing.SourcePath))
         {
-            Audit("com-replay-failed", plan.PlanId, new { reason = "acad-working-dxf", error = AcadWorkingDxfGuidance });
-            stderr.WriteLine($"--live 失败: {AcadWorkingDxfGuidance}");
-            return (false, null, AcadWorkingDxfGuidance);
+            try
+            {
+                liveSource = ConvertAcadDwgSnapshot(snap);
+                acadSnapDir = Path.GetDirectoryName(liveSource);
+            }
+            catch (Exception ex)
+            {
+                Audit("com-replay-failed", plan.PlanId, new { reason = "acad-working-dxf", error = AcadWorkingDxfGuidance, conversionError = ex.Message });
+                stderr.WriteLine($"--live 失败: {AcadWorkingDxfGuidance}");
+                return (false, null, AcadWorkingDxfGuidance);
+            }
         }
         ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateRuntimeIfAvailable(stderr);
         if (rt == null)
         {
+            CleanupAcadDwgSnapshot(acadSnapDir); // 无厂商失败也清临时快照
             Audit("com-replay-failed", plan.PlanId, new { error = "无可用厂商运行时" });
             stderr.WriteLine("--live 失败: 无可用厂商运行时（--live 需活 CAD 会话）");
             return (false, null, "无可用厂商运行时");
@@ -62,7 +74,7 @@ public static partial class CommandRouter
         {
             try
             {
-                rt.Open(snap);
+                rt.Open(liveSource);
                 var results = new ComReplayService(rt, packages).Replay(plan, drawing);
                 foreach (var r in results)
                     Audit(r.Ok ? "com-replay" : "com-replay-failed", r.Kind, new { r.Kind, r.Error });
@@ -91,6 +103,10 @@ public static partial class CommandRouter
                 Audit("com-replay-failed", plan.PlanId, new { error = ex.Message });
                 stderr.WriteLine($"--live 重放异常: {ex.Message}");
                 return (false, null, ex.Message);
+            }
+            finally
+            {
+                CleanupAcadDwgSnapshot(acadSnapDir); // 临时 DWG 快照用后即清
             }
         }
     }

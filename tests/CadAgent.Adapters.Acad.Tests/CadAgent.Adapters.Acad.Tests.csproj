@@ -23,6 +23,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\CadAgent.Adapters.Acad\CadAgent.Adapters.Acad.csproj" />
     <ProjectReference Include="..\..\src\CadAgent.Data\CadAgent.Data.csproj" />
+    <ProjectReference Include="..\..\src\CadAgent.Cli\CadAgent.Cli.csproj" />
     <ProjectReference Include="..\CadAgent.Data.Tests\CadAgent.Data.Tests.csproj" />
   </ItemGroup>
 
