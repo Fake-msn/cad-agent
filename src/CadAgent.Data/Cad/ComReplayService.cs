@@ -169,7 +169,8 @@ public sealed class ComReplayService
         }
     }
 
-    internal static string HandleString(JsonElement p) => p.GetProperty("handle").ValueKind switch
+    // R10：public static——CLI 准入（Task 9）须复用同一归一实现（Data→Cli 无 IVT 先例，禁重实现）。
+    public static string HandleString(JsonElement p) => p.GetProperty("handle").ValueKind switch
     {
         JsonValueKind.Number => p.GetProperty("handle").GetUInt64().ToString(),
         _ => p.GetProperty("handle").GetString() ?? "",
@@ -177,7 +178,7 @@ public sealed class ComReplayService
 
     // 句柄归一（裁定）：剥 0x/0X 前缀→十进制串按 InvariantCulture Integer 解析→X 大写；
     // 已是 hex 串（含字母）或非法形态→ToUpperInvariant 原样大写返回。
-    internal static string HandleToHex(string handle)
+    public static string HandleToHex(string handle)
     {
         if (handle.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) handle = handle[2..];
         if (ulong.TryParse(handle, System.Globalization.NumberStyles.Integer,

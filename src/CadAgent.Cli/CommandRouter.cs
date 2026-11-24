@@ -235,6 +235,13 @@ public static partial class CommandRouter
             stderr.WriteLine(ex.Message);
             return 1;
         }
+        // spec 切片A §4.2：census Yellow 逐实体精准松绑（仅 --live 且计划全部为句柄寻址步骤；
+        // 判据/执行/读回/交付全在 NativeLivePlan——不适用返回 null 回落既有全图级拒绝）。
+        if (report.Level == GateLevel.Yellow && args.Contains("--live"))
+        {
+            int? nativeRc = NativeLivePlan(drawingPath, plan, drawing, agentDir, session, audit, op, stderr);
+            if (nativeRc != null) return nativeRc.Value;
+        }
         if (GateRefusesRun(report))
         {
             // spec 硬要求6（T3 收紧）：信息不完整（Red）或部分未解析（Yellow）图纸禁止修改——
