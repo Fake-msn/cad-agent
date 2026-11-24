@@ -41,57 +41,79 @@ public static partial class CommandRouter
             stderr.WriteLine("--live 失败: 事务前快照缺失");
             return (false, null, "事务前快照缺失");
         }
-        // I1 fail-closed 闸（PR#24 修复波，与 export 共用 AcadWorkingDxfGateRefuses 单点）：
+        // I1 闸口径升级（DWG 快照路径，与 export 共用 AcadWorkingDxfGateRefuses 单点，用户批准设计）：
         // 事务前快照=working DXF 同源拷贝（SnapshotStore.Take 保留 basename）——acad 运行时
-        // 打开即喂 ACadSharp 产物给 AutoCAD 2014（实证崩溃 0xE0000001）。先于运行时创建拒绝
-        // （不激活 COM），审计 com-replay-failed + guidance，exit 非零；影子审计链不受影响。
+        // 先转换 DWG 快照（DxfReader→DwgWriter 钉 AC1027，探针实证 2014 可直接 Open）→ 成功放行
+        // （rt.Open 喂 DWG）；转换失败仍 fail-closed 拒绝（先于运行时创建不激活 COM）+审计
+        // com-replay-failed + guidance，exit 非零；影子审计链不受影响。zwcad 路径零改动。
+        string liveSource = snap;
+        string? acadSnapDir = null;
         if (AcadWorkingDxfGateRefuses(snap, drawing.SourcePath))
         {
-            Audit("com-replay-failed", plan.PlanId, new { reason = "acad-working-dxf", error = AcadWorkingDxfGuidance });
-            stderr.WriteLine($"--live 失败: {AcadWorkingDxfGuidance}");
-            return (false, null, AcadWorkingDxfGuidance);
+            try
+            {
+                liveSource = ConvertAcadDwgSnapshot(snap);
+                acadSnapDir = Path.GetDirectoryName(liveSource);
+            }
+            catch (Exception ex)
+            {
+                Audit("com-replay-failed", plan.PlanId, new { reason = "acad-working-dxf", error = AcadWorkingDxfGuidance, conversionError = ex.Message });
+                stderr.WriteLine($"--live 失败: {AcadWorkingDxfGuidance}");
+                return (false, null, AcadWorkingDxfGuidance);
+            }
         }
         ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateRuntimeIfAvailable(stderr);
         if (rt == null)
         {
+            CleanupAcadDwgSnapshot(acadSnapDir); // 无厂商失败也清临时快照
             Audit("com-replay-failed", plan.PlanId, new { error = "无可用厂商运行时" });
             stderr.WriteLine("--live 失败: 无可用厂商运行时（--live 需活 CAD 会话）");
             return (false, null, "无可用厂商运行时");
         }
-        using (rt)
+        // M-1（微修复波）：清理序镜像 Export（runtime?.Dispose() 先、清快照后）——失败路径
+        // 厂商文档仍打开（文件锁），清理若先于 using(rt) Dispose，Directory.Delete 因锁失败
+        // （best-effort 吞掉）→%TEMP% 孤儿 GUID 目录。外层 finally 保证清理在 Dispose 之后。
+        try
         {
-            try
+            using (rt)
             {
-                rt.Open(snap);
-                var results = new ComReplayService(rt, packages).Replay(plan, drawing);
-                foreach (var r in results)
-                    Audit(r.Ok ? "com-replay" : "com-replay-failed", r.Kind, new { r.Kind, r.Error });
-                var failed = results.FirstOrDefault(r => !r.Ok);
-                if (failed != null)
+                try
                 {
-                    stderr.WriteLine($"--live 重放失败: {failed.Kind}: {failed.Error}");
-                    return (false, null, failed.Error);
+                    rt.Open(liveSource);
+                    var results = new ComReplayService(rt, packages).Replay(plan, drawing);
+                    foreach (var r in results)
+                        Audit(r.Ok ? "com-replay" : "com-replay-failed", r.Kind, new { r.Kind, r.Error });
+                    var failed = results.FirstOrDefault(r => !r.Ok);
+                    if (failed != null)
+                    {
+                        stderr.WriteLine($"--live 重放失败: {failed.Kind}: {failed.Error}");
+                        return (false, null, failed.Error);
+                    }
+                    int vendorCount = rt.EntityCount();
+                    int shadowCount = drawing.Doc.Entities.Count();
+                    if (vendorCount != shadowCount)
+                    {
+                        Audit("com-replay-divergence", plan.PlanId, new { vendorCount, shadowCount });
+                        stderr.WriteLine($"--live 读回分歧: 厂商 {vendorCount} vs 影子 {shadowCount}");
+                        return (false, null, "读回分歧");
+                    }
+                    string outPath = drawing.SourcePath + ".live.dwg";
+                    rt.SaveAs(outPath);
+                    rt.Close(false);
+                    Audit("com-replay-committed", plan.PlanId, new { outPath, vendorCount, shadowCount });
+                    return (true, outPath, null);
                 }
-                int vendorCount = rt.EntityCount();
-                int shadowCount = drawing.Doc.Entities.Count();
-                if (vendorCount != shadowCount)
+                catch (Exception ex)
                 {
-                    Audit("com-replay-divergence", plan.PlanId, new { vendorCount, shadowCount });
-                    stderr.WriteLine($"--live 读回分歧: 厂商 {vendorCount} vs 影子 {shadowCount}");
-                    return (false, null, "读回分歧");
+                    Audit("com-replay-failed", plan.PlanId, new { error = ex.Message });
+                    stderr.WriteLine($"--live 重放异常: {ex.Message}");
+                    return (false, null, ex.Message);
                 }
-                string outPath = drawing.SourcePath + ".live.dwg";
-                rt.SaveAs(outPath);
-                rt.Close(false);
-                Audit("com-replay-committed", plan.PlanId, new { outPath, vendorCount, shadowCount });
-                return (true, outPath, null);
             }
-            catch (Exception ex)
-            {
-                Audit("com-replay-failed", plan.PlanId, new { error = ex.Message });
-                stderr.WriteLine($"--live 重放异常: {ex.Message}");
-                return (false, null, ex.Message);
-            }
+        }
+        finally
+        {
+            CleanupAcadDwgSnapshot(acadSnapDir); // 临时 DWG 快照用后即清（Dispose 之后，M-1）
         }
     }
 }

@@ -24,6 +24,9 @@ public sealed class ExportService
     public ExportResult Export(string sourceDxf, string outDwg, string sessionId,
         IAuditStore audit, OperatorIdentity op)
     {
+        // 保真锚口径（I2 微修复波注记）：sourceCount 以传入源为锚——acad working 派生路径
+        // 传入的是 DWG 快照，Cli 侧（CommandRouter.Export）已在 Open 前校验 working↔快照
+        // 实体计数相等（不等→snapshot-count-mismatch 拒绝），故快照锚==working 锚不漂移。
         int sourceCount = _countEntities(sourceDxf);
         if (_runtime == null)
         {

@@ -5,10 +5,12 @@ using CadAgent.Data.Tests;
 namespace CadAgent.Cli.Tests;
 
 /// <summary>
-/// I1 fail-closed 闸（PR#24 修复波）：acad + working 派生 DXF 输入 → export/--live
-/// 先于运行时创建拒绝（不激活 COM）+ 审计留痕 + guidance，exit 非零；zwcad 同输入放行不回归。
-/// fake seam 单测（非真机）：RuntimeFactory 注入"创建即抛"假工厂钉住闸先于运行时创建。
-/// 静态 seam（RuntimeSelector/RuntimeFactory）用完即还原（本程序集已禁并行，见 AssemblyInfo）。
+/// I1 fail-closed 闸（PR#24 修复波；DWG 快照路径升级后口径）：acad + working 派生 DXF 输入
+/// 先转换 DWG 快照（见 AcadDwgSnapshotTests 成功路径）；**转换失败**仍先于运行时创建拒绝
+/// （不激活 COM）+ 审计留痕 + guidance，exit 非零；zwcad 同输入放行不回归。
+/// 本类钉住转换失败 fail-closed 安全侧：ConvertAcadDwgSnapshot 注入抛 + RuntimeFactory
+/// 注入"创建即抛"假工厂钉住拒绝先于运行时创建。
+/// 静态 seam（RuntimeSelector/RuntimeFactory/ConvertAcadDwgSnapshot）用完即还原（本程序集已禁并行，见 AssemblyInfo）。
 /// </summary>
 public class AcadWorkingDxfGateTests : IDisposable
 {
@@ -17,6 +19,7 @@ public class AcadWorkingDxfGateTests : IDisposable
     private readonly string _plan;
     private readonly Func<string?> _originalSelector = CommandRouter.RuntimeSelector;
     private readonly Func<ICadRuntime?>? _originalFactory = CommandRouter.RuntimeFactory;
+    private readonly Func<string, string> _originalConverter = CommandRouter.ConvertAcadDwgSnapshot;
 
     public AcadWorkingDxfGateTests()
     {
@@ -32,6 +35,7 @@ public class AcadWorkingDxfGateTests : IDisposable
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         CommandRouter.RuntimeSelector = _originalSelector;
         CommandRouter.RuntimeFactory = _originalFactory;
+        CommandRouter.ConvertAcadDwgSnapshot = _originalConverter;
         Directory.Delete(_project, true);
         File.Delete(_drawing);
         if (File.Exists(_drawing + ".live.dwg")) File.Delete(_drawing + ".live.dwg");
@@ -48,11 +52,16 @@ public class AcadWorkingDxfGateTests : IDisposable
     private static ICadRuntime MustNotCreateRuntime() =>
         throw new InvalidOperationException("I1 闸必须先于运行时创建（不激活 COM）");
 
+    /// <summary>注入转换失败（fake DwgWriter 抛）：钉住转换失败 fail-closed 拒绝先于 COM 激活。</summary>
+    private static void InjectConversionFailure() =>
+        CommandRouter.ConvertAcadDwgSnapshot = _ => throw new InvalidOperationException("fake DwgWriter 转换失败");
+
     [Fact]
     public void Export_Acad_DxfSource_RefusedAudited_NoArtifacts()
     {
         CommandRouter.RuntimeSelector = () => "acad";
         CommandRouter.RuntimeFactory = MustNotCreateRuntime;
+        InjectConversionFailure();
         var (code, _, stderr) = Run("export", "--drawing", _drawing, "--out", Path.Combine(_project, "out.dwg"));
         Assert.Equal(1, code);
         Assert.Contains("0xE0000001", stderr);
@@ -80,6 +89,7 @@ public class AcadWorkingDxfGateTests : IDisposable
         {
             CommandRouter.RuntimeSelector = () => "acad";
             CommandRouter.RuntimeFactory = MustNotCreateRuntime;
+            InjectConversionFailure();
             var (code, _, stderr) = Run("export", "--drawing", dwg, "--out", Path.Combine(_project, "out.dwg"));
             Assert.Equal(1, code);
             Assert.Contains("0xE0000001", stderr);
@@ -108,6 +118,7 @@ public class AcadWorkingDxfGateTests : IDisposable
     {
         CommandRouter.RuntimeSelector = () => "acad";
         CommandRouter.RuntimeFactory = MustNotCreateRuntime;
+        InjectConversionFailure();
         var (code, _, stderr) = Run("run", _plan, "--drawing", _drawing, "--live");
         Assert.Equal(1, code);
         Assert.Contains("0xE0000001", stderr);
