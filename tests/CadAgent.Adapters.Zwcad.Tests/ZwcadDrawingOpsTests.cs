@@ -51,13 +51,16 @@ public class ZwcadDrawingOpsTests : IDisposable
         rt.AddText(50, 50, "生成式标注", 5);
         rt.AddCircle(20, 20, 7.5);
         Assert.Equal(4, rt.EntityCount());
-        rt.EnsureBlock("SYM", new BlockPrimitive[]
+        var symPrims = new BlockPrimitive[]
         {
             new BlockCircle(0, 0, 1.5),
             new BlockLine(-2.5, 0, 2.5, 0),
             new BlockLine(0, -2.5, 0, 2.5),
-        });
-        rt.EnsureBlock("SYM", Array.Empty<BlockPrimitive>()); // 幂等
+        };
+        rt.EnsureBlock("SYM", symPrims);
+        // 幂等（对齐 Acad 语义：同基元集 count 相等→复用；空集不再作幂等探针——
+        // 本方创建块 count 不一致会走清除重建通道）。
+        rt.EnsureBlock("SYM", symPrims);
         rt.AddInsert("SYM", 60, 60);
         Assert.Equal(5, rt.EntityCount());
         rt.SaveAs(_dwg);
