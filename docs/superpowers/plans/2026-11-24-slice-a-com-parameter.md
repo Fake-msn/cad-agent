@@ -1276,3 +1276,11 @@ git commit -m "test(acad): 切片A条件真机证据（读参基准/忙窗/句�
 - 预检裁定 R1-R7（签名/载体/句柄 ops/拆分/生成类拒/Layer/bbox 尽力）；执行期裁定 R8-R12（--native 禁预激活/异常降级审计/助手 public/句柄双形态/层名忽略大小写）。详见 `.superpowers/sdd/2026-11-24-slice-a-com-parameter/progress.md`（workspace 已随收尾删除，裁定已收录于 controller 终报）。
 - T1 4aed43c / T2 e200f08+46085a2（fix1）/ T3 6936b19 / T4 060531f+7b90baf（fix1）/ T5 ad250c3 / T6 bd2ff2a / T7 6e5ace2 / T8 f6472a0 / T9 3807657+61c42f4（fix1）/ T10 b6e40ac+1372d76+91201b7。
 - T10 真机迫使的生产修复：acad.exe 路径解析链（注册表→ProgramFiles→裸名）+ GetBoundingBox by-ref 回写（ParameterModifier）。真机 3/3 绿；全量门禁 1445/0/0（Acad 65/65 零跳过）。
+
+### 终审与统一修复波（2026-11-25）
+
+- 全分支终审（16 提交）: FIX-BEFORE-MERGE，0 Critical / 5 Important 必修 + 记录边界项 + minors。
+- 统一修复波 commit fae1230（代码+测试）+ 20fc254（docs）：①产品词表归一（move-entity/delete-entity 准入接受并在克隆计划改写，仅 Yellow+--live 路径；ComReplayService 零改动）②零写入证据窗闭合（Dispose 后复算源件 SHA；liveSha 空 fail-closed；恶写源件回归）③ReadNativeParams(path) 改 ReadOnly=true + _doc 占用守卫（执行侧保持读写）④ROT 归属校验（HWND vs 本方 proc；不匹配只清本方 Process 绝不 Quit 外来实例）⑤拒绝面四分支 CLI 测试（overlay 缺失/损坏/ReadIncomplete/空SHA）⑥design §6 真机整链 E2E=未跑（验证边界记录：运行时层真机 3 绿 + CLI 层 fake E2E）⑦§12 ReadOk=false 可达性措辞更正 ⑧键表更正为三键 ⑨resolver 逐根隔离+x86 候选+信任边界注释 ⑩--native 文案 ⑪成功 stdout 收据{ok,outPath,handles} ⑫ReadNativeParams 占用守卫测试。
+- scoped 复审: 12/12 ADDRESSED，0 新 Critical/Important；全 sln 1456/0/0（Acad 68 含真机）。
+- 残留 minors（仅记录，不阻塞）：_launchedProc 死状态；x86 目录 VersionRank 语义倒挂（注册表优先路径无感）；Quit 忙拒耗尽后哈希窗极小竞态（Dispose 既有 best-effort 语义）。
+- 继承追踪（跨切片）：ReadOk=false 生产近不可达（整读失败走 native-read-failed 审计）；非 acad 默认→StaleMismatch 而非"需 acad"提示；--vision+--native 静默丢弃（与 --vision+--skill 拒绝先例未对齐）；NativeEntities 陈旧行剪枝口径；Green --live 直传 ComReplayService 遇编辑类产品 kind 无 case（既有问题非本切片引入）。
