@@ -30,6 +30,20 @@ public interface ICadRuntime : IDisposable
     void EnsureBlock(string blockName, IReadOnlyList<BlockPrimitive> primitives);
     /// <summary>模型空间实体计数（读回闸口用）。</summary>
     int EntityCount();
+
+    // 切片A COM 原生读参 + 句柄寻址（默认实现=零厂商改动：读空/响亮拒绝）
+    /// <summary>COM 原生读参（spec 切片A）：drawingPath!=null=自启+自开+读完关；null=读当前已开文档。
+    /// 无厂商/不支持→空（默认实现）。</summary>
+    IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) =>
+        Array.Empty<NativeEntityParam>();
+
+    /// <summary>句柄寻址修改（spec 切片A §4.2 native-live 通道）；不支持→响亮拒绝（默认实现）。</summary>
+    void ChangeLayerByHandle(string hexHandle, string layer) =>
+        throw new CadRuntimeException("运行时不支持句柄寻址操作（change-layer）");
+    void MoveByHandle(string hexHandle, double dx, double dy) =>
+        throw new CadRuntimeException("运行时不支持句柄寻址操作（move）");
+    void DeleteByHandle(string hexHandle) =>
+        throw new CadRuntimeException("运行时不支持句柄寻址操作（delete）");
 }
 
 /// <summary>厂商运行时调用失败。</summary>
