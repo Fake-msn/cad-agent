@@ -134,4 +134,10 @@ CLI semantic scan --native
 - TDbSymbArrow 双通道拒 eInvalidInput 根因、块内零 extents 文本、块定义 55 TDb 实体、电气 TDbE* 真机核实——边界补齐留后续。
 - 整图 Green 升级、阈值升 Green——本切片不做（用户裁定逐实体精准松绑）。
 - 文件级 TDb 修改通道（Find 走 Doc.Entities）——松绑仅 live 通道，文件级 TDb 编辑非本期。
+  **范围外更正（2026-11-25，T10 收尾）**：原"句柄寻址执行器"曾被本行措辞读作一并 deferred，实际
+  **已在本计划 T8/T9 交付**——`ICadRuntime.ChangeLayerByHandle/MoveByHandle/DeleteByHandle`（AcadRuntime
+  实现，ModelSpace 句柄遍历定位 + 单写基元独立忙重试 + 未命中"句柄不存在于模型空间"响亮拒绝）、
+  `ComReplayService` 编辑类 kind 接线、run 主闸逐实体松绑准入（Yellow + `--live` + kind 白名单 +
+  handle 必需 + 重读一致 Pass）+ native-live 独执行 + 源件零写入（`.live.dwg` 交付）。**仍范围外**：
+  文件级 TDb 编辑（不经活会话、直接改磁盘对象图）、生成类步骤的 Yellow 松绑、整图 Green 升级。
 - 天正 profile 名/ARX 清单的自动发现——初版硬编码 TElec20V5（本机实证值），参数化留后续。
