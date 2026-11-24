@@ -14,18 +14,27 @@ namespace CadAgent.Cli;
 /// <summary>
 /// 切片A §4.2：run 主闸逐实体精准松绑准入 + native-live 独执行（spec §4.2）。
 /// census Yellow 图纸全图级拦截（GateRefusesRun）的精准旁路：仅当 `--live` + 计划**全部**
-/// 步骤为 kind ∈ {change-layer,move,delete} 且含 handle 参数，且每个目标句柄对
-/// overlay.NativeEntities 通过 NativeGateRefinement 判据（本轮 live 重读一致）时，对原生
-/// DWG 原文开活厂商会话执行，读回校验通过后交付 &lt;drawing&gt;.live.dwg。
+/// 步骤为 kind ∈ {change-layer,move,move-entity,delete,delete-entity} 且含 handle 参数，
+/// 且每个目标句柄对 overlay.NativeEntities 通过 NativeGateRefinement 判据（本轮 live 重读
+/// 一致）时，对原生 DWG 原文开活厂商会话执行，读回校验通过后交付 &lt;drawing&gt;.live.dwg。
+/// **kind 词汇归一**（最终复审 finding 1）：产品计划 kind 是 `move-entity`/`delete-entity`
+/// （HandlerRegistry/EditHandlers），Replay 通道 case 是 `move`/`delete`——准入侧两套词汇
+/// 全收，克隆 Replay 计划时改写为运行时词汇（不改 ComReplayService 既有 case）。
 /// **会话顺序**（@T10 修复）：先 ReadNativeParams(path≠null)（经 EnsureAppTArch 以 /p 拉起
-/// 天正并缓存 _app，返回值即准入重读）→ Open 原图（复用同一 _app）→ 执行 →
-/// ReadNativeParams()（null 形态读当前活文档）。颠倒会令默认 profile 缓存使 TArch 永不加载。
+/// 天正并缓存 _app，返回值即准入重读；该形态以 ReadOnly=true 打开原图不另建副本）→ Open 原图
+/// 读改写（执行侧需要；复用同一 _app）→ 执行 → ReadNativeParams()（null 形态读当前活文档）。
+/// 颠倒会令默认 profile 缓存使 TArch 永不加载。
 /// **原图零写入**（源件 SHA256 前后比对，两侧空哈希均按验证失败 fail-closed；唯一写出是
-/// .live.dwg 新文件）；不创建 tx 快照、不调 StepEngine（native-live 独执行）。审计全部落
-/// area "run"（同 store/session/op/planId）：
+/// .live.dwg 新文件）。**证据窗口闭合**（复审 finding 2）：交付后源件 SHA 复核推迟到
+/// SaveAs/Close 之后且运行时 Dispose（内部 Close+Quit+等待进程退出）之后——文档关闭且实例
+/// 退出前哈希可能读到未落定字节；交付件 liveSha 不可验证同样按失败退出（保留 .live.dwg
+/// 作为证据但诚实报失败）。
+/// 不创建 tx 快照、不调 StepEngine（native-live 独执行）。审计全部落 area "run"
+/// （同 store/session/op/planId）：
 /// native-gate-pass{handles,sourceSha,rereadHash}/native-gate-refused{verdicts|reason}/
 /// native-live-step{kind,handle}/native-live-committed{outPath,sourceSha,liveSha}/
-/// native-live-failed{step?,error|readback}。
+/// native-live-failed{step?,error|readback|reason}。
+/// 成功路径 stdout 收据（finding 11）：{"ok":true,"outPath":...,"handles":[...]}。
 /// R11（句柄歧义防护）：先"剥 0x+大写"原串查 overlay（全数字串可能是 hex，如 "21000"），
 /// 未命中再十进制→hex 查；Evaluate 与运行时 op 用同一命中的 overlay 形态（Replay 跑句柄
 /// 已替换的计划副本，避免 HandleToHex 二次归一改错实体）。R12：change-layer 空/空白层名
@@ -39,21 +48,28 @@ public static partial class CommandRouter
     // move 读回 bbox 分量容差（R6：after bbox 可得则必验平移）。
     private const double BboxTolerance = 1e-6;
 
+    // 哈希缝（复审 finding 2d）：测试注入空串/定向空值以覆盖 fail-closed 分支；
+    // 生产默认=真实 SHA256（不可读→空串，由调用侧判定失败）。
+    internal static Func<string, string> Sha256File = SafeSha256File;
+
     private static int? NativeLivePlan(string drawingPath, StepPlan plan, DrawingSession drawing,
-        string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op, TextWriter stderr)
+        string agentDir, string session, SqliteAuditStore audit, OperatorIdentity op,
+        TextWriter stdout, TextWriter stderr)
     {
         // 1. 准入分类（R5）：零步骤/任一步骤无 handle 参数/kind 非句柄寻址编辑类 → 不适用，
         // 回落既有 run-rejected（生成类/全图级修改不因 Yellow 松绑放开；kind 白名单先于
         // 一切运行时副作用——生成类步骤即便带 handle 也不得挤进 Replay 通道）。
+        // 词汇归一（finding 1）：产品计划 kind（move-entity/delete-entity）与运行时 case
+        // （move/delete）两套全收；归一后仍非句柄寻址编辑类 → 回落。
         if (plan.Steps.Count == 0) return null;
         foreach (var step in plan.Steps)
         {
-            if (step.Kind is not ("change-layer" or "move" or "delete")) return null;
+            if (NormalizeKind(step.Kind) is not ("change-layer" or "move" or "delete")) return null;
             if (step.Params.ValueKind != JsonValueKind.Object
                 || !step.Params.TryGetProperty("handle", out _)) return null;
         }
 
-        string sourceSha = SafeSha256File(drawingPath);
+        string sourceSha = Sha256File(drawingPath);
         void Audit(string kind, string target, object payload, string? afterHash = null) =>
             audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                 session, "run", kind, target, JsonSerializer.Serialize(payload),
@@ -133,6 +149,7 @@ public static partial class CommandRouter
         }
         if (verdicts.Count > 0) return RefuseVerdicts(verdicts);
 
+        string outPath = drawingPath + ".live.dwg";
         try
         {
             // 4. 活会话对准**原图**（原生 DWG，TDb 存活）。运行时获取镜像 T6 R8 裁定：
@@ -146,11 +163,12 @@ public static partial class CommandRouter
                 stderr.WriteLine("native-live 失败: 无可用厂商运行时（native-live 需活 CAD 会话）");
                 return 1;
             }
-            using (rt)
+            try
             {
                 // 4a. 天正会话开路（@T10 修复，顺序不可颠倒）：先 path 形态读参——
                 // ReadNativeParams(path≠null) 内部经 EnsureAppTArch 以 /p 拉起 TArch profile
-                // 并把 _app 缓存；返回值即准入重读事实（自开自关的独立副本，读完即关）。
+                // 并把 _app 缓存；返回值即准入重读事实（以 ReadOnly=true 打开原图读完即关，
+                // 不另建副本——复审 finding 3）。
                 // 若先 Open（EnsureApp 默认 profile 先缓存 _app），EnsureAppTArch 将早退复用
                 // 默认实例、TArch 永不加载→真机 TDb 目标全 StaleMismatch（通道失效）。
                 var reread = rt.ReadNativeParams(drawingPath);
@@ -172,11 +190,11 @@ public static partial class CommandRouter
                 string rereadHash = RereadHash(reread, matched);
                 Audit("native-gate-pass", drawingPath, new { handles = matched, sourceSha, rereadHash });
 
-                // 4b. 执行窗口：Open 原图——EnsureApp 复用 4a 已缓存的 TArch _app（同一实例
-                // 开原始 DWG，TDb 存活）；实例启动已由 4a 完成，此处不再触发新实例。
+                // 4b. 执行窗口：Open 原图读改写（执行侧需要）——EnsureApp 复用 4a 已缓存的
+                // TArch _app（同一实例开原始 DWG，TDb 存活）；实例启动已由 4a 完成。
                 rt.Open(drawingPath);
 
-                // 5. 全 Pass → 句柄替换副本执行（Replay 内置归一不得再改写已命中形态）。
+                // 5. 全 Pass → 句柄/kind 归一替换副本执行（Replay 内置归一不得再改写已命中形态）。
                 var replayPlan = ReplaceStepHandles(plan, matched);
                 var results = new ComReplayService(rt).Replay(replayPlan, drawing);
                 for (int i = 0; i < results.Count; i++)
@@ -208,37 +226,28 @@ public static partial class CommandRouter
                     }
                     exp.BboxNull = bboxNull;
                 }
-                // 逐 step 审计（按句柄首现+计划内顺序）；move 的 bbox 不可得降级如实披露。
+                // 逐 step 审计（按句柄首现+计划内顺序；kind 记运行时口径）；move 的 bbox
+                // 不可得降级如实披露。
                 foreach (var exp in expectations)
                     foreach (var step in exp.Steps)
-                        Audit("native-live-step", exp.Handle, exp.BboxNull && step.Kind == "move"
-                            ? new { kind = step.Kind, handle = exp.Handle, readback = "reread-bbox-null" }
-                            : new { kind = step.Kind, handle = exp.Handle });
+                    {
+                        string kind = NormalizeKind(step.Kind);
+                        Audit("native-live-step", exp.Handle, exp.BboxNull && kind == "move"
+                            ? new { kind, handle = exp.Handle, readback = "reread-bbox-null" }
+                            : new { kind, handle = exp.Handle });
+                    }
 
-                // 7. 原图零写入断言（源件 SHA256 前后比对）→ 唯一写出是 .live.dwg 新文件。
-                //    空 SHA 不得 ""=="" 假通过（fail-open）：哈希不可得即视为验证失败。
-                string sourceShaNow = SafeSha256File(drawingPath);
-                if (string.IsNullOrEmpty(sourceShaNow))
-                {
-                    Audit("native-live-failed", drawingPath,
-                        new { error = "源图 SHA 不可验证（原图零写入契约无法断言）", reason = "sourcesha-unverifiable", sourceSha, sourceShaNow });
-                    stderr.WriteLine("native-live 失败: 源图 SHA 不可验证（原图零写入契约无法断言）");
-                    return 1;
-                }
-                if (sourceShaNow != sourceSha)
-                {
-                    Audit("native-live-failed", drawingPath,
-                        new { error = "源图字节被改动（原图零写入契约破坏）", sourceSha, sourceShaNow });
-                    stderr.WriteLine("native-live 失败: 源图字节被改动（原图零写入契约破坏）");
-                    return 1;
-                }
-                string outPath = drawingPath + ".live.dwg";
+                // 7. 交付：唯一写出是 .live.dwg 新文件（SaveAs+Close 仍在会话内；证据哈希在
+                //    运行时 Dispose 后读取，见 finally 之后的零写入断言）。
                 rt.SaveAs(outPath);
                 rt.Close(false);
-                string liveSha = SafeSha256File(outPath);
-                Audit("native-live-committed", outPath, new { outPath, sourceSha, liveSha }, liveSha);
-                stderr.WriteLine($"native-live: 已交付 {outPath}（源图未改写）");
-                return 0;
+            }
+            finally
+            {
+                // 证据窗口闭合（复审 finding 2a）：Dispose 内部 Close(false)+Quit+等待进程退出。
+                // 源件/交付件哈希必须在文档关闭且实例退出后读取——Open 期间源文件句柄由
+                // AutoCAD 持有，此时读到的不完整/被拒字节会污染零写入断言。Dispose 自身不抛。
+                rt.Dispose();
             }
         }
         catch (Exception ex)
@@ -247,7 +256,55 @@ public static partial class CommandRouter
             stderr.WriteLine($"native-live 失败: {ex.Message}（未交付 .live.dwg，原图零写入）");
             return 1;
         }
+
+        // 8. 原图零写入断言（源件 SHA256 前后比对；窗口已闭合）→ 唯一写出是 .live.dwg。
+        //    空 SHA 不得 ""=="" 假通过（fail-open）：哈希不可得即视为验证失败。
+        string sourceShaNow = Sha256File(drawingPath);
+        if (string.IsNullOrEmpty(sourceShaNow))
+        {
+            Audit("native-live-failed", drawingPath,
+                new { error = "源图 SHA 不可验证（原图零写入契约无法断言）", reason = "sourcesha-unverifiable", sourceSha, sourceShaNow });
+            stderr.WriteLine("native-live 失败: 源图 SHA 不可验证（原图零写入契约无法断言）");
+            return 1;
+        }
+        if (sourceShaNow != sourceSha)
+        {
+            Audit("native-live-failed", drawingPath,
+                new { error = "源图字节被改动（原图零写入契约破坏）", sourceSha, sourceShaNow });
+            stderr.WriteLine($"native-live 失败: 源图字节被改动（原图零写入契约破坏；{outPath} 已产出但按失败退出）");
+            return 1;
+        }
+        // 交付件证据（复审 finding 2b）：liveSha 不可验证同样按失败退出——交付件可读性
+        // 未证不得报成功；保留 .live.dwg 作为诊断证据但审计/退出码诚实报失败。
+        string liveSha = Sha256File(outPath);
+        if (string.IsNullOrEmpty(liveSha))
+        {
+            Audit("native-live-failed", outPath,
+                new { outPath, error = "交付件 SHA 不可验证（.live.dwg 可读性未证）", reason = "liveSha-unverifiable", sourceSha, liveSha });
+            stderr.WriteLine($"native-live 失败: 交付件 {outPath} SHA 不可验证（可读性未证，按失败退出；文件保留供诊断）");
+            return 1;
+        }
+        Audit("native-live-committed", outPath, new { outPath, sourceSha, liveSha }, liveSha);
+        // 成功收据（finding 11）：json 管道消费面（stdout 仅此一条，与 run 绿色路径同口径）。
+        stdout.WriteLine(JsonSerializer.Serialize(new
+        {
+            ok = true,
+            outPath,
+            handles = matched.Select(h => h!).ToArray()
+        }, JsonOpts));
+        stderr.WriteLine($"native-live: 已交付 {outPath}（源图未改写）");
+        return 0;
     }
+
+    /// <summary>产品计划 kind ↔ Replay 运行时 kind 归一（复审 finding 1）：生成侧词汇
+    /// move-entity/delete-entity → 运行时 case move/delete；其余原样（change-layer 两侧同名）。
+    /// 仅准入/Replay 克隆使用，ComReplayService case 词汇零改动。</summary>
+    private static string NormalizeKind(string kind) => kind switch
+    {
+        "move-entity" => "move",
+        "delete-entity" => "delete",
+        _ => kind,
+    };
 
     /// <summary>R11 句柄形态匹配：候选①剥 0x+大写原串精确命中 overlay；候选②未命中且
     /// 可十进制解析→ToString("X") 再命中；仍不命中→null（该步骤 NotRead）。</summary>
@@ -276,10 +333,9 @@ public static partial class CommandRouter
         !p.TryGetProperty("layer", out var v) || v.ValueKind != JsonValueKind.String
         || string.IsNullOrWhiteSpace(v.GetString());
 
-    /// <summary>句柄已命中副本（R10/R11）：以 JsonNode 仅替换 handle 键，其余参数逐字保留。
-    /// 替换值为 <see cref="ReplayHandleArg"/>——经 ComReplayService.HandleToHex 归一后**恰等于**
-    /// 命中的 overlay 形态（全数字 hex 句柄如 "21000" 若直传会被十进制归一改错实体，故喂其
-    /// hex 值的十进制形态，归一后回落 "21000"）。</summary>
+    /// <summary>句柄已命中副本（R10/R11）：以 JsonNode 仅替换 handle 键，其余参数逐字保留；
+    /// kind 同步归一（move-entity→move / delete-entity→delete，复审 finding 1）——Replay
+    /// 通道 case 词汇与产品计划词汇的解耦点，ComReplayService 零改动。</summary>
     private static StepPlan ReplaceStepHandles(StepPlan plan, IReadOnlyList<string?> matched)
     {
         var steps = new List<StepSpec>(plan.Steps.Count);
@@ -292,7 +348,7 @@ public static partial class CommandRouter
                 throw new InvalidPlanException($"步骤 {i} 参数不是 JSON 对象，无法保留句柄替换");
             obj["handle"] = ReplayHandleArg(matched[i]!);
             using var doc = JsonDocument.Parse(obj.ToJsonString());
-            steps.Add(new StepSpec(step.Kind, doc.RootElement.Clone()));
+            steps.Add(new StepSpec(NormalizeKind(step.Kind), doc.RootElement.Clone()));
         }
         return new StepPlan(plan.PlanId, steps);
     }
@@ -342,7 +398,9 @@ public static partial class CommandRouter
             }
             var step = plan.Steps[i];
             exp.Steps.Add(step);
-            switch (step.Kind)
+            // 词汇归一（finding 1）：产品计划 move-entity/delete-entity 与运行时 move/delete
+            // 同判——聚合读回期望按运行时语义归类。
+            switch (NormalizeKind(step.Kind))
             {
                 case "delete":
                     exp.Delete = true;

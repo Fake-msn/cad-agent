@@ -19,6 +19,8 @@ public class AcadReadNativeParamsTests : IDisposable
     private readonly Func<string, Process?> _origLauncher = AcadRuntime.ProcessLauncher;
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
     private readonly Func<string[]> _origNames = VendorGuard.ProcessNames;
+    private readonly Func<string, Type?> _origProgId = AcadRuntime.ProgIdResolver;
+    private readonly Func<Type, object?> _origCreate = AcadRuntime.CreateComInstance;
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
 
@@ -37,6 +39,8 @@ public class AcadReadNativeParamsTests : IDisposable
         AcadRuntime.ProcessLauncher = _origLauncher;
         AcadAttach.ActiveObjectResolver = _origActive;
         VendorGuard.ProcessNames = _origNames;
+        AcadRuntime.ProgIdResolver = _origProgId;
+        AcadRuntime.CreateComInstance = _origCreate;
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
     }
@@ -127,7 +131,8 @@ public class AcadReadNativeParamsTests : IDisposable
         public void Close(bool save) { _calls.Add($"Doc.Close({save})"); Closed = true; }
     }
 
-    /// <summary>假 Documents：Gate1 读 Count（≥1）；Open 返回预置文档并记录路径。</summary>
+    /// <summary>假 Documents：Gate1 读 Count（≥1）；Open 两种形态——单参（生产 Open 读改写，
+    /// native-live 执行窗口用）与双参 ReadOnly（读参路径，复审 finding 3）各记调用串。</summary>
     public sealed class FakeNativeDocuments
     {
         private readonly FakeNativeDoc _doc;
@@ -135,6 +140,11 @@ public class AcadReadNativeParamsTests : IDisposable
         public FakeNativeDocuments(FakeNativeDoc doc, List<string> calls) { _doc = doc; _calls = calls; }
         public int Count => 1;  // /p 启动默认开 Drawing1.dwg（Gate1 就绪条件）
         public FakeNativeDoc Open(string path) { _calls.Add($"Documents.Open({path})"); return _doc; }
+        public FakeNativeDoc Open(string path, bool readOnly)
+        {
+            _calls.Add($"Documents.Open({path}, ReadOnly={readOnly})");
+            return _doc;
+        }
     }
 
     /// <summary>假 app：Version/Documents/Visible/Quit（EnsureAppTArch 复用路径不触发 COM 激活）。</summary>
@@ -178,9 +188,33 @@ public class AcadReadNativeParamsTests : IDisposable
         Assert.Equal("0dt", p.Layer);
         Assert.True(p.ReadOk);
         // 自启（/p 天正 profile）→自开→读完即关（顺序钉住；不得残留开文档）。
+        // 复审 finding 3：读参原图以 ReadOnly=true 打开（设计承诺只读，不另建副本）。
         Assert.Equal(
-            new[] { "Launch(TElec20V5)", "Documents.Open(16#1116.dwg)", "Doc.Close(False)" },
+            new[] { "Launch(TElec20V5)", "Documents.Open(16#1116.dwg, ReadOnly=True)", "Doc.Close(False)" },
             calls);
         Assert.True(doc.Closed);
+    }
+
+    /// <summary>
+    /// 复审 finding 3/12 守卫：已有打开文档（native-live 执行窗口）时再走 path 形态必须
+    /// 响亮拒绝——不得开第二份覆盖 _doc（前文档失锚、句柄层操作错文档）。
+    /// </summary>
+    [Fact]
+    public void ReadNativeParams_WithPath_WhenDocumentAlreadyOpen_Throws()
+    {
+        var calls = new List<string>();
+        var doc = new FakeNativeDoc(new FakeNativeModelSpace(), calls);
+        var app = new FakeNativeApp(doc, calls);
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => app;
+        using var rt = new AcadRuntime();
+        rt.Open("already-open.dwg");  // 生产 Open 读改写（执行侧），_doc 就位
+
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadNativeParams("16#1116.dwg"));
+
+        Assert.Contains("已有打开的图纸", ex.Message);
+        Assert.Contains("ReadNativeParams(path)", ex.Message);
+        // 只有执行窗口那一次 Open；path 形态未再开第二份（守卫先于 EnsureAppTArch）。
+        Assert.Single(calls, c => c.StartsWith("Documents.Open", StringComparison.Ordinal));
     }
 }

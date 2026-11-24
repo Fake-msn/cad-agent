@@ -239,7 +239,7 @@ public static partial class CommandRouter
         // 判据/执行/读回/交付全在 NativeLivePlan——不适用返回 null 回落既有全图级拒绝）。
         if (report.Level == GateLevel.Yellow && args.Contains("--live"))
         {
-            int? nativeRc = NativeLivePlan(drawingPath, plan, drawing, agentDir, session, audit, op, stderr);
+            int? nativeRc = NativeLivePlan(drawingPath, plan, drawing, agentDir, session, audit, op, stdout, stderr);
             if (nativeRc != null) return nativeRc.Value;
         }
         if (GateRefusesRun(report))
@@ -729,7 +729,7 @@ public static partial class CommandRouter
             }
             else if (ResolveRuntimeName() != "acad")
             {
-                stderr.WriteLine("--native: 该运行时不支持原生读参（仅 acad 厂商），跳过 COM 读参（理解侧降级）");
+                stderr.WriteLine("--native: 该运行时不支持原生读参（--native 需 CADAGENT_RUNTIME=acad），跳过 COM 读参（理解侧降级）");
             }
             else
             {

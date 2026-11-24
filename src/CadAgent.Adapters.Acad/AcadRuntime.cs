@@ -25,6 +25,11 @@ public sealed class AcadRuntime : ICadRuntime
     private dynamic? _doc;
     private bool _disposed;
 
+    // 复审 finding 4：本方 /p 启动的进程句柄（EnsureAppTArch 内赋值，仅用于 ROT 附着后归属
+    // 校验与失败清理）。归属不符=附着到的实例非本方启动（用户同时开了 AutoCAD）——
+    // 清理只对本进程，绝不 Quit 他方实例。
+    private Process? _launchedProc;
+
     // 重名碰撞守卫（复审微修复波）：本文档会话经 EnsureBlock 成功创建的块名集合。
     // 重入补全只对"本方创建"的块清除重建；预存用户块（名不在集合）一律复用早退——
     // skill 符号名与用户图纸自有块重名（如 "DOOR"）时不得删除用户内容（恢复旧非破坏行为）。
@@ -40,8 +45,9 @@ public sealed class AcadRuntime : ICadRuntime
     // acad.exe」**实证失败**——Workstation 安装不写 PATH，裸 Process.Start("acad.exe")
     // 抛 Win32Exception「系统找不到指定的文件」（诊断经本缝透传，见 EnsureAppTArch）。
     // 故启动前解析安装路径：① 注册表 AcadLocation（HKLM/HKCU ...\Autodesk\AutoCAD\R*\ACAD-*，
-    // 版本降序）；② %ProgramFiles%\Autodesk\AutoCAD *\acad.exe 目录扫描（版本降序）；
-    // ③ 兜底裸 "acad.exe"（PATH 可解析环境保持旧行为；仍失败由 EnsureAppTArch 响亮上抛）。
+    // 版本降序，每根独立容错）；② %ProgramFiles%/%ProgramFiles(x86)%\Autodesk\AutoCAD *\acad.exe
+    // 目录扫描（版本降序）；③ 兜底裸 "acad.exe"（PATH 可解析环境保持旧行为；仍失败由
+    // EnsureAppTArch 响亮上抛）。
     internal static Func<string?> AcadExecutableResolver = DefaultResolveAcadExecutable;
 
     private const string DefaultAcadExecutableName = "acad.exe";
@@ -82,7 +88,13 @@ public sealed class AcadRuntime : ICadRuntime
         ResolveAcadExecutable(DefaultAcadRegistryLocations(), DefaultAcadInstallDirs());
 
     // 注册表候选位置（只读）：本机实证布局 HKLM\SOFTWARE\Autodesk\AutoCAD\R19.1\ACAD-D001:804
-    // → AcadLocation=C:\Program Files\Autodesk\AutoCAD 2014。不可读/不存在→空表回退目录扫描。
+    // → AcadLocation=C:\Program Files\Autodesk\AutoCAD 2014。
+    // 复审 finding 9a：**每根独立 try/catch**——HKLM 不可读（权限/布局差异/权限位拒绝）不得
+    // 连带跳过 HKCU（用户级覆盖键在缺 HKLM 值时是唯一来源）；某根内部某 release/product 抛
+    // 错亦仅终止该根枚举，已收集候选保留、继续下一根。全部不可读→空表回退目录扫描。
+    // 复审 finding 9c（信任边界）：注册表给出的安装路径会以**当前用户身份**执行（Process.Start
+    // /p）；HKCU 用户可写——本通道只用于定位本机已安装 acad.exe，非安全边界，调用方信任
+    // 范围为"同用户已可信的注册表配置"。
     private static IReadOnlyList<string> DefaultAcadRegistryLocations()
     {
         var locations = new List<string>();
@@ -109,29 +121,41 @@ public sealed class AcadRuntime : ICadRuntime
             }
             catch
             {
-                // 注册表不可读（权限/布局差异）→ 回退下一候选源（目录扫描），不静默当"未安装"。
+                // 该根不可读（权限/布局差异）→ 继续下一根（不得连带吞掉 HKCU 候选），
+                // 不静默当"未安装"（空表回退目录扫描）。
             }
         }
         return locations;
     }
 
     // 常见安装目录扫描（版本降序；本机实证 %ProgramFiles%\Autodesk\AutoCAD 2014）。
+    // 复审 finding 9b：补 Program Files (x86)（32 位安装布局）；两根全部候选合并后按版本降序
+    // （同版本按路径 Ordinal 定序，结果确定）。
     private static IReadOnlyList<string> DefaultAcadInstallDirs()
     {
         var dirs = new List<string>();
-        try
+        foreach (var root in new[]
+                 {
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+                 })
         {
-            string autodesk = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Autodesk");
-            if (Directory.Exists(autodesk))
-                dirs.AddRange(Directory.EnumerateDirectories(autodesk, "AutoCAD *")
-                    .OrderByDescending(VersionRank));
+            try
+            {
+                if (string.IsNullOrWhiteSpace(root)) continue;
+                string autodesk = Path.Combine(root, "Autodesk");
+                if (!Directory.Exists(autodesk)) continue;
+                dirs.AddRange(Directory.EnumerateDirectories(autodesk, "AutoCAD *"));
+            }
+            catch
+            {
+                // 该根不可枚举 → 跳过（下一根/调用方兜底裸名），不影响已收集候选。
+            }
         }
-        catch
-        {
-            // 目录不可枚举 → 空表（调用方兜底裸名）。
-        }
-        return dirs;
+        return dirs
+            .OrderByDescending(VersionRank)
+            .ThenBy(d => d, StringComparer.Ordinal)
+            .ToList();
     }
 
     // 名称版本排序键：取名称首个数字串（"R19.1"→19、"AutoCAD 2014"→2014）；无数字→0。
@@ -261,7 +285,11 @@ public sealed class AcadRuntime : ICadRuntime
     // ---- 切片A §4.1：天正 profile 感知启动（/p 启动 + ROT 附着 + Gate1）----
     // 与既有 EnsureApp（普通 COM 激活→默认 profile，无 TArch）互斥：_app 已存在即复用，
     // 不得再拉起第二实例（双实例共享用户 profile 会竞态损坏 CUIX，VendorGuard 语义）。
-    // 流程：守卫→/p "profileName" 启动 acad.exe→ROT 附着（AcadAttach）→Gate1 就绪等待。
+    // 流程：守卫→/p "profileName" 启动 acad.exe→ROT 附着（AcadAttach）→归属校验→Gate1 就绪等待。
+    // 归属校验（复审 finding 4）：ROT AttachOnly 取的是"当前注册的活动实例"——若用户同时
+    // 开了 AutoCAD，可能附着到他方实例；此时后续 Cleanup/Dispose 的 Quit 会误杀外人实例并
+    // 留下本方孤儿进程。故附着后比对实例 HWND 与本方进程主窗句柄，不符→只清本方进程、
+    // 置空 _app 并响亮拒绝（绝不 Quit 附着实例）。
     // 失败路径不残留进程（spec §5）：经 CleanupTArchFailure 优雅 Quit / 兜底 Kill 本方进程。
     // 调用方（ReadNativeParams，Task 5）经 Run 在 STA 队列内执行。
     internal dynamic EnsureAppTArch(string profileName)
@@ -277,7 +305,15 @@ public sealed class AcadRuntime : ICadRuntime
             catch (Exception ex) { throw new CadRuntimeException($"天正实例启动失败: {ex.Message}", ex); }
             if (proc == null)
                 throw new CadRuntimeException("天正实例启动失败");
+            _launchedProc = proc;
             _app = AcadAttach.AttachOnly(Profile.ProgId);
+            // 归属校验（findings 4）：_launchedProc 恒非空于本路径（复用早退走上方 _app!=null）。
+            // 不符→清空 _app 后抛出，外层 catch 的 CleanupTArchFailure 只见 proc（不 Quit）。
+            if (!OwnershipMatches(_app, proc))
+            {
+                _app = null;
+                throw new CadRuntimeException("ROT 附着实例非本方启动（归属校验失败）");
+            }
             WaitTArchGate1();
             return _app;
         }
@@ -300,6 +336,7 @@ public sealed class AcadRuntime : ICadRuntime
         var app = _app;
         _app = null;
         _doc = null;
+        _launchedProc = null; // 失败清理后下次 EnsureAppTArch 须真正重启（不残留失效句柄）
         bool quit;
         if (app != null)
         {
@@ -319,6 +356,30 @@ public sealed class AcadRuntime : ICadRuntime
     // 每步独立吞异常（进程未启动/已退出/无主窗口均属常态），返回是否确认清理完成。
     internal static Func<Process, bool> TarchProcessCleanup = DefaultTarchProcessCleanup;
     private static readonly TimeSpan TarchCleanupWait = TimeSpan.FromSeconds(10);
+
+    // 复审 finding 4：ROT 附着归属校验缝。HwndReader=实例主窗口句柄（默认 e.HWND）；
+    // OwnershipMatches=归属判定可注入（单测注入 true/false，fake Process 无法携带真实 HWND）。
+    internal static Func<dynamic, int> HwndReader = e => (int)e.HWND;
+    internal static Func<dynamic, Process, bool> OwnershipMatches = DefaultOwnershipMatches;
+
+    // 默认归属判定：实例 HWND 须等于本方进程主窗句柄（Refresh 后取实时值）。
+    // 不可判定即放行（fail-open 到既有行为）：HWND==0（实例未建主窗/无该属性面）、进程
+    // 主窗句柄==0（ShellExecute 启动后主窗尚未创建）、进程句柄未关联（fake/non-started）
+    // 或 COM 读拒——此时无法否认归属，沿用旧行为（守卫 EnsureNoForeignInstance 已前置，
+    // 归属校验是纵深防御，不是唯一防线）。
+    private static bool DefaultOwnershipMatches(dynamic app, Process proc)
+    {
+        try
+        {
+            int hwnd = HwndReader(app);
+            if (hwnd == 0) return true;
+            proc.Refresh();
+            long main = proc.MainWindowHandle.ToInt64();
+            if (main == 0) return true;
+            return hwnd == unchecked((int)main);
+        }
+        catch { return true; }
+    }
 
     private static bool DefaultTarchProcessCleanup(Process proc)
     {
@@ -711,7 +772,8 @@ public sealed class AcadRuntime : ICadRuntime
         catch { /* best-effort：不掩盖已上抛的读参根因 */ }
     }
 
-    // R1 消歧形态：path!=null=CLI 自启自开读完关；null=native-live 会话读当前已开文档。
+    // R1 消歧形态：path!=null=CLI 自启自读读完关（**ReadOnly=true 打开原图**，不另建副本——
+    // 设计承诺只读；复审 finding 3 更正原读改写实现）；null=native-live 会话读当前已开文档。
     // 全程在 Run<T> STA 队列内；体内只调私有内部件——公开 Open/Close/EntityCount 自身包 Run，
     // 队列内再调 Run 会等待自身→死锁。
     public IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) =>
@@ -722,12 +784,18 @@ public sealed class AcadRuntime : ICadRuntime
                 if (_doc == null) throw new CadRuntimeException("无打开的图纸");
                 return ReadModelSpaceEntities();  // 不启不开不关（native-live 形态）
             }
+            // 复审 finding 3 守卫：path 形态要求无打开文档——native-live 执行窗口已有 _doc 时
+            // 再开第二份会覆盖 _doc 引用（前一份文档失锚、句柄层操作错文档）。
+            if (_doc != null)
+                throw new CadRuntimeException("已有打开的图纸；ReadNativeParams(path) 须在无打开文档时调用");
 
-            var app = EnsureAppTArch(TArchProfileName);  // /p 启动+ROT 附着+Gate1（须在 Run 内）
+            var app = EnsureAppTArch(TArchProfileName);  // /p 启动+ROT 附着+归属校验+Gate1（须在 Run 内）
             bool opened = false;
             try
             {
-                _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath));  // 镜像 Open 体内件
+                // Documents.Open(FileName, ReadOnly, Password)：第二位置参=true 即只读打开。
+                // 读参是理解侧只读通道——原图必须只读打开（设计 §4.1 承诺；复审 finding 3）。
+                _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath, true));
                 opened = true;
                 _createdBlocks.Clear();  // 换文档即失效本方创建块名集合（与 Open 同口径）
                 WaitTArchGate2();

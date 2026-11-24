@@ -58,6 +58,7 @@ public class EnsureAppTArchTests : IDisposable
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
     private readonly Func<string[]> _origNames = VendorGuard.ProcessNames;
     private readonly Func<Process, bool> _origCleanup = AcadRuntime.TarchProcessCleanup;
+    private readonly Func<dynamic, Process, bool> _origOwnership = AcadRuntime.OwnershipMatches;
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
 
@@ -75,6 +76,7 @@ public class EnsureAppTArchTests : IDisposable
         AcadAttach.ActiveObjectResolver = _origActive;
         VendorGuard.ProcessNames = _origNames;
         AcadRuntime.TarchProcessCleanup = _origCleanup;
+        AcadRuntime.OwnershipMatches = _origOwnership;
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
     }
@@ -255,6 +257,53 @@ public class EnsureAppTArchTests : IDisposable
         Assert.Contains("天正实例启动失败", ex.Message);
         Assert.Contains("找不到 acad.exe", ex.Message);
         Assert.IsType<Win32Exception>(ex.InnerException);
+    }
+
+    // 复审 finding 4（归属校验）：ROT 附着到的实例若非本方启动（用户同时开了 AutoCAD），
+    // 清理/Dispose 的 Quit 会误杀他方实例并留下本方孤儿进程。注入归属不符→响亮拒绝，
+    // **绝不 Quit 附着实例**（QuitCalls==0），只清理本方启动的 Process；_app 置空使下次
+    // 调用真正重启（不得早退复用未校验/已置空对象）。
+    [Fact]
+    public void EnsureAppTArch_OwnershipMismatch_CleansOnlyLaunchedProcess_NoQuit()
+    {
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        int launches = 0;
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => { launches++; return launched = new Process(); };
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        AcadRuntime.OwnershipMatches = (_, __) => false;  // 注入：附着实例非本方
+        var fake = new GateApp("19.1s (LMS Tech)", 1);    // 就绪（若未拒会走到 Gate1 成功）
+        AcadAttach.ActiveObjectResolver = _ => fake;
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Contains("ROT 附着实例非本方启动", ex.Message);
+        Assert.Contains("归属校验失败", ex.Message);
+        Assert.Equal(0, fake.QuitCalls);                  // 绝不 Quit 他方实例
+        Assert.Same(launched, cleaned);                   // 只清理本方启动的进程
+        Assert.Equal(1, launches);
+
+        // _app 已置空：第二次调用重新启动（而非早退返回已置空/未校验实例）。
+        Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Equal(2, launches);
+    }
+
+    // 复审 finding 4 对照：归属相符→正常走进 Gate1 并返回附着实例（不清理、不 Quit）。
+    [Fact]
+    public void EnsureAppTArch_OwnershipMatch_AttachesAndReturnsApp()
+    {
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.OwnershipMatches = (_, __) => true;
+        var fake = new GateApp("19.1s (LMS Tech)", 1);
+        AcadAttach.ActiveObjectResolver = _ => fake;
+        using var rt = new AcadRuntime();
+
+        var app = (object)rt.EnsureAppTArch("TElec20V5");
+        Assert.Same(fake, app);
     }
 
     // 复审修复波：默认清理缝对"未 Start 的 fake Process"必须吞异常不抛（测试/真机句柄失效常态）。

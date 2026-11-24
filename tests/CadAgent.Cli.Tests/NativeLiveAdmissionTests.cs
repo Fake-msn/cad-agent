@@ -21,6 +21,8 @@ public class NativeLiveAdmissionTests : IDisposable
     private readonly string _project = Path.Combine(Path.GetTempPath(), $"nativelive-{Guid.NewGuid():N}");
     private readonly string _drawing;
     private readonly FakeNativeRuntime _rt = new();
+    // 哈希缝（finding 2d/5c）：注入空串/定向空值覆盖 fail-closed 分支，用毕还原。
+    private readonly Func<string, string> _origSha256 = CommandRouter.Sha256File;
 
     public NativeLiveAdmissionTests()
     {
@@ -34,6 +36,7 @@ public class NativeLiveAdmissionTests : IDisposable
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         CommandRouter.RuntimeFactory = null;
         CommandRouter.IdentityOverride = null;
+        CommandRouter.Sha256File = _origSha256;
         Directory.Delete(_project, true);
         File.Delete(_drawing);
         if (File.Exists(_drawing + ".live.dwg")) File.Delete(_drawing + ".live.dwg");
@@ -101,6 +104,9 @@ public class NativeLiveAdmissionTests : IDisposable
 
     // ---- 用例 ----
 
+    /// <summary>overlay 文件路径（Diagnostics 断言用）。</summary>
+    private string OverlayPath => Path.Combine(_project, ".cadagent", "semantic.json");
+
     [Fact]
     public void Yellow_HandleStep_AllPass_ExecutesOps_DeliversLiveDwg()
     {
@@ -110,13 +116,22 @@ public class NativeLiveAdmissionTests : IDisposable
             """{"planId":"NL-1","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
         byte[] before = File.ReadAllBytes(_drawing);
 
-        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+        var (code, stdout, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
 
         Assert.True(code == 0, $"code={code} stderr={stderr}");
         Assert.Contains("change-layer:21E00:WALL", _rt.Calls);
         Assert.Equal(_drawing + ".live.dwg", _rt.SavedPath);
         Assert.True(File.Exists(_drawing + ".live.dwg"));
         Assert.Equal(before, File.ReadAllBytes(_drawing)); // 源件字节零写入
+        // 成功收据（finding 11）：stdout 单条 JSON {"ok":true,outPath,handles}。
+        using (var receipt = JsonDocument.Parse(stdout))
+        {
+            Assert.True(receipt.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal(_drawing + ".live.dwg", receipt.RootElement.GetProperty("outPath").GetString());
+            Assert.Equal(new[] { "21E00" },
+                receipt.RootElement.GetProperty("handles").EnumerateArray()
+                    .Select(h => h.GetString()).ToArray());
+        }
         var records = AuditRecords();
         var gatePass = Assert.Single(records, r => r.Entry.Kind == "native-gate-pass");
         Assert.Equal("run", gatePass.Entry.Source);
@@ -412,11 +427,195 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
     }
 
+    // ---- 复审 finding 1：产品计划 kind 词汇（move-entity/delete-entity）到达运行时 op ----
+
+    [Fact]
+    public void Yellow_ProductKindMoveEntity_NormalizedToMoveOp_Committed()
+    {
+        // 生成侧计划 kind=move-entity（HandlerRegistry 词汇）→ 准入全收 + Replay 克隆归一为
+        // move，运行时 op 前缀 "move:" 可见，读回聚合按运行时语义（bbox 位移和）。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-15","steps":[{"kind":"move-entity","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Contains("move:21E00:10:20", _rt.Calls);
+        Assert.True(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
+        // 审计按运行时口径（归一后 kind），不把产品词汇原样带进执行证据。
+        var step = Assert.Single(records, r => r.Entry.Kind == "native-live-step");
+        using (var p = JsonDocument.Parse(step.Entry.ParamsJson))
+            Assert.Equal("move", p.RootElement.GetProperty("kind").GetString());
+    }
+
+    [Fact]
+    public void Yellow_ProductKindDeleteEntity_NormalizedToDeleteOp_Committed()
+    {
+        // 生成侧计划 kind=delete-entity → 归一 delete；句柄消失读回通过并交付。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-16","steps":[{"kind":"delete-entity","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.True(code == 0, $"code={code} stderr={stderr}");
+        Assert.Contains("delete:21E00", _rt.Calls);
+        Assert.Empty(_rt.ReadResults);
+        Assert.True(File.Exists(_drawing + ".live.dwg"));
+        Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-live-committed");
+    }
+
+    // ---- 复审 finding 5：拒绝面（overlay 缺失/损坏、ReadIncomplete、SHA 不可验证）----
+
+    [Fact]
+    public void OverlayMissing_RefusedWithReason_Exit1_NoRuntime()
+    {
+        // 缺 overlay 不得静默降级为"无 overlay 放行"：审计 native-gate-refused{reason}。
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-17","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("语义叠加层", stderr);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
+        using var p = JsonDocument.Parse(refused.Entry.ParamsJson);
+        Assert.Equal("overlay-missing", p.RootElement.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public void OverlayCorrupt_RefusedWithReason_Exit1_NoRuntime()
+    {
+        // overlay 损坏（非法 JSON）→ refused{overlay-load-failed}，不执行不交付。
+        Directory.CreateDirectory(Path.Combine(_project, ".cadagent"));
+        File.WriteAllText(OverlayPath, "{ this is not json");
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-18","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("语义叠加层损坏", stderr);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var refused = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-gate-refused");
+        using var p = JsonDocument.Parse(refused.Entry.ParamsJson);
+        Assert.Equal("overlay-load-failed", p.RootElement.GetProperty("reason").GetString());
+        Assert.True(p.RootElement.TryGetProperty("error", out _));
+    }
+
+    [Fact]
+    public void OverlayReadIncomplete_RefusedVerdict_NoHandleOps()
+    {
+        // overlay 行 ReadOk=false（读参不完整）→ ReadIncomplete 拒绝（理解侧不完整不得放行）。
+        WriteOverlay(Wall() with { ReadOk = false });
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-19","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.DoesNotContain(_rt.Calls, c => c.StartsWith("change-layer"));
+        Assert.DoesNotContain(_rt.Calls, c => c == "saveas");
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
+        Assert.Equal(new[] { "ReadIncomplete" }, VerdictsOf(refused));
+    }
+
+    [Fact]
+    public void SourceShaSeamEmpty_FailsFailClosed_Exit1()
+    {
+        // finding 2d/5c：哈希缝注入空串（源件不可哈希）→ fail-closed，绝不 ""=="" 假通过；
+        // 失败先于任何运行时副作用（不起会话、无 ops）。
+        CommandRouter.Sha256File = _ => "";
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-20","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("源图 SHA 不可验证", stderr);
+        Assert.Empty(_rt.Calls);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var failed = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-live-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.Equal("sourcesha-unverifiable", p.RootElement.GetProperty("reason").GetString());
+    }
+
+    // ---- 复审 finding 2：零写入证据窗口闭合（恶意/缺陷 SaveAs 与 liveSha 不可验证）----
+
+    [Fact]
+    public void SaveAsWritesSourcePath_ZeroWriteBreachCaughtAfterDispose_Exit1()
+    {
+        // 恶意/缺陷运行时在 SaveAs 中回写源图 → 证据哈希（SaveAs/Close/Dispose 之后复核）
+        // 必须捕获字节漂移并按失败退出，绝不把被改写的源图当成功交付依据。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-21","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+        byte[] before = File.ReadAllBytes(_drawing);
+        _rt.SabotageSourcePath = _drawing; // SaveAs 时向源件写入破坏字节
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("原图零写入契约破坏", stderr);
+        Assert.NotEqual(before, File.ReadAllBytes(_drawing)); // 破坏确实发生（证明检测有效）
+        // 已执行到交付（SaveAs+Close）之后才复核：失败发生在证据窗口闭合处，非前置拒绝。
+        Assert.Contains("change-layer:21E00:WALL", _rt.Calls);
+        Assert.Contains("saveas", _rt.Calls);
+        Assert.Equal("close", _rt.Calls[^1]);
+        var records = AuditRecords();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.Contains("源图字节被改动", p.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    [Fact]
+    public void LiveShaUnverifiable_FailsExit1_KeepsArtifactNoCommitted()
+    {
+        // finding 2b：交付件 SHA 不可验证 → 按失败退出（保留 .live.dwg 作证据，但不报成功）。
+        WriteOverlay(Wall());
+        SeedNative(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-22","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
+        var real = _origSha256;
+        CommandRouter.Sha256File = path => path.EndsWith(".live.dwg", StringComparison.Ordinal) ? "" : real(path);
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("交付件", stderr);
+        Assert.True(File.Exists(_drawing + ".live.dwg")); // 证据保留
+        var records = AuditRecords();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.Equal("liveSha-unverifiable", p.RootElement.GetProperty("reason").GetString());
+        Assert.Equal(_drawing + ".live.dwg", p.RootElement.GetProperty("outPath").GetString());
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
     /// <summary>
     /// Fake 厂商运行时（零 COM）：ReadNativeParams 按形态区分——path≠null=天正自开自关
     /// 副本的只读快照（准入重读事实，独立于执行窗口状态）；null=当前活文档（ops 落状态，
     /// 读回看到执行后事实）。调用串记录形态（read-native:path/doc）供顺序断言；
-    /// handle op 记录调用串；SaveAs 落合成 .live.dwg 字节。
+    /// handle op 记录调用串；SaveAs 落合成 .live.dwg 字节；SabotageSourcePath 置位时
+    /// SaveAs 还向该路径回写破坏字节（finding 2c 恶意/缺陷运行时回归）。
     /// </summary>
     private sealed class FakeNativeRuntime : ICadRuntime
     {
@@ -425,6 +624,7 @@ public class NativeLiveAdmissionTests : IDisposable
         public List<NativeEntityParam> ReadResults { get; } = new();
         public string? SavedPath { get; private set; }
         public bool IgnoreHandleOps { get; set; }
+        public string? SabotageSourcePath { get; set; }
 
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
         public void Open(string path) => Calls.Add("open:" + Path.GetFileName(path));
@@ -433,6 +633,8 @@ public class NativeLiveAdmissionTests : IDisposable
         {
             SavedPath = path;
             File.WriteAllBytes(path, new byte[] { 0x4C, 0x49, 0x56, 0x45 }); // 让 liveSha 可计算
+            if (SabotageSourcePath != null)
+                File.WriteAllBytes(SabotageSourcePath, new byte[] { 0x42, 0x41, 0x44 }); // 源件零写入破坏
             Calls.Add("saveas");
         }
 

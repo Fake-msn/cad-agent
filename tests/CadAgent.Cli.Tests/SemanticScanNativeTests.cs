@@ -13,7 +13,7 @@ namespace CadAgent.Cli.Tests;
 /// R8 —— --native 不得走 CreateRuntimeIfAvailable（其 GetInfo()→EnsureApp() 预激活缓存默认
 /// profile 的 _app，ReadNativeParams 内 EnsureAppTArch 会静默复用该缓存、永不加载 TArch →
 /// nativeRead=0）。测试注入 RuntimeFactory 优先；否则 ResolveRuntimeName()!=acad → stderr
-/// 警示"仅 acad 厂商"并跳过（计数全 0）；acad → 直接 CreateRuntimeInstance("acad")。
+/// 警示"--native 需 CADAGENT_RUNTIME=acad"并跳过（计数全 0）；acad → 直接 CreateRuntimeInstance("acad")。
 /// R9 —— 构造/读参任何异常 → 审计 native-read-failed（同一 store/session/op，params{error}）+
 /// stderr 含上下文警示，计数保持 0，扫描继续到正常 stdout/审计/exit 0（理解侧诚实降级）。
 /// 顺序 —— Seed 必须在 SemanticScanner.Scan（末尾按存活句柄剪枝）之后，否则标注被当陈旧清除。
@@ -141,7 +141,7 @@ public class SemanticScanNativeTests : IDisposable
         {
             var (code, stdout, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--native");
             Assert.Equal(0, code);
-            Assert.DoesNotContain("仅 acad 厂商", stderr); // 注入工厂路径不触发厂商警示
+            Assert.DoesNotContain("CADAGENT_RUNTIME=acad", stderr); // 注入工厂路径不触发厂商警示
 
             // ① overlay 落盘（结束进程后从磁盘重载）：NativeEntities 含 21E00；标注含 NativeParameter(Wall)。
             var overlay = SemanticOverlay.Load(OverlayPath);
@@ -188,7 +188,8 @@ public class SemanticScanNativeTests : IDisposable
 
     /// <summary>
     /// R8 非 acad 厂商：CADAGENT_RUNTIME=zwcad（默认 RuntimeSelector 读环境变量）+ RuntimeFactory=null
-    /// → stderr 警示"仅 acad 厂商"、计数全 0、无 NativeEntities（不构造任何厂商运行时=不起进程）。
+    /// → stderr 警示"--native 需 CADAGENT_RUNTIME=acad"（finding 10：明示可配置通道）、计数全 0、
+    /// 无 NativeEntities（不构造任何厂商运行时=不起进程）。
     /// </summary>
     [Fact]
     public void ScanNative_NonAcadVendor_WarnsAndZeros()
@@ -200,7 +201,7 @@ public class SemanticScanNativeTests : IDisposable
         {
             var (code, stdout, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--native");
             Assert.Equal(0, code);
-            Assert.Contains("该运行时不支持原生读参（仅 acad 厂商）", stderr);
+            Assert.Contains("该运行时不支持原生读参（--native 需 CADAGENT_RUNTIME=acad）", stderr);
             Assert.Equal((0, 0, 0), NativeCounts(stdout));
             Assert.Empty(SemanticOverlay.Load(OverlayPath).NativeEntities);
             Assert.Null(SingleNativeReadFailed()); // 厂商不支持=既定降级路径，不记失败审计
