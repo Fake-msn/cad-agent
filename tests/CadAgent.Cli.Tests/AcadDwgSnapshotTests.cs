@@ -216,6 +216,75 @@ public class AcadDwgSnapshotTests : IDisposable
         Assert.True(audit.VerifyChain(out _));
     }
 
+    // ---- I-1（微修复波）：live 影子计数分歧拒绝（acad 转换成功 + fake 厂商错数） ----
+
+    [Fact]
+    public void Run_Live_Acad_ShadowCountDivergence_RefusedAudited_NoDelivery()
+    {
+        // 本 PR 使 acad live 首次经可能丢实体的转换——读回分歧闸（vendor vs 影子）承重：
+        // 真实转换器成功 + fake 厂商 EntityCount 错数（≠drawing.Doc.Entities.Count）→
+        // exit1 + com-replay-divergence 审计 + 无 .live.dwg 交付 + 哈希链完整。
+        // 实现先行实证钉住：分歧分支已存在（Live.cs），本例首跑即绿（非 TDD 红，口径如实记录）。
+        CommandRouter.RuntimeSelector = () => "acad";
+        var rt = new DivergentCountRuntime();
+        CommandRouter.RuntimeFactory = () => rt;
+        var (code, _, stderr) = Run("run", _plan, "--drawing", _drawing, "--live");
+        Assert.Equal(1, code);
+        Assert.Contains("读回分歧", stderr);
+        Assert.False(File.Exists(_drawing + ".live.dwg")); // 分歧拒绝不交付
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "com-replay-divergence"
+            && r.Entry.ParamsJson.Contains("vendorCount") && r.Entry.ParamsJson.Contains("shadowCount"));
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "com-replay-committed");
+        Assert.True(audit.VerifyChain(out _));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(rt.OpenedPath))); // 临时快照用后即清
+    }
+
+    // ---- M-1（微修复波）：失败路径清理序——Dispose 之后清快照（文件锁防孤儿目录） ----
+
+    [Fact]
+    public void Run_Live_Acad_FailurePath_SnapshotCleanedAfterRuntimeDispose()
+    {
+        // M-1 清理序钉住（失败路径目录差集）：fake 厂商 Open 起持快照文件句柄直到 Dispose
+        // （模拟真实 COM 失败路径文档仍打开→文件锁）。清理若先于 using(rt) Dispose，
+        // Directory.Delete 因锁失败（best-effort 吞掉）→%TEMP% 孤儿 GUID 目录；
+        // 必须 Dispose 后清（镜像 Export.cs runtime?.Dispose()→Cleanup 序）。失败路径=读回分歧。
+        CommandRouter.RuntimeSelector = () => "acad";
+        var rt = new DivergentCountRuntime(holdHandle: true);
+        CommandRouter.RuntimeFactory = () => rt;
+        var (code, _, stderr) = Run("run", _plan, "--drawing", _drawing, "--live");
+        Assert.Equal(1, code);
+        Assert.Contains("读回分歧", stderr);
+        Assert.NotNull(rt.OpenedPath);
+        string snapDir = Path.GetDirectoryName(rt.OpenedPath)!;
+        Assert.False(Directory.Exists(snapDir), $"Dispose 后快照目录应已清（孤儿目录: {snapDir}）");
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "com-replay-divergence");
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    // ---- M-4（微修复波）：live acad 转换成功 + 无厂商 → 拒绝 + 快照目录已清 ----
+
+    [Fact]
+    public void Run_Live_Acad_ConversionOk_NoVendor_Refused_SnapshotCleaned()
+    {
+        // M-4 专测：acad+working 转换成功（真实转换器，非 COM）+ RuntimeFactory null →
+        // 拒绝口径按现状（无可用厂商运行时，exit1 + com-replay-failed，不降级交付）+
+        // 临时快照目录已清（%TEMP% cadagent-acad-snap-* 差集为空，无孤儿目录）。
+        CommandRouter.RuntimeSelector = () => "acad";
+        CommandRouter.RuntimeFactory = () => null;
+        string[] before = Directory.GetDirectories(Path.GetTempPath(), "cadagent-acad-snap-*");
+        var (code, _, stderr) = Run("run", _plan, "--drawing", _drawing, "--live");
+        Assert.Equal(1, code);
+        Assert.Contains("无可用厂商运行时", stderr);
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        Assert.Empty(Directory.GetDirectories(Path.GetTempPath(), "cadagent-acad-snap-*").Except(before));
+        using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+        Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "com-replay-failed");
+        Assert.DoesNotContain(audit.ReadAll(), r => r.Entry.Kind == "com-replay-committed");
+        Assert.True(audit.VerifyChain(out _));
+    }
+
     // ---- 等价类：非 working 派生 / zwcad 不转换 ----
 
     [Fact]
@@ -306,6 +375,39 @@ public class AcadDwgSnapshotTests : IDisposable
             }
         }
         finally { Directory.Delete(dir, true); }
+    }
+
+    /// <summary>
+    /// I-1/M-1 fake 厂商（非 COM）：EntityCount 恒返回读回计数-1（错数≠影子 →
+    /// com-replay-divergence 失败路径）；SaveAs 触达即抛（分歧拒绝不得交付）。
+    /// holdHandle=true 时 Open 起持快照文件句柄直到 Dispose（模拟真实 COM 失败路径
+    /// 文档仍打开→文件锁）——清理若先于 Dispose，Directory.Delete 因锁失败（best-effort
+    /// 吞掉）→%TEMP% 孤儿 GUID 目录，钉住 M-1 清理序（先 Dispose 后清快照）。
+    /// </summary>
+    private sealed class DivergentCountRuntime : ICadRuntime
+    {
+        private readonly bool _holdHandle;
+        private FileStream? _hold;
+        private int _count;
+        public string? OpenedPath { get; private set; }
+        public DivergentCountRuntime(bool holdHandle = false) => _holdHandle = holdHandle;
+        public RuntimeInfo GetInfo() => new("Fake", "1", true);
+        public void Open(string path)
+        {
+            OpenedPath = path;
+            using (var fs = File.OpenRead(path)) _count = new DwgReader(fs).Read().Entities.Count();
+            if (_holdHandle) _hold = File.OpenRead(path); // FileShare.Read：Dispose 前阻塞整目录删除
+        }
+        public void SaveAs(string path) => throw new InvalidOperationException("读回分歧拒绝不得 SaveAs 交付");
+        public void Close(bool save) { }
+        public void Restart() { }
+        public void Dispose() { _hold?.Dispose(); _hold = null; }
+        public void AddLine(double x1, double y1, double x2, double y2, string? layer = null) => _count++;
+        public void AddText(double x, double y, string text, double height, string? layer = null) => _count++;
+        public void AddCircle(double x, double y, double radius, string? layer = null) => _count++;
+        public void AddInsert(string blockName, double x, double y, double scale = 1, double rotation = 0, string? layer = null) => _count++;
+        public void EnsureBlock(string blockName, IReadOnlyList<BlockPrimitive> primitives) { }
+        public int EntityCount() => _count - 1; // 错数（模拟厂商侧丢实体/读回漂移）
     }
 
     /// <summary>
