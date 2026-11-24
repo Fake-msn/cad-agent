@@ -653,6 +653,15 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **后续 native 理解路径建议（仅注记，不实现）**：①运行时 COM 读取作为 **census Yellow 件的补充理解通道**——增量价值=398 盲区对象的 Handle+Layer 锚定（只读理解层面缓解「未解析区不可定位」，不改变 Yellow 闸口语义）；②类名分辨仍依赖文件级 census；若需运行时真实 TCH 名/几何/自定义属性须天正加载会话（用户决策：TGStart/TElec20V5 profile 启动后 COM 附着，或授权切换 ActiveProfile；许可/HASP 与模态框风险须用户在场批准）；③生产接线 deferred（本轮仅实证）。
 - 证据 `outputs/tarch-elec/runtime-read/`（report.md/census-runtime-comparison.md/autoload-mechanism.txt/objectname-histogram.txt/layer-{modelspace,blockdefs}.txt/property-reachability.txt/probe-run.log+attempt{1,2,3}/session.txt/specimen-sha256-{pre,post}.txt/tasklist-{pre,post}.txt/cuix-hash-post.txt）。
 
+**天正 profile 实例运行时探针 + 产品方向转向（2026-11-25 记录；路径 B 用户批准；追加式，旧文 0 删）**：
+
+- **探针执行（路径 B）**：自动化 `acad.exe /p TElec20V5` 起独立天正实例（用户 AutoCAD 已关，进程清零核实）；ActiveProfile=TElec20V5、**36 Tangent 模块加载、AcDbZombieEntity=0**；只读打开 16#1116.dwg 副本（ReadOnly=true），读毕 Close+Quit 自家实例；CUIX/源件/副本哈希前后一致，0 残留；「日积月累」提示框出现仅记录未点、ROT 自主注册无需用户点击、无许可/HASP 框。证据 `outputs/api-probe/tarch-profile-probe/`（report.md + 直方图/属性表/census 跨核）。
+- **真实类名可见——TDb\* C++ 类名（非 census TCH_\* 标签）**：MS 1958/21 类（vs 僵尸通道 7 类）；**TDbWall×139 / TDbText×68 / TDbColumn×55 / TDbSpace×17 / TDbEquipment×17 / TDbSymbMultiLeader×15…** MS TDb 合计 343；plain 六类（993/278/158/158/17/11）两通道不变。
+- **census 跨核精确闭合**：MS 343 + 块定义 55 = **398 = 文件级 census**；**17 TDb 类 ↔ 17 TCH 类逐类计数精确闭合**（TDbWall↔TCH_WALL 139 等）。映射为跨通道按计数+语义推断（非单 API 双名，诚实注记）。
+- **核心结论：加载天正解决「类名分辨」，未解决「COM 几何可达」**——7 TDb\* 对象 ObjectName/Handle/Layer 全 OK，但 **Coordinates/TextString/Area 全 FAIL DISP_E_UNKNOWNNAME 0x80020006**（3 plain 对照全 OK）。**天正几何/自定义属性须 ObjectARX C++/.NET API，非 COM IDispatch**——COM 通道天花板实证钉死。
+- **产品方向转向（用户决策 2026-11-25）**：产品逻辑需**天正图纸完全解析**（不止 Yellow 只读审查）；既然 COM 几何不可达，**启动 TArch .NET API 几何探索**（ObjectARX/.NET 通道读天正真实几何/参数），**在另一独立对话窗口立项推进**（本会话仅记录与交接）。census 闸口/ Yellow 语义保持至完全解析落地；运行时天正会话通道（类名分辨+Handle/Layer 锚定）作为过渡补充理解。
+- **交接上下文（供独立会话）**：天正加载机制=TElec20V5 profile + c:\tangent\telect20v5\sys19x64\acad.rx（22 ARX）；TDb↔TCH 17 类映射见探针报告；COM 几何拒绝实证 0x80020006；AutoCAD 2014 R19.1 + TypeLib HKCU 覆盖（axdb19chs.tlb）在位；.NET API 探索须核 T20 电气 V5.0 是否暴露 .NET 程序集（Tangent.*.dll）/ObjectARX 头文件可用性，许可/HASP 风险须用户在场。
+
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
 **动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。
