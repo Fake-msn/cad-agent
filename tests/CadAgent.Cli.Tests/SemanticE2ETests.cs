@@ -342,4 +342,133 @@ public class SemanticE2ETests : IDisposable
         }
         finally { File.Delete(blockDxf); }
     }
+
+    // ---- R9②③ 诊断披露补全（spec §13.2 歧义诊断字段 / §13.4 NaN 剔除披露）----
+
+    /// <summary>
+    /// ③ nonFiniteDropped 恒在（无 --skill → 0）：stdout 加性键 + 审计 semantic-scan
+    /// params 加性键双通道钉住（镜像 blockAutoSeeded 恒在先例）。
+    /// </summary>
+    [Fact]
+    public void Scan_StdoutAndAudit_NonFiniteDroppedAlwaysPresent_ZeroWithoutSkill()
+    {
+        var (code, stdout, _) = Run("semantic", "scan", "--drawing", _drawing);
+        Assert.Equal(0, code);
+        using var doc = JsonDocument.Parse(stdout);
+        Assert.Equal(0, doc.RootElement.GetProperty("nonFiniteDropped").GetInt32());
+        var rec = Assert.Single(AuditRecords(), r => r.Entry.Kind == "semantic-scan");
+        using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+        Assert.Equal(0, p.RootElement.GetProperty("nonFiniteDropped").GetInt32());
+    }
+
+    /// <summary>
+    /// ② blockAmbiguous 项加性 histogram/bbox：无匹配块直方图全量类型计数（Type Ordinal
+    /// 排序）+ bbox 数值钉住；代理块（仅 TEXT）histogram 仍披露、bbox=插入点退化口径
+    /// （PointsOf 复用：TextEntity 插入点参与）。**ValueTuple 序列化回归钉住**：
+    /// histogram[0] 必须是非空对象且 type 非空——ValueTuple 字段非属性会退化为 {}。
+    /// 旧字段 block/instances/reason/sampleHandles/guidance 逐字 shape pin 保持。
+    /// </summary>
+    [Fact]
+    public void Scan_BlockAmbiguous_HistogramBboxDisclosed_OldKeysShapePinned()
+    {
+        string pkg = CreateSymbolPackage();
+        string blockDxf = DxfFixture.CreateTempDxf(doc =>
+        {
+            var proxy = new BlockRecord("$equip$0001");
+            proxy.Entities.Add(new TextEntity { InsertPoint = new XYZ(0, 0, 0), Value = "代理", Height = 2.5 });
+            doc.BlockRecords.Add(proxy);
+            var custom = new BlockRecord("自定义块");
+            custom.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            custom.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            custom.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+            doc.BlockRecords.Add(custom);
+            for (int i = 0; i < 4; i++)
+            {
+                doc.Entities.Add(new Insert(proxy) { InsertPoint = new XYZ(i * 1000, 0, 0) });
+                doc.Entities.Add(new Insert(custom) { InsertPoint = new XYZ(i * 1000, 500, 0) });
+            }
+        });
+        try
+        {
+            var (code, stdout, _) = Run("semantic", "scan", "--drawing", blockDxf, "--skill", pkg);
+            Assert.Equal(0, code);
+            using var doc = JsonDocument.Parse(stdout);
+            var amb = doc.RootElement.GetProperty("blockAmbiguous").EnumerateArray().ToList();
+            Assert.Equal(2, amb.Count);
+            var customItem = amb.First(x => x.GetProperty("block").GetString() == "自定义块");
+            // 旧键 shape pin（逐字不变）
+            Assert.Equal("无匹配", customItem.GetProperty("reason").GetString());
+            Assert.Equal(4, customItem.GetProperty("instances").GetInt32());
+            Assert.NotEmpty(customItem.GetProperty("sampleHandles").EnumerateArray());
+            Assert.Equal(JsonValueKind.Null, customItem.GetProperty("guidance").ValueKind);
+            // histogram：3 Line（类型计数，Ordinal 排序）；首项必须是非空对象（防 ValueTuple {} 退化）
+            var hist = customItem.GetProperty("histogram").EnumerateArray().ToList();
+            var h0 = Assert.Single(hist);
+            Assert.Equal(JsonValueKind.Object, h0.ValueKind);
+            Assert.Equal("Line", h0.GetProperty("type").GetString());
+            Assert.False(string.IsNullOrEmpty(h0.GetProperty("type").GetString()));
+            Assert.Equal(3, h0.GetProperty("count").GetInt32());
+            // bbox：三角形 (0,0)-(1,5)-(3,1) → min(0,0) max(3,5)
+            var bbox = customItem.GetProperty("bbox");
+            Assert.Equal(JsonValueKind.Object, bbox.ValueKind);
+            Assert.Equal(0, bbox.GetProperty("minX").GetDouble());
+            Assert.Equal(0, bbox.GetProperty("minY").GetDouble());
+            Assert.Equal(3, bbox.GetProperty("maxX").GetDouble());
+            Assert.Equal(5, bbox.GetProperty("maxY").GetDouble());
+            // 代理块：histogram 全量（TextEntity 非白名单仍披露）；bbox=插入点退化（PointsOf 口径）
+            var proxyItem = amb.First(x => x.GetProperty("block").GetString() == "$equip$0001");
+            Assert.Equal("建议天正 T3 转换后重扫", proxyItem.GetProperty("guidance").GetString());
+            var ph = Assert.Single(proxyItem.GetProperty("histogram").EnumerateArray());
+            Assert.Equal("TextEntity", ph.GetProperty("type").GetString());
+            Assert.Equal(1, ph.GetProperty("count").GetInt32());
+            var pb = proxyItem.GetProperty("bbox");
+            Assert.Equal(0, pb.GetProperty("minX").GetDouble());
+            Assert.Equal(0, pb.GetProperty("maxX").GetDouble());
+            // 本夹具全有限 → nonFiniteDropped=0（恒在键）
+            Assert.Equal(0, doc.RootElement.GetProperty("nonFiniteDropped").GetInt32());
+        }
+        finally { File.Delete(blockDxf); }
+    }
+
+    /// <summary>
+    /// ③ NaN 实体剔除披露全链：块定义含 1 NaN 线（DxfWriter/DxfReader 往返实证保 NaN）
+    /// → stdout nonFiniteDropped=1 + 审计 params nonFiniteDropped=1 双通道一致；
+    /// histogram 全量口径（NaN 线仍计数 Line:4）与指纹剔除口径（NaN 不入哈希/bbox）区分钉住。
+    /// </summary>
+    [Fact]
+    public void Scan_NaNBlockEntity_NonFiniteDroppedStdoutAndAudit()
+    {
+        string pkg = CreateSymbolPackage();
+        string blockDxf = DxfFixture.CreateTempDxf(doc =>
+        {
+            var br = new BlockRecord("NaN块");
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(9, 9, 0) });
+            doc.BlockRecords.Add(br);
+            for (int i = 0; i < 4; i++)
+                doc.Entities.Add(new Insert(br) { InsertPoint = new XYZ(i * 1000, 0, 0) });
+        });
+        try
+        {
+            var (code, stdout, _) = Run("semantic", "scan", "--drawing", blockDxf, "--skill", pkg);
+            Assert.Equal(0, code);
+            using var doc = JsonDocument.Parse(stdout);
+            Assert.Equal(1, doc.RootElement.GetProperty("nonFiniteDropped").GetInt32());
+            var a = Assert.Single(doc.RootElement.GetProperty("blockAmbiguous").EnumerateArray());
+            Assert.Equal("NaN块", a.GetProperty("block").GetString());
+            Assert.Equal("无匹配", a.GetProperty("reason").GetString());
+            // histogram 全量：NaN 线仍计数（Line:4）；bbox 仅有限点（三角形 0,0→3,5）
+            var h = Assert.Single(a.GetProperty("histogram").EnumerateArray());
+            Assert.Equal("Line", h.GetProperty("type").GetString());
+            Assert.Equal(4, h.GetProperty("count").GetInt32());
+            Assert.Equal(3, a.GetProperty("bbox").GetProperty("maxX").GetDouble());
+            Assert.Equal(5, a.GetProperty("bbox").GetProperty("maxY").GetDouble());
+            var rec = Assert.Single(AuditRecords(), r => r.Entry.Kind == "semantic-scan");
+            using var p = JsonDocument.Parse(rec.Entry.ParamsJson);
+            Assert.Equal(1, p.RootElement.GetProperty("nonFiniteDropped").GetInt32());
+        }
+        finally { File.Delete(blockDxf); }
+    }
 }

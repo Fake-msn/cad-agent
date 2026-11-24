@@ -9,12 +9,29 @@ namespace CadAgent.Data.Semantic;
 // records namespace 级 public（ScanResult public 引用要求；类保持 internal）
 public sealed record BlockCandidate(string SymbolName, double Distance, double Confidence);
 public sealed record BlockSuggestion(string BlockName, int Instances, IReadOnlyList<BlockCandidate> Candidates);
-public sealed record BlockAmbiguous(string BlockName, int Instances, string Reason, IReadOnlyList<string> SampleHandles);
+/// <summary>
+/// 实体类型直方图条目（R9②，spec §13.2 歧义诊断）。**必须命名 record**——
+/// ValueTuple 的 Item1/Item2 是字段非属性，System.Text.Json 会序列化为 {}（陷阱钉死）。
+/// </summary>
+public sealed record BlockHistEntry(string Type, int Count);
+/// <summary>块定义几何 bbox（R9②，PointsOf 口径；零几何→null）。命名 record 同上防 {} 退化。</summary>
+public sealed record BlockBbox(double MinX, double MinY, double MaxX, double MaxY);
+/// <summary>
+/// 块级歧义项。R9② 加性末位：Histogram=块定义全部实体类型计数（含非白名单，诊断全量口径，
+/// 按 Type Ordinal 排序）；Bbox=块定义几何 bbox（BboxOf 口径：零 PointsOf 点→null；
+/// Hatch+AttDef 代理块可得退化点 bbox）。旧四字段逐字不变。
+/// </summary>
+public sealed record BlockAmbiguous(string BlockName, int Instances, string Reason, IReadOnlyList<string> SampleHandles,
+    IReadOnlyList<BlockHistEntry> Histogram, BlockBbox? Bbox);
 public sealed record BlockAutoSeed(string BlockName, string SymbolName, IReadOnlyList<string> Handles);
+/// <summary>
+/// R9③ 加性末位 NonFiniteDropped：matcher 内块+符号全部 Extract 调用剔除的非有限坐标实体
+/// 累计数（spec §13.4 "剔除+披露"）；无符号早退路径 0。旧七字段逐字不变。
+/// </summary>
 public sealed record BlockMatchResult(
     IReadOnlyList<BlockAutoSeed> AutoSeeds, IReadOnlyList<BlockSuggestion> Suggestions,
     IReadOnlyList<BlockAmbiguous> Ambiguous, int SymbolsLoaded, int SymbolsSkipped,
-    int BlocksScanned, int BlocksExcluded);
+    int BlocksScanned, int BlocksExcluded, int NonFiniteDropped);
 
 /// <summary>
 /// 块级纠偏三级匹配（spec §13.3）：符号索引（skill 包 DXF）→ 排除启发 →
@@ -57,6 +74,37 @@ internal static class BlockSymbolMatcher
         _ => Array.Empty<(double, double)>(),
     };
 
+    // R9② 诊断直方图：块定义**全部实体**类型计数（GetType().Name，含非白名单——诊断全量口径，
+    // 与指纹白名单剔除口径区分）；按 Type Ordinal 排序（披露确定性）。
+    private static IReadOnlyList<BlockHistEntry> HistogramOf(IEnumerable<Entity> ents) =>
+        ents.GroupBy(e => e.GetType().Name, StringComparer.Ordinal)
+            .Select(g => new BlockHistEntry(g.Key, g.Count()))
+            .OrderBy(h => h.Type, StringComparer.Ordinal)
+            .ToList();
+
+    // R9② 诊断 bbox：复用 PointsOf 口径（线端点/圆外接两角/多段线顶点/文本插入点——
+    // AttDef : TextEntity 插入点亦参与）。点基守卫：任一点非有限→该实体整条跳过
+    // （NaN/∞ 不入 JSON——System.Text.Json 默认拒绝非有限 double）；零点→null。
+    // 与 Extract 整条剔除口径有别：Extract 对 Arc 还守卫角度分量，此处仅守卫点——
+    // NaN 角但圆心/半径有限的弧 Extract 剔除、此处仍贡献 bbox 角点。
+    private static BlockBbox? BboxOf(IEnumerable<Entity> ents)
+    {
+        double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+        bool any = false;
+        foreach (var e in ents)
+        {
+            var pts = PointsOf(e).ToList();
+            if (pts.Any(p => !double.IsFinite(p.X) || !double.IsFinite(p.Y))) continue;
+            foreach (var (x, y) in pts)
+            {
+                any = true;
+                if (x < minX) minX = x; if (y < minY) minY = y;
+                if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+            }
+        }
+        return any ? new BlockBbox(minX, minY, maxX, maxY) : null;
+    }
+
     /// <summary>
     /// 三级匹配主入口：自动种子直接落 overlay（建议/歧义只披露不落）。
     /// 符号读失败/超白名单→跳过计数，不整体失败；无符号库→空结果且不动 overlay
@@ -74,6 +122,7 @@ internal static class BlockSymbolMatcher
         // 故此处宽捕（同 ComReplayService.Replay / StepEngine 隔离先例），漏型即整体失败。
         var symbols = new List<(string Name, SemanticClass Class, BlockFingerprint.Fingerprint Fp)>();
         int skipped = 0;
+        int nonFiniteDropped = 0; // R9③：块+符号全部 Extract 调用剔除数累计（早退路径归 0）
         foreach (var pkg in packages)
             foreach (var meta in pkg.Symbols)
             {
@@ -83,7 +132,8 @@ internal static class BlockSymbolMatcher
                     using var fs = File.OpenRead(path);
                     var src = new DxfReader(fs).Read();
                     if (src.Entities.Any(e => e is not (Line or Circle or Arc or TextEntity))) { skipped++; continue; }
-                    var fp = BlockFingerprint.Extract(src.Entities);
+                    var fp = BlockFingerprint.Extract(src.Entities, out int symDropped);
+                    nonFiniteDropped += symDropped; // null（跳过）路径剔除数亦披露
                     if (fp is null) { skipped++; continue; }
                     symbols.Add((meta.Name, meta.Class, fp));
                 }
@@ -91,10 +141,10 @@ internal static class BlockSymbolMatcher
                 { skipped++; }
             }
 
-        // 无符号库→空结果（不清 overlay、不报歧义——无索引可匹配）
+        // 无符号库→空结果（不清 overlay、不报歧义——无索引可匹配）；早退 NonFiniteDropped=0
         if (symbols.Count == 0)
             return new BlockMatchResult(Array.Empty<BlockAutoSeed>(), Array.Empty<BlockSuggestion>(),
-                Array.Empty<BlockAmbiguous>(), 0, skipped, 0, 0);
+                Array.Empty<BlockAmbiguous>(), 0, skipped, 0, 0, 0);
 
         // re-scan 清陈旧块级种子（仅 marker；保墙/轴 GeometryInference 与 HumanConfirmed）
         overlay.Annotations.RemoveAll(a => a.Provenance == Provenance.GeometryInference
@@ -115,13 +165,15 @@ internal static class BlockSymbolMatcher
             scanned++;
             var instances = insertsByBlock.FirstOrDefault(g => g.Key.Equals(block.Name, StringComparison.OrdinalIgnoreCase))?.ToList()
                 ?? new List<WalkedEntity>();
-            var fp = BlockFingerprint.Extract(block.Entities);
+            var fp = BlockFingerprint.Extract(block.Entities, out int blkDropped);
+            nonFiniteDropped += blkDropped; // R9③：null（代理）路径剔除数亦披露
             if (fp is null)
             {
                 // 零白名单几何——天正代理同构（代理实体不可读→块内无原生几何）
                 if (instances.Count >= minInstances)
                     ambiguous.Add(new BlockAmbiguous(block.Name, instances.Count, "代理图形不可读",
-                        instances.Take(5).Select(w => w.HandlePath).ToList()));
+                        instances.Take(5).Select(w => w.HandlePath).ToList(),
+                        HistogramOf(block.Entities), BboxOf(block.Entities)));
                 continue;
             }
             // 第一档：哈希精确→自动种子（多符号取首=包序+yaml 序确定性）
@@ -156,8 +208,9 @@ internal static class BlockSymbolMatcher
             // 第三档：无命中且高频（instances≥minInstances）→歧义披露
             if (instances.Count >= minInstances)
                 ambiguous.Add(new BlockAmbiguous(block.Name, instances.Count, "无匹配",
-                    instances.Take(5).Select(w => w.HandlePath).ToList()));
+                    instances.Take(5).Select(w => w.HandlePath).ToList(),
+                    HistogramOf(block.Entities), BboxOf(block.Entities)));
         }
-        return new BlockMatchResult(autoSeeds, suggestions, ambiguous, symbols.Count, skipped, scanned, excluded);
+        return new BlockMatchResult(autoSeeds, suggestions, ambiguous, symbols.Count, skipped, scanned, excluded, nonFiniteDropped);
     }
 }

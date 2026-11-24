@@ -447,4 +447,151 @@ public class BlockSymbolMatcherTests : IDisposable
         var expected = walked.Where(w => w.Entity is Insert).Take(5).Select(w => w.HandlePath).ToList();
         Assert.Equal(expected, a.SampleHandles); // Take(5) 序钉住
     }
+
+    // ---- R9②③ 诊断披露补全（spec §13.2 歧义诊断字段 / §13.4 NaN 剔除披露）----
+
+    /// <summary>
+    /// ② 歧义项 Histogram 逐字钉住：块定义**全部实体**类型计数（含非白名单 Hatch），
+    /// 按 Type Ordinal 排序；Bbox 数值钉住（PointsOf 口径：线端点+圆外接两角）。
+    /// </summary>
+    [Fact]
+    public void Ambiguous_HistogramSortedFullTypeCounts_BboxValuesPinned()
+    {
+        var doc = DocWithBlock("自定义块", br =>
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+            br.Entities.Add(new Circle { Center = new XYZ(1, 1, 0), Radius = 0.5 });
+            br.Entities.Add(new Hatch()); // 非白名单——诊断全量口径仍计数
+        });
+        var r = Run(doc);
+        var a = Assert.Single(r.Ambiguous);
+        Assert.Equal("无匹配", a.Reason);
+        // Ordinal 排序：Circle < Hatch < Line；record 值相等逐字钉住
+        Assert.Equal(new[] { new BlockHistEntry("Circle", 1), new BlockHistEntry("Hatch", 1), new BlockHistEntry("Line", 3) },
+            a.Histogram);
+        // bbox：线点 (0,0)/(1,5)/(3,1) + 圆外接 (0.5,0.5)/(1.5,1.5) → (0,0)-(3,5)
+        Assert.Equal(new BlockBbox(0, 0, 3, 5), a.Bbox);
+    }
+
+    /// <summary>② 代理块（仅 Hatch，零 PointsOf 点）：Bbox null + Histogram 仍全量披露。</summary>
+    [Fact]
+    public void Ambiguous_ProxyHatchOnly_BboxNull_HistogramFull()
+    {
+        var doc = DocWithBlock("$equip$0001", br => br.Entities.Add(new Hatch()));
+        var r = Run(doc);
+        var a = Assert.Single(r.Ambiguous);
+        Assert.Equal("代理图形不可读", a.Reason);
+        Assert.Null(a.Bbox); // 零几何 → null
+        Assert.Equal(new[] { new BlockHistEntry("Hatch", 1) }, a.Histogram);
+    }
+
+    /// <summary>
+    /// ② 代理块 Hatch+AttDef：Histogram 含全部非白名单类型（AttributeDefinition/Hatch）；
+    /// Bbox 按 PointsOf 口径——AttDef : TextEntity（探针实证）插入点参与 → 退化点 bbox。
+    /// </summary>
+    [Fact]
+    public void Ambiguous_ProxyHatchAttDef_HistogramFull_BboxFromInsertPoint()
+    {
+        var doc = DocWithBlock("$equip$0002", br =>
+        {
+            br.Entities.Add(new Hatch());
+            br.Entities.Add(new AttributeDefinition { Tag = "A", InsertPoint = new XYZ(2, 3, 0) });
+        });
+        var r = Run(doc);
+        var a = Assert.Single(r.Ambiguous);
+        Assert.Equal("代理图形不可读", a.Reason);
+        Assert.Equal(new[] { new BlockHistEntry("AttributeDefinition", 1), new BlockHistEntry("Hatch", 1) },
+            a.Histogram);
+        Assert.Equal(new BlockBbox(2, 3, 2, 3), a.Bbox); // 仅 AttDef 插入点 (2,3)
+    }
+
+    /// <summary>
+    /// ③ NonFiniteDropped 累计：符号含 NaN 线（nan.dxf 剔除 1）+ 块含 NaN 线（剔除 1）
+    /// → 求和 2（matcher 内所有 Extract 调用 dropped 累计口径）。
+    /// </summary>
+    [Fact]
+    public void NonFiniteDropped_BlockAndSymbolExtracts_Summed()
+    {
+        var nanSym = new CadDocument();
+        nanSym.Entities.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        nanSym.Entities.Add(new Circle { Center = new XYZ(5, 3, 0), Radius = 2 });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "nan.dxf")))
+            DxfWriter.Write(fs, nanSym);
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "symbols.yaml"),
+            "symbols:\n  - { name: 测试符号, file: sym.dxf, class: Device, description: 夹具 }\n  - { name: NaN符号, file: nan.dxf, class: Device, description: NaN }\n");
+        var doc = DocWithBlock("自定义块", br =>
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 5, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(1, 5, 0), EndPoint = new XYZ(3, 1, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(3, 1, 0), EndPoint = new XYZ(0, 0, 0) });
+            br.Entities.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(9, 9, 0) });
+        });
+        var r = Run(doc);
+        Assert.Equal(2, r.SymbolsLoaded);
+        Assert.Equal("无匹配", Assert.Single(r.Ambiguous).Reason);
+        Assert.Equal(2, r.NonFiniteDropped); // 符号 1 + 块 1
+    }
+
+    /// <summary>③ NaN-only 代理块（fp null 路径）：剔除数仍累计披露（out 重载通道，不丢计数）。</summary>
+    [Fact]
+    public void NonFiniteDropped_NaNOnlyProxyBlock_StillCounted()
+    {
+        var doc = DocWithBlock("$equip$0003", br =>
+        {
+            br.Entities.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(1, 1, 0) });
+            br.Entities.Add(new Hatch());
+        });
+        var r = Run(doc);
+        Assert.Equal("代理图形不可读", Assert.Single(r.Ambiguous).Reason);
+        Assert.Equal(1, r.NonFiniteDropped);
+    }
+
+    /// <summary>③ 空包早退：NonFiniteDropped=0（无 Extract 调用）。</summary>
+    [Fact]
+    public void EmptyPackages_NonFiniteDroppedZero()
+    {
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var walked = BlockWalker.Walk(doc, Array.Empty<SheetRecord>()).ToList();
+        var r = BlockSymbolMatcher.MatchAndSeed(doc, walked, new SemanticOverlay(), Array.Empty<SkillPackage>());
+        Assert.Equal(0, r.NonFiniteDropped);
+    }
+
+    /// <summary>③ 全符号损坏早退（symbols.Count==0）：NonFiniteDropped=0（早退路径 0 口径）。</summary>
+    [Fact]
+    public void AllSymbolsBroken_EarlyExit_NonFiniteDroppedZero()
+    {
+        File.WriteAllText(Path.Combine(_pkg, "symbols", "sym.dxf"), "不是 DXF");
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var r = Run(doc);
+        Assert.Equal(0, r.SymbolsLoaded);
+        Assert.Equal(0, r.NonFiniteDropped);
+    }
+
+    /// <summary>
+    /// ③ NaN-only 符号包早退判别（钉住批准设计"早退 0"口径，防日后"顺手修复"为累计值）：
+    /// 符号 DXF 仅一条 NaN 坐标 Line——过白名单→Extract null（symDropped 已累计 1）→
+    /// symbols.Count==0 早退→NonFiniteDropped==0 而非累计 1。与全符号损坏早退测试的判别差异：
+    /// 该路径确实发生了 Extract 剔除累计（损坏路径 catch 在 Extract 之前，累计恒 0 无判别力）。
+    /// 夹具镜像 BrokenSymbolDxf 覆盖模式；NaN 经 DxfWriter/DxfReader 往返保 NaN
+    /// （probe 实证，outputs/block-diagnostics/probe.txt）。
+    /// </summary>
+    [Fact]
+    public void NaNOnlySymbolPackage_EarlyExit_NonFiniteDroppedZero_NotAccumulated()
+    {
+        // 覆盖 sym.dxf 为 NaN-only（yaml 唯一符号）——Line 过白名单，Extract 全剔除→null→跳过
+        var nanOnly = new CadDocument();
+        nanOnly.Entities.Add(new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        using (var fs = File.Create(Path.Combine(_pkg, "symbols", "sym.dxf")))
+            DxfWriter.Write(fs, nanOnly);
+        var doc = DocWithBlock("符号块", SymbolGeometry);
+        var r = Run(doc);
+        Assert.Equal(0, r.SymbolsLoaded);
+        Assert.Equal(1, r.SymbolsSkipped); // fp null 跳过路径（非读取异常 catch 路径）
+        Assert.Equal(0, r.NonFiniteDropped); // 早退归 0——即使 symDropped 已累计 1，不得披露累计值
+        Assert.Empty(r.AutoSeeds);
+        Assert.Empty(r.Suggestions);
+        Assert.Empty(r.Ambiguous);
+    }
 }
