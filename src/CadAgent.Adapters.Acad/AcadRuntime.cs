@@ -36,19 +36,113 @@ public sealed class AcadRuntime : ICadRuntime
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
 
     // 切片A §4.1：天正 profile 感知启动的 exe 启动缝（测试注入；单元测试不得拉起真机）。
-    // 默认硬编码 "acad.exe"（安装 AutoCAD 2014 的真机环境 PATH 可解析；不做注册表
-    // LocalServer32 路径发现——T10 真机核定该假定，失败再收紧，避免提前过度设计）。
-    // 异常透传（复审修复波）：默认实现不吞 Win32Exception 等启动失败原因——由
-    // EnsureAppTArch 统一包装为 CadRuntimeException（消息拼入 ex.Message，inner 保留），
-    // 真机据此可见"文件不存在/权限拒绝"等具体原因，不落到无诊断的裸"启动失败"。
+    // T10 真机核定收紧（2026-11-25）：原假定「安装 AutoCAD 2014 的真机环境 PATH 可解析
+    // acad.exe」**实证失败**——Workstation 安装不写 PATH，裸 Process.Start("acad.exe")
+    // 抛 Win32Exception「系统找不到指定的文件」（诊断经本缝透传，见 EnsureAppTArch）。
+    // 故启动前解析安装路径：① 注册表 AcadLocation（HKLM/HKCU ...\Autodesk\AutoCAD\R*\ACAD-*，
+    // 版本降序）；② %ProgramFiles%\Autodesk\AutoCAD *\acad.exe 目录扫描（版本降序）；
+    // ③ 兜底裸 "acad.exe"（PATH 可解析环境保持旧行为；仍失败由 EnsureAppTArch 响亮上抛）。
+    internal static Func<string?> AcadExecutableResolver = DefaultResolveAcadExecutable;
+
+    private const string DefaultAcadExecutableName = "acad.exe";
+
     // 返回 null=启动失败（UseShellExecute 时 Process.Start 亦可能返回 null）。
     internal static Func<string, Process?> ProcessLauncher = profileName =>
-        Process.Start(new ProcessStartInfo
+        Process.Start(BuildStartInfo(profileName, AcadExecutableResolver() ?? DefaultAcadExecutableName));
+
+    // /p 启动参数构造（纯函数，单测钉住 FileName/Arguments/UseShellExecute，不拉起进程）。
+    internal static ProcessStartInfo BuildStartInfo(string profileName, string executable) =>
+        new ProcessStartInfo
         {
-            FileName = "acad.exe",
+            FileName = executable,
             Arguments = $"/p \"{profileName}\"",
             UseShellExecute = true,
-        });
+        };
+
+    // 安装路径解析纯逻辑（单测注入候选表；仅 File.Exists 探测，无进程/无 COM 副作用）。
+    internal static string? ResolveAcadExecutable(
+        IReadOnlyList<string> registryLocations, IReadOnlyList<string> installDirs)
+    {
+        foreach (var loc in registryLocations)
+        {
+            if (string.IsNullOrWhiteSpace(loc)) continue;
+            string exe = Path.Combine(loc, DefaultAcadExecutableName);
+            if (File.Exists(exe)) return exe;
+        }
+        foreach (var dir in installDirs)
+        {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
+            string exe = Path.Combine(dir, DefaultAcadExecutableName);
+            if (File.Exists(exe)) return exe;
+        }
+        return null;
+    }
+
+    private static string? DefaultResolveAcadExecutable() =>
+        ResolveAcadExecutable(DefaultAcadRegistryLocations(), DefaultAcadInstallDirs());
+
+    // 注册表候选位置（只读）：本机实证布局 HKLM\SOFTWARE\Autodesk\AutoCAD\R19.1\ACAD-D001:804
+    // → AcadLocation=C:\Program Files\Autodesk\AutoCAD 2014。不可读/不存在→空表回退目录扫描。
+    private static IReadOnlyList<string> DefaultAcadRegistryLocations()
+    {
+        var locations = new List<string>();
+        foreach (var root in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
+        {
+            try
+            {
+                using var acadRoot = root.OpenSubKey(@"SOFTWARE\Autodesk\AutoCAD");
+                if (acadRoot == null) continue;
+                var releases = acadRoot.GetSubKeyNames()
+                    .Where(n => n.StartsWith("R", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(VersionRank);
+                foreach (string release in releases)
+                {
+                    using var rk = acadRoot.OpenSubKey(release);
+                    if (rk == null) continue;
+                    foreach (string product in rk.GetSubKeyNames())
+                    {
+                        using var pk = rk.OpenSubKey(product);
+                        if (pk?.GetValue("AcadLocation") is string loc && !string.IsNullOrWhiteSpace(loc))
+                            locations.Add(loc);
+                    }
+                }
+            }
+            catch
+            {
+                // 注册表不可读（权限/布局差异）→ 回退下一候选源（目录扫描），不静默当"未安装"。
+            }
+        }
+        return locations;
+    }
+
+    // 常见安装目录扫描（版本降序；本机实证 %ProgramFiles%\Autodesk\AutoCAD 2014）。
+    private static IReadOnlyList<string> DefaultAcadInstallDirs()
+    {
+        var dirs = new List<string>();
+        try
+        {
+            string autodesk = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Autodesk");
+            if (Directory.Exists(autodesk))
+                dirs.AddRange(Directory.EnumerateDirectories(autodesk, "AutoCAD *")
+                    .OrderByDescending(VersionRank));
+        }
+        catch
+        {
+            // 目录不可枚举 → 空表（调用方兜底裸名）。
+        }
+        return dirs;
+    }
+
+    // 名称版本排序键：取名称首个数字串（"R19.1"→19、"AutoCAD 2014"→2014）；无数字→0。
+    internal static int VersionRank(string name)
+    {
+        int i = 0;
+        while (i < name.Length && !char.IsDigit(name[i])) i++;
+        int j = i;
+        while (j < name.Length && char.IsDigit(name[j])) j++;
+        return j > i && int.TryParse(name.AsSpan(i, j - i), out int v) ? v : 0;
+    }
 
     // 真机核定（2026-11-24，AutoCAD 2014 R19.1）：CreateInstance 返回≠初始化完成，
     // 启动窗口内 COM 调用抛 RPC_E_CALL_REJECTED(0x80010001)/RPC_E_SERVERCALL_RETRYLATER(0x8001010A)
@@ -492,19 +586,42 @@ public sealed class AcadRuntime : ICadRuntime
     {
         try
         {
-            return RetryBusy(() =>
-            {
-                // GetBoundingBox([ref]min,[ref]max)：IDispatch 出参经 object[] args 传递（spike phasea 实证）。
-                object[] args = { new double[3], new double[3] };
-                e.GetType().InvokeMember("GetBoundingBox",
-                    System.Reflection.BindingFlags.InvokeMethod, null, (object)e, args);
-                var min = (double[])args[0]; var max = (double[])args[1];
-                return new[] { min[0], min[1], min[2], max[0], max[1], max[2] };
-            });
+            return RetryBusy(() => ReadBbox(e));
         }
         catch (Exception)
         { return null; }  // bbox 尽力读（无此面/类型不匹配→null，ReadOk 仍 true；spec §4 诚实边界）
     };
+
+    // GetBoundingBox([ref]min,[ref]max)：IDispatch 出参**必须**以 object[] 占位 + by-ref
+    // ParameterModifier 传递——T10 真机实证：仅传 double[3] 占位（不标 by-ref）时 COM 不回写，
+    // 读回恒为全零假 bbox（handle-ops 真机首跑 move 分量 before=0/after=0 即此根因）；
+    // spike phasea 已实证 by-ref 形态（min/max 回写为真实 3D 点）。非常规返回形态→null（诚实降级）。
+    internal static double[]? ReadBbox(object entity)
+    {
+        object[] args = { null!, null! };
+        var byRef = new System.Reflection.ParameterModifier(2);
+        byRef[0] = true; byRef[1] = true;
+        entity.GetType().InvokeMember("GetBoundingBox",
+            System.Reflection.BindingFlags.InvokeMethod, null, entity, args,
+            new System.Reflection.ParameterModifier[] { byRef }, null, null);
+        double[]? min = ToVec3(args[0]);
+        double[]? max = ToVec3(args[1]);
+        if (min == null || max == null) return null;
+        return new[] { min[0], min[1], min[2], max[0], max[1], max[2] };
+    }
+
+    // COM SAFEARRAY(double)×3 → double[3]（I4 归一）。非 3 元数组/不可转数值→null。
+    internal static double[]? ToVec3(object? value)
+    {
+        if (value is Array arr && arr.Length == 3)
+        {
+            var v = new double[3];
+            for (int i = 0; i < 3; i++)
+                v[i] = Convert.ToDouble(arr.GetValue(i), System.Globalization.CultureInfo.InvariantCulture);
+            return v;
+        }
+        return null;
+    }
 
     // spec 切片A §4.1：逐实体 ObjectName 分类→TDb 读自定义名参数；非 TDb 返回 null 跳过。
     // ObjectName 不可读（忙窗耗尽）→ ReadOk=false 占位（不静默当"无此实体"）；单属性缺不降 ReadOk。
