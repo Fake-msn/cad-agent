@@ -579,6 +579,7 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **③ NaN/∞ 剔除披露闭合（§13.4 字面"剔除+披露"）**：`Fingerprint` 加性末位 `DroppedNonFinite`（Extract Finite 守卫命中整条剔除计 1）+ `Extract(entities, out int droppedNonFinite)` 加性重载（旧单参签名逐字保持委托；**null 返回路径剔除数不丢**——NaN-only 代理块仍披露）；`BlockMatchResult` 加性末位 `NonFiniteDropped`（matcher 内**块+符号全部 Extract 调用** dropped 累计，含跳过符号与代理块的 null 路径；无符号早退路径 0）；stdout 加性键 `nonFiniteDropped` **恒在**（无包 0）+ 审计 semantic-scan params 加性 `nonFiniteDropped`。NaN 夹具经 DxfWriter/DxfReader 往返保 NaN（探针实证），E2E 全链 stdout/审计双通道=1 钉住；histogram 全量（NaN 线仍计数）与指纹/bbox 剔除口径区分钉住。
 - **① 圆半径比签名仍 deferred（明示不做）**：Compatible 判据保持三类计数逐等+|Aspect 差|≤0.2，半径差只入 Distance——本切片仅 scan 诊断披露面，匹配行为零改动；View/CLI map-block 逻辑零改动；Scan 签名/旧 stdout 键/审计旧字段逐字不变（records 加性末位，构造点仅 matcher 内部同步）。
 - **门禁**：`outputs/block-diagnostics/gate-sln.log`（**1292**=Llm 33+Core 235+Data 379+Acad 9+View 381+Zwcad 10+Cli 245，**4 跳过**=Acad 真机无 AutoCAD 运行时；0 失败；基线 main 1278 + 本切片 14 新测试【T1 指纹 4+T2 匹配器 7+E2E 3】，真实标本 skip-gated 本机实跑【+Histogram 非空/排序断言】；TDD 先红后绿【E2E 运行时红 3+Data 编译红】；ZWCAD 前后 tasklist 无残留）。
+- **门禁数字更正（micro fix wave，追加式旧文 0 删）**：上行数字为 feature 提交（3ecca6d）时点口径；审查时点（76ac080）终态 **1294/0 失败/3 跳过/15 新测试**（Data 380；Acad 10 过/3 跳=本机 AutoCAD 运行时可用性变化，非代码问题——PR#22 M3 先例同类；证据 `outputs/block-diagnostics/final-gate.log`）；本波 M2 再 +1 退化 null dropped 判别测试 → Data **381**（本波 Data.Tests 全量复跑绿），对应全 sln **1295/16 新测试**（Acad 过/跳随本机运行时可用性口径同上）。
 
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 

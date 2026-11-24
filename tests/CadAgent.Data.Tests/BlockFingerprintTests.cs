@@ -307,4 +307,19 @@ public class BlockFingerprintTests
         Assert.Equal(1, dropped2);
         Assert.Equal(fp2.DroppedNonFinite, dropped2);
     }
+
+    /// <summary>③ out 重载第二 null 分支（退化 bbox）dropped 判别：零长 Line（白名单存活但
+    /// bbox 0×0 → scale&lt;1e-9）+ NaN Line（剔除计 1）→ fp null 且 dropped=1——
+    /// 钉住退化 null 路径剔除数同样不丢（与零白名单 null 分支测试形成判别对）。</summary>
+    [Fact]
+    public void Extract_OutOverload_DegenerateBboxNullFp_DroppedStillCounted()
+    {
+        var fp = BlockFingerprint.Extract(new List<Entity>
+        {
+            new Line { StartPoint = new XYZ(3, 7, 0), EndPoint = new XYZ(3, 7, 0) }, // 零长线：白名单存活，bbox 退化
+            new Line { StartPoint = new XYZ(double.NaN, 0, 0), EndPoint = new XYZ(1, 1, 0) }, // NaN 线：整条剔除计 1
+        }, out int dropped);
+        Assert.Null(fp); // 退化 bbox null（非零白名单 null——白名单计数=1）
+        Assert.Equal(1, dropped);
+    }
 }

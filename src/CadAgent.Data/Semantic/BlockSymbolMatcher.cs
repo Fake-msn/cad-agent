@@ -83,8 +83,10 @@ internal static class BlockSymbolMatcher
             .ToList();
 
     // R9② 诊断 bbox：复用 PointsOf 口径（线端点/圆外接两角/多段线顶点/文本插入点——
-    // AttDef : TextEntity 插入点亦参与）。整条口径与 Extract 一致：任一点非有限→该实体整条
-    // 跳过（NaN/∞ 不入 JSON——System.Text.Json 默认拒绝非有限 double）；零点→null。
+    // AttDef : TextEntity 插入点亦参与）。点基守卫：任一点非有限→该实体整条跳过
+    // （NaN/∞ 不入 JSON——System.Text.Json 默认拒绝非有限 double）；零点→null。
+    // 与 Extract 整条剔除口径有别：Extract 对 Arc 还守卫角度分量，此处仅守卫点——
+    // NaN 角但圆心/半径有限的弧 Extract 剔除、此处仍贡献 bbox 角点。
     private static BlockBbox? BboxOf(IEnumerable<Entity> ents)
     {
         double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
