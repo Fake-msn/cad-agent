@@ -24,6 +24,13 @@ public sealed class ZwcadRuntime : ICadRuntime
     private dynamic? _doc;
     private bool _disposed;
 
+    // 重名碰撞守卫（对齐 AcadRuntime 已审查语义）：本文档会话经 EnsureBlock 成功创建的块名集合。
+    // 重入补全只对"本方创建"的块清除重建；预存用户块（名不在集合）一律复用早退——
+    // skill 符号名与用户图纸自有块重名（如 "DOOR"）时不得删除用户内容（非破坏）。
+    // ZWCAD 块名大小写不敏感（与 insert-symbol 符号匹配同口径 OrdinalIgnoreCase）；
+    // Open 换文档即清空：跨文档同名块不属于本文档会话的"本方残留"。
+    private readonly HashSet<string> _createdBlocks = new(StringComparer.OrdinalIgnoreCase);
+
     public ZwcadRuntime()
     {
         _staThread = new Thread(() =>
@@ -73,7 +80,12 @@ public sealed class ZwcadRuntime : ICadRuntime
 
     public void Open(string drawingPath) => Run(() =>
     {
-        try { _doc = EnsureApp().Documents.Open(drawingPath); }
+        try
+        {
+            _doc = EnsureApp().Documents.Open(drawingPath);
+            // 换文档即失效本方创建块名集合（重名碰撞守卫按文档会话口径，防跨文档误清，镜像 Acad）。
+            _createdBlocks.Clear();
+        }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"打开图纸失败: {ex.Message}", ex); }
     });
@@ -180,28 +192,58 @@ public sealed class ZwcadRuntime : ICadRuntime
         try
         {
             dynamic blocks = _doc.Blocks;
-            bool exists = false;
-            try { dynamic b0 = blocks.Item(blockName); exists = b0 != null; }
-            catch { exists = false; }
-            if (exists) return;
+            dynamic? existing = null;
+            // Item 宽 catch 与 Acad 现状一致（收窄 tracked 不扩）：不存在/COM 探测失败均走创建通道。
+            try { existing = blocks.Item(blockName); }
+            catch { existing = null; /* 不存在→创建 */ }
+            if (existing != null)
+            {
+                // 重名碰撞守卫（对齐 Acad）：名不在本方创建集合=预存用户块（skill 符号名
+                // 撞用户自有块）→复用早退（非破坏），绝不 Delete 用户内容。
+                if (!_createdBlocks.Contains(blockName)) return;
+                // 重入补全（对齐 Acad）：本方先前失败可能残留部分块（中途 COM 失败）——
+                // 静默早退会留下静默部分块（读回计数闸只数模型空间，兜不住块内容）。
+                // 比对块内实体数与期望基元数：完整→复用（幂等保持）；不一致（不足=残留）→
+                // 倒序清除残留基元再重建。仅本方创建块（_createdBlocks 守卫）清除安全；
+                // 块定义本身保留（origin 不变，引用不受影响）。
+                // ZWCAD COM 与 AutoCAD 同构：block.Count/.Item(i)/.Delete()（真机测试核定）。
+                int count = (int)existing.Count;
+                if (count == primitives.Count) return;
+                for (int i = count - 1; i >= 0; i--)
+                {
+                    dynamic item = existing.Item(i);
+                    item.Delete();
+                }
+                AddBlockPrimitives(existing, primitives);
+                return;
+            }
             // Blocks.Add 签名序按厂商 profile 分支（ZWCAD 实测 origin 先；AutoCAD 文档 Name 先）
             dynamic block = VendorProfiles.Zwcad.BlocksAddNameFirst
                 ? blocks.Add(blockName, Pt(0, 0))
                 : blocks.Add(Pt(0, 0), blockName);
-            foreach (var p in primitives)
-            {
-                switch (p)
-                {
-                    case BlockLine l: block.AddLine(Pt(l.X1, l.Y1), Pt(l.X2, l.Y2)); break;
-                    case BlockCircle c: block.AddCircle(Pt(c.X, c.Y), c.Radius); break;
-                    case BlockText t: block.AddText(t.Value, Pt(t.X, t.Y), t.Height); break;
-                    default: throw new CadRuntimeException($"不支持的块基元: {p.GetType().Name}");
-                }
-            }
+            // 创建成功即入本方集合（先于基元填充）：中途失败残留的部分块也属"本方"，
+            // 重入走补全重建通道；预存用户块永不入集合。
+            _createdBlocks.Add(blockName);
+            AddBlockPrimitives(block, primitives);
         }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"EnsureBlock 失败: {ex.Message}", ex); }
     });
+
+    // 块基元填充（创建与重入补全共用；Zwcad 无忙重试基础设施，单次 COM 失败即上抛）。
+    private static void AddBlockPrimitives(dynamic block, IReadOnlyList<BlockPrimitive> primitives)
+    {
+        foreach (var p in primitives)
+        {
+            switch (p)
+            {
+                case BlockLine l: block.AddLine(Pt(l.X1, l.Y1), Pt(l.X2, l.Y2)); break;
+                case BlockCircle c: block.AddCircle(Pt(c.X, c.Y), c.Radius); break;
+                case BlockText t: block.AddText(t.Value, Pt(t.X, t.Y), t.Height); break;
+                default: throw new CadRuntimeException($"不支持的块基元: {p.GetType().Name}");
+            }
+        }
+    }
 
     public int EntityCount() => Run(() =>
     {
