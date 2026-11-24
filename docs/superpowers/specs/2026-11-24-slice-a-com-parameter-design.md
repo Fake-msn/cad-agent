@@ -28,7 +28,7 @@
 | `TDbClassMap` | Core | 静态映射 TDbWall→Wall/TDbColumn→Column/TDbEquipment→Equipment/TDbText→Annotation/TDbDrawingName→Annotation/TDbSymbArrow→Annotation；未知→Unknown（仍记参数） |
 | `NativeParamSeeder` | Data.Semantic | 消费读参结果 → 句柄锚定写 overlay.NativeEntities（幂等 by Handle）→ Class!=Unknown&&ReadOk 同步产 Annotation(Provenance.NativeParameter 0.95) |
 | `NativeGateRefinement` | Data | 逐实体松绑判据：目标句柄在 NativeEntities 且 ReadOk 且本轮 COM 重读校验一致 → 该实体允许修改（census 全图闸前的补充豁免） |
-| CLI `semantic scan --native` | Cli | 触发 COM 读参→Seeder→overlay；stdout/审计加性 nativeRead/nativeSkipped/nativeClassified/nativeReadFailed |
+| CLI `semantic scan --native` | Cli | 触发 COM 读参→Seeder→overlay；stdout/审计加性 nativeRead/nativeClassified/nativeReadFailed |
 
 **边界**：Core 零 COM（接口+record）；COM 细节全在 AcadRuntime；Data 只消费抽象结果；census 主闸不动，松绑是独立补充判据。
 
@@ -62,7 +62,7 @@ CLI semantic scan --native
       │    需 TDb 读参 → Process.Start acad.exe /p "TElec20V5"
       │    → 1s 轮询 ROT GetActiveObject ≤180s → Gate1(Version 非空+docs.Count≥1, 重试)
       │    （既有 COM 激活路径保留给非天正场景；二者互斥由调用意图决定）
-      ├─ Open(副本, ReadOnly) → 拒绝重试 → Gate2(ModelSpace.Count>0)
+      ├─ Open(原图, ReadOnly=true)（不另建副本）→ 拒绝重试 → Gate2(ModelSpace.Count>0)
       ├─ 逐实体：ObjectName（RetryBusy）→ TDb*? → 是：按类读自定义名参数（逐读 RetryBusy，
       │    UNKNOWNNAME=该属性不存在→记缺省不重试）+ GetBoundingBox → NativeEntityParam
       │    非 TDb（AcDb*）→ 跳过（文件级已可读，无需 COM）
@@ -71,7 +71,7 @@ CLI semantic scan --native
       ├─ overlay.UpsertNative 逐条（by Handle）
       └─ Class!=Unknown && ReadOk → UpsertAnnotation(NativeParameter 0.95)
   → overlay.Save（原子写）
-  → stdout/审计加性：nativeRead/nativeSkipped(非TDb)/nativeClassified/nativeReadFailed
+  → stdout/审计加性：nativeRead/nativeClassified/nativeReadFailed（三键；非 TDb 跳过不单列计数）
 ```
 
 ### 4.2 逐实体松绑修改路径（census Yellow 下，仅 COM live 通道）
@@ -94,7 +94,7 @@ CLI semantic scan --native
 
 **忙窗与读取语义**（spike 根因生产化）：
 - 每次 COM 读（ObjectName/参数/bbox/Count）经 `RetryBusy` 单调用重试——复用 AcadRuntime 既有 `IsBusyRejection`（0x80010001/0x8001010A + MissingMemberException 包装形态）。
-- **空读≠不存在**：重试至非空；重试耗尽→该实体 `ReadOk=false`（不静默当"无此实体"），计入 `nativeReadFailed` 披露。
+- **空读≠不存在**：重试至非空；重试耗尽→该实体 `ReadOk=false`（不静默当"无此实体"），计入 `nativeReadFailed` 披露。**实现口径更正（2026-11-26 最终复审）**：整读失败（Gate/遍历抛）→ `native-read-failed` 审计 + 异常（扫描侧降级计数归 0）；逐实体 `ReadOk=false` 仅在 ObjectName/属性返回 null 路径可达（生产近不可达，属防御占位）。
 - **UNKNOWNNAME（0x80020006）=属性不存在**：该属性记缺省、**不重试**；逐属性独立判定，单属性缺不致整实体 ReadOk=false（除非 ObjectName 本身不可读）。
 
 **附着与启动失败**：
@@ -122,14 +122,18 @@ CLI semantic scan --native
 - /p 启动+ROT 附着→ReadNativeParams 读真实 16#1116.dwg 副本：TDbWall LeftWidth=100/Height=3000/Volume=2.895 跨轮逐字闭合（spike 基准值）；ObjectName 分类 TDb vs AcDb 计数与 census 398 对照。
 - 忙窗注入（启动后即读）→重试后全非空。
 - CUIX/源件/副本 SHA 前后一致；tasklist 前后清零；自家实例 Close+Quit 清理。
-- 逐实体松绑真机 E2E：TDbWall 句柄 NativeParameter 落 overlay→live 修改放行+读回；未读参实体仍拒。
+- 逐实体松绑真机 E2E（overlay→live→读回整链单次真机）**未跑**——诚实边界（2026-11-26 最终复审裁定，见 §7）：运行时层以 `AcadNativeLiveTests` 3 真机覆盖（读参基准/忙窗/句柄层改读回+金丝雀），CLI 准入/交付层以 fake E2E 覆盖；整链单次真机 E2E 未执行，不假装已验。
 
 **ISTQB 透镜**（合并前审查口径）：等价类（TDb/AcDb/未知 ObjectName）、边界（忙窗耗尽/UNKNOWNNAME 单属性 vs ObjectName）、异常双路径（重试成功/耗尽）、拒绝面全 reason 覆盖、100% 覆盖闸口判据（安全关键）。
 
-**纪律**：真实标本 skip-gated 不入库；读参路径全程只读副本零写入；真机串行（xunit.runner.json + Collection）。
+**纪律**：真实标本 skip-gated 不入库；读参路径以 ReadOnly=true 打开原图（不建副本）零写入；真机串行（xunit.runner.json + Collection）。
 
 ## 7. 范围外（明示不做，YAGNI）
 
+- **验证边界（2026-11-26 最终复审记录，诚实边界）**：逐实体松绑真机 E2E=运行时层真机绿
+  （`AcadNativeLiveTests` 3 真机：读参基准/忙窗/句柄层改读回）+ CLI 准入/交付层=fake E2E
+  （`NativeLiveAdmissionTests` 全 Pass/拒绝面/零写入回归，零 COM）；**整链单次真机 E2E
+  （overlay→live→读回一次跑通）未跑**，作为诚实边界记录，不假装已验。
 - 切片 B：.NET Explode 中心线/符号块/XData 推导——另立切片。
 - TDbSymbArrow 双通道拒 eInvalidInput 根因、块内零 extents 文本、块定义 55 TDb 实体、电气 TDbE* 真机核实——边界补齐留后续。
 - 整图 Green 升级、阈值升 Green——本切片不做（用户裁定逐实体精准松绑）。
