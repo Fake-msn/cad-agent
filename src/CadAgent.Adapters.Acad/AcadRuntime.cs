@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using CadAgent.Core.Cad;
 
@@ -32,6 +33,28 @@ public sealed class AcadRuntime : ICadRuntime
 
     internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
+
+    // 切片A §4.1：天正 profile 感知启动的 exe 启动缝（测试注入；单元测试不得拉起真机）。
+    // 默认硬编码 "acad.exe"（安装 AutoCAD 2014 的真机环境 PATH 可解析；不做注册表
+    // LocalServer32 路径发现——T10 真机核定该假定，失败再收紧，避免提前过度设计）。
+    // 返回 null=启动失败（EnsureAppTArch 统一转 CadRuntimeException；UseShellExecute 时
+    // Process.Start 亦可能返回 null）。
+    internal static Func<string, Process?> ProcessLauncher = profileName =>
+    {
+        try
+        {
+            return Process.Start(new ProcessStartInfo
+            {
+                FileName = "acad.exe",
+                Arguments = $"/p \"{profileName}\"",
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            return null;
+        }
+    };
 
     // 真机核定（2026-11-24，AutoCAD 2014 R19.1）：CreateInstance 返回≠初始化完成，
     // 启动窗口内 COM 调用抛 RPC_E_CALL_REJECTED(0x80010001)/RPC_E_SERVERCALL_RETRYLATER(0x8001010A)
@@ -145,6 +168,54 @@ public sealed class AcadRuntime : ICadRuntime
                 Thread.Sleep(StartupRetryDelay);
             }
         }
+    }
+
+    // ---- 切片A §4.1：天正 profile 感知启动（/p 启动 + ROT 附着 + Gate1）----
+    // 与既有 EnsureApp（普通 COM 激活→默认 profile，无 TArch）互斥：_app 已存在即复用，
+    // 不得再拉起第二实例（双实例共享用户 profile 会竞态损坏 CUIX，VendorGuard 语义）。
+    // 流程：守卫→/p "profileName" 启动 acad.exe→ROT 附着（AcadAttach）→Gate1 就绪等待。
+    // 调用方（ReadNativeParams，Task 5）经 Run 在 STA 队列内执行。
+    internal dynamic EnsureAppTArch(string profileName)
+    {
+        if (_app != null) return _app;
+        VendorGuard.EnsureNoForeignInstance(Profile);
+        Process? proc;
+        try { proc = ProcessLauncher(profileName); }
+        catch (Exception ex) { throw new CadRuntimeException("天正实例启动失败", ex); }
+        if (proc == null)
+            throw new CadRuntimeException("天正实例启动失败");
+        _app = AcadAttach.AttachOnly(Profile.ProgId);
+        WaitTArchGate1();
+        return _app;
+    }
+
+    // Gate1（spike 协议步骤3）：ROT 附着成功≠天正初始化完成——Version 非空字符串且
+    // 至少 1 个文档（/p 启动默认开 Drawing1.dwg）才可安全读参。就绪条件不满足→按
+    // StartupRetryDelay 有界重试（StartupRetryAttempts 次）；忙拒绝由内层 RetryBusy
+    // 自行有界重试，其耗尽即"确实未就绪"→直接 Gate1 终局（不叠加外层重试放大总时长）。
+    // 耗尽→响亮拒绝（不无限挂起，CLI 据此降级）。
+    private void WaitTArchGate1()
+    {
+        Exception? last = null;
+        for (int i = 0; i < StartupRetryAttempts; i++)
+        {
+            try
+            {
+                var version = RetryBusy(() => (string)_app!.Version);
+                if (!string.IsNullOrEmpty(version) && RetryBusy(() => (int)_app!.Documents.Count) >= 1)
+                    return;
+            }
+            catch (Exception ex) when (IsBusyRejection(ex))
+            {
+                // RetryBusy 已用完 StartupRetryAttempts 次忙重试仍被拒——终局不再叠加。
+                throw new CadRuntimeException("天正实例未就绪（Gate1 超时）", ex);
+            }
+            catch (Exception ex) { last = ex; /* 其他未就绪错误：按 Gate1 预算重试到界 */ }
+            Thread.Sleep(StartupRetryDelay);
+        }
+        throw last == null
+            ? new CadRuntimeException("天正实例未就绪（Gate1 超时）")
+            : new CadRuntimeException("天正实例未就绪（Gate1 超时）", last);
     }
 
     // 孤儿注册/激活失败/守卫超时均优雅降级 Available=false（CLI 据此走 DXF 降级+警示）。
