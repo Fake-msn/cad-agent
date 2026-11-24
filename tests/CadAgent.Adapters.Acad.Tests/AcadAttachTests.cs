@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using CadAgent.Adapters.Acad;
@@ -56,6 +57,7 @@ public class EnsureAppTArchTests : IDisposable
     private readonly Func<string, Process?> _origLauncher = AcadRuntime.ProcessLauncher;
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
     private readonly Func<string[]> _origNames = VendorGuard.ProcessNames;
+    private readonly Func<Process, bool> _origCleanup = AcadRuntime.TarchProcessCleanup;
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
 
@@ -72,11 +74,13 @@ public class EnsureAppTArchTests : IDisposable
         AcadRuntime.ProcessLauncher = _origLauncher;
         AcadAttach.ActiveObjectResolver = _origActive;
         VendorGuard.ProcessNames = _origNames;
+        AcadRuntime.TarchProcessCleanup = _origCleanup;
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
     }
 
-    /// <summary>假 app：Gate1 读 Version + Documents.Count（两者可配）；Visible 供复用用例走 GetInfo。</summary>
+    /// <summary>假 app：Gate1 读 Version + Documents.Count（两者可配）；Visible 供复用用例走 GetInfo；
+    /// QuitCalls 供失败清理用例断言"优雅 Quit 优先"。</summary>
     public sealed class GateApp
     {
         private readonly string _version;
@@ -85,7 +89,8 @@ public class EnsureAppTArchTests : IDisposable
         public string Version => _version;
         public GateDocs Documents => new(_docCount);
         public bool Visible { get; set; }
-        public void Quit() { }
+        public int QuitCalls { get; private set; }
+        public void Quit() => QuitCalls++;
     }
 
     public sealed class GateDocs
@@ -101,6 +106,15 @@ public class EnsureAppTArchTests : IDisposable
         public string Version => throw new COMException("起不来 (0x80010001)", unchecked((int)0x80010001));
         public GateDocs Documents => new(0);
         public void Quit() { }
+    }
+
+    /// <summary>假 app：读参/Quit 全被忙拒绝——失败清理的优雅 Quit 也失败，走进程兜底 Kill。</summary>
+    public sealed class BusyQuitGateApp
+    {
+        public string Version => throw new COMException("起不来 (0x80010001)", unchecked((int)0x80010001));
+        public GateDocs Documents => new(0);
+        public void Quit() =>
+            throw new COMException("退不出 (0x80010001)", unchecked((int)0x80010001));
     }
 
     [Fact]
@@ -166,5 +180,87 @@ public class EnsureAppTArchTests : IDisposable
         var app = (object)rt.EnsureAppTArch("TElec20V5");
         Assert.Same(fake, app); // 互斥复用：不得重启/再附着
         Assert.Equal(0, launches);
+    }
+
+    // 复审修复波（spec §5「启动失败不残留进程」）：已附着但优雅 Quit 也被忙拒绝 → 对本次
+    // 启动的 Process 兜底清理；原 CadRuntimeException 消息原样上抛；_app 置空使再次
+    // EnsureAppTArch 真正重启（不得因残留缓存早退返回已失效对象）。
+    // 清理缝注入：不 Start 真进程（默认缝在未 Start 的 fake Process 上抛异常并吞掉）。
+    [Fact]
+    public void EnsureAppTArch_Gate1Timeout_CleansUpLaunchedProcess_AndOriginalMessageSurvives()
+    {
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        int launches = 0;
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => { launches++; return launched = new Process(); };
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        // 忙拒绝穿透 Gate1，且优雅 Quit 同样被拒→退出降级为进程兜底。
+        AcadAttach.ActiveObjectResolver = _ => new BusyQuitGateApp();
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Contains("Gate1 超时", ex.Message); // 清理不得掩盖原异常
+        Assert.Same(launched, cleaned);            // 清理对象=本方启动的 Process
+
+        // _app 已置空：第二次调用重新启动并再次响亮失败（而非早退返回残留对象）。
+        Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Equal(2, launches);
+    }
+
+    // 复审修复波：附着阶段抛非超时内部错误（如 P/Invoke 缺失）→ 仍清理本方进程，
+    // 原异常原样上抛（清理不得包装/掩盖根因）。
+    [Fact]
+    public void EnsureAppTArch_AttachThrows_CleansUpLaunchedProcess_AndRethrowsOriginal()
+    {
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => launched = new Process();
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        AcadAttach.ActiveObjectResolver = _ => throw new TypeLoadException("EntryPointNotFound");
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<TypeLoadException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Equal("EntryPointNotFound", ex.Message);
+        Assert.Same(launched, cleaned);
+    }
+
+    // 复审修复波：已附着（_app 由 ROT 赋值）→ 优雅 Quit 优先；Quit 成功不再动进程句柄。
+    [Fact]
+    public void EnsureAppTArch_Gate1Timeout_AttachedApp_QuitsGracefullyWithoutProcessKill()
+    {
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        bool cleanupCalled = false;
+        AcadRuntime.TarchProcessCleanup = _ => { cleanupCalled = true; return true; };
+        var fake = new GateApp("19.1s (LMS Tech)", 0); // 附着成功但未就绪
+        AcadAttach.ActiveObjectResolver = _ => fake;
+        using var rt = new AcadRuntime();
+
+        Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Equal(1, fake.QuitCalls);   // 优雅优先
+        Assert.False(cleanupCalled);       // Quit 成功→不升级为 Kill
+    }
+
+    // 复审修复波（finding 2）：launcher 异常不得被吞——包装消息须含 Win32 真因，inner 保留。
+    [Fact]
+    public void EnsureAppTArch_LauncherThrows_WrapsWin32ReasonNotSwallowed()
+    {
+        AcadRuntime.ProcessLauncher = _ => throw new Win32Exception("找不到 acad.exe");
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+        Assert.Contains("天正实例启动失败", ex.Message);
+        Assert.Contains("找不到 acad.exe", ex.Message);
+        Assert.IsType<Win32Exception>(ex.InnerException);
+    }
+
+    // 复审修复波：默认清理缝对"未 Start 的 fake Process"必须吞异常不抛（测试/真机句柄失效常态）。
+    [Fact]
+    public void DefaultTarchCleanup_NotStartedProcess_SwallowedReturnsFalse()
+    {
+        Assert.False(_origCleanup(new Process()));
     }
 }

@@ -37,24 +37,17 @@ public sealed class AcadRuntime : ICadRuntime
     // 切片A §4.1：天正 profile 感知启动的 exe 启动缝（测试注入；单元测试不得拉起真机）。
     // 默认硬编码 "acad.exe"（安装 AutoCAD 2014 的真机环境 PATH 可解析；不做注册表
     // LocalServer32 路径发现——T10 真机核定该假定，失败再收紧，避免提前过度设计）。
-    // 返回 null=启动失败（EnsureAppTArch 统一转 CadRuntimeException；UseShellExecute 时
-    // Process.Start 亦可能返回 null）。
+    // 异常透传（复审修复波）：默认实现不吞 Win32Exception 等启动失败原因——由
+    // EnsureAppTArch 统一包装为 CadRuntimeException（消息拼入 ex.Message，inner 保留），
+    // 真机据此可见"文件不存在/权限拒绝"等具体原因，不落到无诊断的裸"启动失败"。
+    // 返回 null=启动失败（UseShellExecute 时 Process.Start 亦可能返回 null）。
     internal static Func<string, Process?> ProcessLauncher = profileName =>
-    {
-        try
+        Process.Start(new ProcessStartInfo
         {
-            return Process.Start(new ProcessStartInfo
-            {
-                FileName = "acad.exe",
-                Arguments = $"/p \"{profileName}\"",
-                UseShellExecute = true,
-            });
-        }
-        catch
-        {
-            return null;
-        }
-    };
+            FileName = "acad.exe",
+            Arguments = $"/p \"{profileName}\"",
+            UseShellExecute = true,
+        });
 
     // 真机核定（2026-11-24，AutoCAD 2014 R19.1）：CreateInstance 返回≠初始化完成，
     // 启动窗口内 COM 调用抛 RPC_E_CALL_REJECTED(0x80010001)/RPC_E_SERVERCALL_RETRYLATER(0x8001010A)
@@ -174,19 +167,76 @@ public sealed class AcadRuntime : ICadRuntime
     // 与既有 EnsureApp（普通 COM 激活→默认 profile，无 TArch）互斥：_app 已存在即复用，
     // 不得再拉起第二实例（双实例共享用户 profile 会竞态损坏 CUIX，VendorGuard 语义）。
     // 流程：守卫→/p "profileName" 启动 acad.exe→ROT 附着（AcadAttach）→Gate1 就绪等待。
+    // 失败路径不残留进程（spec §5）：经 CleanupTArchFailure 优雅 Quit / 兜底 Kill 本方进程。
     // 调用方（ReadNativeParams，Task 5）经 Run 在 STA 队列内执行。
     internal dynamic EnsureAppTArch(string profileName)
     {
         if (_app != null) return _app;
         VendorGuard.EnsureNoForeignInstance(Profile);
-        Process? proc;
-        try { proc = ProcessLauncher(profileName); }
-        catch (Exception ex) { throw new CadRuntimeException("天正实例启动失败", ex); }
-        if (proc == null)
-            throw new CadRuntimeException("天正实例启动失败");
-        _app = AcadAttach.AttachOnly(Profile.ProgId);
-        WaitTArchGate1();
-        return _app;
+        Process? proc = null;
+        try
+        {
+            // 复审修复波：默认 launcher 异常已透传（不再吞 Win32 原因），此处统一包装并
+            // 拼入 ex.Message（inner 保留），保证真机可见"acad.exe 未找到/权限拒绝"诊断。
+            try { proc = ProcessLauncher(profileName); }
+            catch (Exception ex) { throw new CadRuntimeException($"天正实例启动失败: {ex.Message}", ex); }
+            if (proc == null)
+                throw new CadRuntimeException("天正实例启动失败");
+            _app = AcadAttach.AttachOnly(Profile.ProgId);
+            WaitTArchGate1();
+            return _app;
+        }
+        catch
+        {
+            // best-effort 清理（内部吞异常）；rethrow 保持原异常与堆栈，清理不掩盖根因。
+            CleanupTArchFailure(proc);
+            throw;
+        }
+    }
+
+    // 失败路径进程清理（spec §5「启动失败不残留进程」）。仅处置本方经 ProcessLauncher
+    // 拿到的 Process 句柄——守卫前置已保证无他方实例，绝不强杀外人进程。
+    // 已附着（_app 已由 ROT 赋值）→ 优先优雅 Quit（RetryBusy 覆盖忙拒绝）；Quit 失败
+    // 或未附着 → 进程兜底 CloseMainWindow→有界 WaitForExit→Kill。
+    // _app/_doc 无论清理成败一律置空：否则残留缓存会让下一次 EnsureAppTArch 早退返回
+    // 已失效对象（Gate1 失败后重试须真正重启，复审 finding 3）。
+    private void CleanupTArchFailure(Process? proc)
+    {
+        var app = _app;
+        _app = null;
+        _doc = null;
+        bool quit;
+        if (app != null)
+        {
+            try { RetryBusy(() => { app.Quit(); }); quit = true; }
+            catch { quit = false; /* 优雅失败→走进程兜底；吞异常不掩盖原异常 */ }
+        }
+        else quit = false;
+        if (!quit && proc != null)
+        {
+            try { TarchProcessCleanup(proc); }
+            catch { /* 清理 best-effort：异常不影响原失败诊断 */ }
+        }
+    }
+
+    // 失败路径进程清理缝（测试注入；单元测试不得操作真进程）。
+    // 默认步骤：CloseMainWindow（温和关窗）→ 有界 WaitForExit → Kill 兜底；
+    // 每步独立吞异常（进程未启动/已退出/无主窗口均属常态），返回是否确认清理完成。
+    internal static Func<Process, bool> TarchProcessCleanup = DefaultTarchProcessCleanup;
+    private static readonly TimeSpan TarchCleanupWait = TimeSpan.FromSeconds(10);
+
+    private static bool DefaultTarchProcessCleanup(Process proc)
+    {
+        try { if (proc.HasExited) return true; /* 已自行退出：无残留 */ }
+        catch { return false; /* 未启动/句柄失效：无可清理 */ }
+        try
+        {
+            if (proc.CloseMainWindow() && proc.WaitForExit((int)TarchCleanupWait.TotalMilliseconds))
+                return true;
+        }
+        catch { /* 无主窗口/关闭被拒：Kill 兜底 */ }
+        try { proc.Kill(); return true; }
+        catch { return false; /* 已退出或权限受限：best-effort 终止 */ }
     }
 
     // Gate1（spike 协议步骤3）：ROT 附着成功≠天正初始化完成——Version 非空字符串且
