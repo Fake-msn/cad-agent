@@ -21,10 +21,12 @@ public class SemanticOverlayNativeTests
     {
         var o = new SemanticOverlay();
         o.UpsertNative(P("21E00"));
-        var updated = P("21E00") with { Bbox = new[] { 9.0, 9, 9, 9, 9, 9 } };
+        var readAt = new DateTimeOffset(2026, 11, 24, 8, 30, 0, TimeSpan.Zero);
+        var updated = P("21E00") with { Bbox = new[] { 9.0, 9, 9, 9, 9, 9 }, ReadAt = readAt };
         o.UpsertNative(updated);
         Assert.Single(o.NativeEntities);
         Assert.Equal(9.0, o.NativeEntities[0].Bbox![0]);
+        Assert.Equal(readAt, o.NativeEntities[0].ReadAt);
     }
 
     [Fact]
@@ -43,6 +45,23 @@ public class SemanticOverlayNativeTests
             new JsonSerializerOptions { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } })!;
         Assert.NotNull(o.NativeEntities);
         Assert.Empty(o.NativeEntities);
+    }
+
+    [Fact]
+    public void Json_ExplicitNullField_Load_Normalizes()
+    {
+        // 变异守卫：显式 "NativeEntities": null 绕过属性初始化，必须由 Load 的 ??= 归一。
+        var dir = Directory.CreateTempSubdirectory("ovnativenull").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "semantic.json");
+            File.WriteAllText(path,
+                """{"Annotations":[],"Mappings":[],"Version":1,"NativeEntities":null}""");
+            var loaded = SemanticOverlay.Load(path);
+            Assert.NotNull(loaded.NativeEntities);
+            Assert.Empty(loaded.NativeEntities);
+        }
+        finally { Directory.Delete(dir, true); }
     }
 
     [Fact]
