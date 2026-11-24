@@ -39,10 +39,11 @@
 **Interfaces:**
 - Consumes: `SemanticClass`（src/CadAgent.Core/SemanticModel.cs:4）。
 - Produces:
-  - `record NativeEntityParam(string Handle, string ObjectName, SemanticClass Class, IReadOnlyDictionary<string,string> Params, double[]? Bbox, DateTimeOffset ReadAt, bool ReadOk)`
+  - `record NativeEntityParam(string Handle, string ObjectName, SemanticClass Class, IReadOnlyDictionary<string,string> Params, double[]? Bbox, DateTimeOffset ReadAt, bool ReadOk, string? Layer = null)`（Layer 末位可选——change-layer 读回校验需要；COM Layer 标准属性对 TDb 可读，probe 实证）
   - `static class TDbClassMap { static SemanticClass ClassFor(string objectName) }`
   - `Provenance.NativeParameter`
-  - `ICadRuntime.ReadNativeParams() : IReadOnlyList<NativeEntityParam>`（接口带默认实现返回 `Array.Empty<NativeEntityParam>()`，ZwcadRuntime 无需改）
+  - `ICadRuntime.ReadNativeParams(string? drawingPath = null) : IReadOnlyList<NativeEntityParam>`（接口默认实现返回空；path!=null=自启+自开+读完关，null=读当前已开文档）
+  - `ICadRuntime.ChangeLayerByHandle(string hexHandle, string layer)` / `MoveByHandle(string hexHandle, double dx, double dy)` / `DeleteByHandle(string hexHandle)`——接口默认实现 `throw new CadRuntimeException("运行时不支持句柄寻址操作")`（Zwcad 零改动，运行时响亮拒绝）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -84,7 +85,8 @@ Expected: 编译失败（TDbClassMap/NativeEntityParam 不存在）
 ```csharp
 namespace CadAgent.Core.Cad;
 
-/// <summary>一实体一次 COM 原生读参结果（spec 切片A §3）。Core 零 COM——纯数据。</summary>
+/// <summary>一实体一次 COM 原生读参结果（spec 切片A §3）。Core 零 COM——纯数据。
+/// Layer 末位可选（change-layer 读回校验需要；COM 标准 Layer 属性对 TDb 可读）。</summary>
 public sealed record NativeEntityParam(
     string Handle,
     string ObjectName,
@@ -92,7 +94,8 @@ public sealed record NativeEntityParam(
     IReadOnlyDictionary<string, string> Params,
     double[]? Bbox,
     DateTimeOffset ReadAt,
-    bool ReadOk);
+    bool ReadOk,
+    string? Layer = null);
 ```
 
 `src/CadAgent.Core/Cad/TDbClassMap.cs`：
@@ -115,8 +118,18 @@ public static class TDbClassMap
 
 `SemanticModel.cs` Provenance 末尾加 `NativeParameter`；`ICadRuntime.cs` 接口加：
 ```csharp
-    /// <summary>COM 原生读参（spec 切片A）：TDb 实体参数+bbox；无厂商/不支持→空（默认实现）。</summary>
-    IReadOnlyList<NativeEntityParam> ReadNativeParams() => Array.Empty<NativeEntityParam>();
+    /// <summary>COM 原生读参（spec 切片A）：drawingPath!=null=自启+自开+读完关；null=读当前已开文档。
+    /// 无厂商/不支持→空（默认实现）。</summary>
+    IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) =>
+        Array.Empty<NativeEntityParam>();
+
+    /// <summary>句柄寻址修改（spec 切片A §4.2 native-live 通道）；不支持→响亮拒绝（默认实现）。</summary>
+    void ChangeLayerByHandle(string hexHandle, string layer) =>
+        throw new CadRuntimeException("运行时不支持句柄寻址操作（change-layer）");
+    void MoveByHandle(string hexHandle, double dx, double dy) =>
+        throw new CadRuntimeException("运行时不支持句柄寻址操作（move）");
+    void DeleteByHandle(string hexHandle) =>
+        throw new CadRuntimeException("运行时不支持句柄寻址操作（delete）");
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -484,9 +497,10 @@ git commit -m "feat(acad): profile感知启动——/p启动+ROT附着+Gate1等�
 **Interfaces:**
 - Consumes: `NativeEntityParam`/`TDbClassMap`（Task 1）、`AcadAttach`（Task 4）、AcadRuntime 既有 `Run<T>`/`RetryBusy`/`ModelSpace()`（src/CadAgent.Adapters.Acad/AcadRuntime.cs:216）。
 - Produces:
-  - `AcadRuntime.ReadNativeParams() : IReadOnlyList<NativeEntityParam>`（覆盖接口默认空实现）
+  - `AcadRuntime.ReadNativeParams(string? drawingPath = null) : IReadOnlyList<NativeEntityParam>`（覆盖接口默认空实现；path!=null → EnsureAppTArch("TElec20V5") + Open(path) + Gate2 + 读 + Close(false)；path==null → 仅读当前 `_doc` ModelSpace，不启不开不关）
   - `internal static NativeEntityParam? ReadOneEntity(dynamic entity, string handle, DateTimeOffset readAt)`（null=非 TDb 跳过）
-  - 内部逐实体读缝：`internal static Func<dynamic,string?> ObjectNameReader`、`internal static Func<dynamic,string,string?> ParamReader`（null=UNKNOWNNAME）、`internal static Func<dynamic,double[]?> BboxReader`——测试注入 fake
+  - 内部逐实体读缝：`internal static Func<dynamic,string?> ObjectNameReader`、`internal static Func<dynamic,string,string?> ParamReader`（null=UNKNOWNNAME）、`internal static Func<dynamic,double[]?> BboxReader`、`internal static Func<dynamic,string?> LayerReader`——测试注入 fake
+  - `internal static Func<string, object>? TArchAttach`（EnsureAppTArch 测试缝）
 
 - [ ] **Step 1: 写失败测试**（fake 实体 + 缝注入）
 
@@ -503,11 +517,13 @@ public class AcadReadNativeParamsTests : IDisposable
     private readonly Func<dynamic, string?> _origObj = AcadRuntime.ObjectNameReader;
     private readonly Func<dynamic, string, string?> _origParam = AcadRuntime.ParamReader;
     private readonly Func<dynamic, double[]?> _origBbox = AcadRuntime.BboxReader;
+    private readonly Func<dynamic, string?> _origLayer = AcadRuntime.LayerReader;
     public void Dispose()
     {
         AcadRuntime.ObjectNameReader = _origObj;
         AcadRuntime.ParamReader = _origParam;
         AcadRuntime.BboxReader = _origBbox;
+        AcadRuntime.LayerReader = _origLayer;
     }
 
     private static Dictionary<string, string?> _params = new();
@@ -516,6 +532,7 @@ public class AcadReadNativeParamsTests : IDisposable
         AcadRuntime.ObjectNameReader = _ => objName;
         AcadRuntime.ParamReader = (_, n) => _params.TryGetValue(n, out var v) ? v : null;
         AcadRuntime.BboxReader = _ => new[] { 0.0, 0, 0, 1, 1, 1 };
+        AcadRuntime.LayerReader = _ => "0dt";
     }
 
     [Fact]
@@ -571,6 +588,8 @@ Expected: 编译失败（ReadOneEntity/ObjectNameReader 等缝不存在）
     // 对未知成员抛 RuntimeBinderException 不含 HRESULT）——与既有 AddLine 纯 dynamic 不同，此处需 hr 判定。
     internal static Func<dynamic, string?> ObjectNameReader = e =>
         RetryBusy(() => (string?)e.ObjectName);
+    internal static Func<dynamic, string?> LayerReader = e =>
+        RetryBusy(() => (string?)e.Layer);
     internal static Func<dynamic, string, string?> ParamReader = (e, n) =>
     {
         try
@@ -596,8 +615,8 @@ Expected: 编译失败（ReadOneEntity/ObjectNameReader 等缝不存在）
                 return new[] { min[0], min[1], min[2], max[0], max[1], max[2] };
             });
         }
-        catch (System.Runtime.InteropServices.COMException ce) when (ce.HResult == unchecked((int)0x80020006))
-        { return null; }  // 该实体无 bbox 面→null（ReadOk 仍 true，bbox 可空）
+        catch (Exception)
+        { return null; }  // bbox 尽力读（无此面/类型不匹配→null，ReadOk 仍 true；spec §4 诚实边界）
     };
 
     // spec 切片A §4.1：逐实体 ObjectName 分类→TDb 读自定义名参数；非 TDb 返回 null 跳过。
@@ -616,7 +635,8 @@ Expected: 编译失败（ReadOneEntity/ObjectNameReader 等缝不存在）
             string? v = ParamReader(entity, name);
             if (v != null) parms[name] = v;
         }
-        return new NativeEntityParam(handle, objName, cls, parms, BboxReader(entity), readAt, ReadOk: true);
+        return new NativeEntityParam(handle, objName, cls, parms, BboxReader(entity), readAt, ReadOk: true,
+            Layer: LayerReader(entity));
     }
 
     internal static string[] ParamNamesFor(string objName) => objName switch
@@ -629,7 +649,11 @@ Expected: 编译失败（ReadOneEntity/ObjectNameReader 等缝不存在）
     };
 ```
 
-`ReadNativeParams()` 公开方法：`EnsureAppTArch("TElec20V5")` → Open 副本 ReadOnly → Gate2（RetryBusy Count>0）→ 遍历 ModelSpace（`RetryBusy` 取 Count 与 Item(i)）逐实体 `ReadOneEntity`（Handle 经 RetryBusy 读 `.Handle`）→ 过滤 null → 返回 List。全程在 `Run<T>` STA 队列内。
+`ReadNativeParams(string? drawingPath = null)` 公开方法（全程在 `Run<T>` STA 队列内）：
+- `drawingPath != null`：`EnsureAppTArch("TElec20V5")` → `Open(drawingPath)` → Gate2（RetryBusy Count>0）→ 遍历 ModelSpace（`RetryBusy` 取 Count 与 Item(i)）逐实体 `ReadOneEntity`（Handle 经 RetryBusy 读 `.Handle`）→ 过滤 null → **Close(false)** → 返回 List（自启自开自关；CLI --native 用此形态）
+- `drawingPath == null`：仅遍历当前 `_doc` ModelSpace 读参（不启不开不关；native-live 会话已 Open 原图后用此形态）
+- `_doc == null && drawingPath == null` → `CadRuntimeException("无打开的图纸")`
+- 句柄口径：`(string)` `.Handle` 读 COM 十六进制串（IAcadEntity.Handle 标准属性，与文件级同源实证 21E00）
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -670,11 +694,11 @@ public class SemanticScanNativeTests
     private sealed class FakeRuntime : ICadRuntime
     {
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
-        public IReadOnlyList<NativeEntityParam> ReadNativeParams() => new[]
+        public IReadOnlyList<NativeEntityParam> ReadNativeParams(string? drawingPath = null) => new[]
         {
             new NativeEntityParam("21E00", "TDbWall", SemanticClass.Wall,
                 new Dictionary<string, string> { ["LeftWidth"] = "100" },
-                new[] { 0.0, 0, 0, 1, 1, 1 }, DateTimeOffset.UtcNow, true)
+                new[] { 0.0, 0, 0, 1, 1, 1 }, DateTimeOffset.UtcNow, true, "0dt")
         };
         public void Open(string p) { } public void SaveAs(string p) { }
         public void Close(bool s) { } public void Restart() { }
@@ -718,8 +742,8 @@ Expected: 失败（--native 未实现，无 nativeRead 键）
             {
                 using (nrt)
                 {
-                    nrt.Open(drawingPath);
-                    var parms = nrt.ReadNativeParams();
+                    // ReadNativeParams(path) 自启（/p 天正 profile）+自开+读完关；不需外部 Open。
+                    var parms = nrt.ReadNativeParams(drawingPath);
                     nativeRead = parms.Count;
                     nativeClassified = parms.Count(p => p.Class != SemanticClass.Unknown && p.ReadOk);
                     nativeReadFailed = parms.Count(p => !p.ReadOk);
@@ -879,19 +903,251 @@ git commit -m "feat(data): NativeGateRefinement逐实体松绑判据——ReadOk
 
 ---
 
-### Task 8: live 通道松绑接线 + 条件真机测试 + spec §12 闭环
+### Task 8: 句柄寻址执行器 —— AcadRuntime handle ops + ComReplayService 编辑类 kind
 
 **Files:**
-- Modify: `src/CadAgent.Cli/CommandRouter.Live.cs`（LiveReplay 加逐实体松绑预检，:76-104 区域）
-- Create: `tests/CadAgent.Adapters.Acad.Tests/AcadNativeLiveTests.cs`（条件真机）
-- Modify: `docs/superpowers/specs/2026-11-20-cad-agent-terminal-design.md`（§12 追加闭环注记）
-- Test: `tests/CadAgent.Cli.Tests/LiveNativeGateTests.cs`
+- Modify: `src/CadAgent.Adapters.Acad/AcadRuntime.cs`（实现 ChangeLayerByHandle/MoveByHandle/DeleteByHandle + HandleReader 缝）
+- Modify: `src/CadAgent.Data/Cad/ComReplayService.cs`（case change-layer/move/delete + HandleToHex 归一）
+- Test: `tests/CadAgent.Adapters.Acad.Tests/AcadHandleOpsTests.cs`
+- Test: `tests/CadAgent.Data.Tests/ComReplayHandleKindTests.cs`
 
 **Interfaces:**
-- Consumes: `NativeGateRefinement.Evaluate`（Task 7）、`SemanticOverlay.NativeEntities`（Task 2）、`AcadRuntime.ReadNativeParams`（Task 5）、`ComReplayService.Replay`（src/CadAgent.Data/Cad/ComReplayService.cs:32）、`StepPlan(PlanId, Steps)`/`StepSpec(Kind, Params:JsonElement)`（src/CadAgent.Core/StepEngine.cs:17-18）、LiveReplay 现有结构（src/CadAgent.Cli/CommandRouter.Live.cs:27-118）。
-- Produces: live 重放前逐实体松绑预检——census Yellow 且计划含 TDb 目标句柄 step 时，逐句柄 `Evaluate`；全 Pass→放行+审计 native-gate-pass；任一非 Pass→拒+审计 native-gate-refused（含 verdict 分布）+exit 1。
+- Consumes: `ICadRuntime.ChangeLayerByHandle/MoveByHandle/DeleteByHandle`（Task 1 接口默认 throw）、AcadRuntime 既有 `Run<T>`/`RetryBusy`/`ModelSpace()`、`HandlerHelpers.Req/OptString`（src/CadAgent.Data/Handlers/LineHandlers.cs）。
+- Produces:
+  - `AcadRuntime.ChangeLayerByHandle/MoveByHandle/DeleteByHandle`（ModelSpace 逐实体 Handle 扫描定位 → 单基元 RetryBusy 执行；找不到句柄→`CadRuntimeException("句柄不存在")`）
+  - `internal static Func<dynamic,string?> AcadRuntime.HandleReader`（读 `.Handle`，RetryBusy；测试注入）
+  - `internal static string ComReplayService.HandleToHex(string handle)`（十进制串→十六进制大写；已 hex 串→大写；`0x` 前缀剥离；非法→原样返回）
+  - `ComReplayService` 支持 kind `change-layer`（params handle+layer）/`move`（handle+dx+dy）/`delete`（handle）
 
-- [ ] **Step 1: 写失败测试**（live 松绑预检，RuntimeFactory 注入 fake runtime 提供重读）
+- [ ] **Step 1: 写失败测试**
+
+`tests/CadAgent.Adapters.Acad.Tests/AcadHandleOpsTests.cs`：
+```csharp
+using CadAgent.Adapters.Acad;
+using Xunit;
+
+namespace CadAgent.Adapters.Acad.Tests;
+
+public class AcadHandleOpsTests : IDisposable
+{
+    private readonly Func<dynamic, string?> _origHandle = AcadRuntime.HandleReader;
+    public void Dispose() => AcadRuntime.HandleReader = _origHandle;
+
+    [Fact]
+    public void HandleReader_ReadsHexString()
+    {
+        AcadRuntime.HandleReader = _ => "21E00";
+        Assert.Equal("21E00", AcadRuntime.HandleReader(new object()));
+    }
+}
+```
+
+`tests/CadAgent.Data.Tests/ComReplayHandleKindTests.cs`（FakeRuntime 记录调用）：
+```csharp
+using System.Text.Json;
+using CadAgent.Core;
+using CadAgent.Core.Cad;
+using CadAgent.Data.Cad;
+using Xunit;
+
+namespace CadAgent.Data.Tests;
+
+public class ComReplayHandleKindTests
+{
+    public sealed class RecordingRuntime : ICadRuntime
+    {
+        public readonly List<string> Ops = new();
+        public RuntimeInfo GetInfo() => new("Fake", "1", true);
+        public void Open(string p) { } public void SaveAs(string p) { }
+        public void Close(bool s) { } public void Restart() { }
+        public void AddLine(double a, double b, double c, double d, string? l = null) { }
+        public void AddText(double x, double y, string t, double h, string? l = null) { }
+        public void AddCircle(double x, double y, double r, string? l = null) { }
+        public void AddInsert(string n, double x, double y, double s = 1, double r = 0, string? l = null) { }
+        public void EnsureBlock(string n, IReadOnlyList<BlockPrimitive> p) { }
+        public int EntityCount() => 0;
+        public void ChangeLayerByHandle(string h, string layer) => Ops.Add($"change-layer:{h}:{layer}");
+        public void MoveByHandle(string h, double dx, double dy) => Ops.Add($"move:{h}:{dx}:{dy}");
+        public void DeleteByHandle(string h) => Ops.Add($"delete:{h}");
+        public void Dispose() { }
+    }
+
+    private static StepPlan Plan((string Kind, string Json) step) => new("p1",
+        new[] { new StepSpec(step.Kind, JsonDocument.Parse(step.Json).RootElement.Clone()) });
+
+    [Fact]
+    public void Replay_ChangeLayer_InvokesHandleOp_WithHexNormalized()
+    {
+        var rt = new RecordingRuntime();
+        var r = new ComReplayService(rt).Replay(
+            Plan(("change-layer", "{\"handle\":\"138752\",\"layer\":\"WALL\"}")), null!);
+        Assert.True(r[0].Ok);
+        Assert.Equal("change-layer:21E00:WALL", Assert.Single(rt.Ops));
+    }
+
+    [Fact]
+    public void Replay_Move_InvokesHandleOp()
+    {
+        var rt = new RecordingRuntime();
+        var r = new ComReplayService(rt).Replay(
+            Plan(("move", "{\"handle\":\"21E00\",\"dx\":10,\"dy\":5}")), null!);
+        Assert.True(r[0].Ok);
+        Assert.Contains("21E00", Assert.Single(rt.Ops));
+    }
+
+    [Fact]
+    public void Replay_Delete_InvokesHandleOp()
+    {
+        var rt = new RecordingRuntime();
+        var r = new ComReplayService(rt).Replay(
+            Plan(("delete", "{\"handle\":\"21E00\"}")), null!);
+        Assert.True(r[0].Ok);
+        Assert.Equal("delete:21E00", Assert.Single(rt.Ops));
+    }
+
+    [Fact]
+    public void Replay_UnknownKind_FailsAndBreaks()
+    {
+        var rt = new RecordingRuntime();
+        var r = new ComReplayService(rt).Replay(
+            Plan(("bogus", "{\"handle\":\"21E00\"}")), null!);
+        Assert.False(r[0].Ok);
+        Assert.Single(r);
+    }
+
+    [Theory]
+    [InlineData("138752", "21E00")]
+    [InlineData("21e00", "21E00")]
+    [InlineData("0x21E00", "21E00")]
+    public void HandleToHex_Normalizes(string input, string expected)
+        => Assert.Equal(expected, ComReplayService.HandleToHex(input));
+}
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `dotnet test tests/CadAgent.Data.Tests --filter ComReplayHandleKindTests`
+Expected: 编译失败（HandleToHex 不存在、编辑类 case 未实现）
+
+- [ ] **Step 3: 实现**
+
+ComReplayService.cs：`Map` switch 加三 case（handle 兼容数字/字符串，镜像 HandlerHelpers.Find 契约）：
+```csharp
+            case "change-layer":
+                _rt.ChangeLayerByHandle(HandleToHex(HandleString(p)),
+                    p.GetProperty("layer").GetString() ?? "");
+                break;
+            case "move":
+                _rt.MoveByHandle(HandleToHex(HandleString(p)),
+                    HandlerHelpers.Req(p, "dx"), HandlerHelpers.Req(p, "dy"));
+                break;
+            case "delete":
+                _rt.DeleteByHandle(HandleToHex(HandleString(p)));
+                break;
+```
+加内部静态（InternalsVisibleTo 可见；Data csproj 若缺则走 csproj 内 `InternalsVisibleTo CadAgent.Data.Tests` —— 既有 Data.Tests 已用 internal？若无先例，改 public static）：
+```csharp
+    internal static string HandleString(JsonElement p) => p.GetProperty("handle").ValueKind switch
+    {
+        JsonValueKind.Number => p.GetProperty("handle").GetUInt64().ToString(),
+        _ => p.GetProperty("handle").GetString() ?? "",
+    };
+
+    internal static string HandleToHex(string handle)
+    {
+        if (handle.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) handle = handle[2..];
+        if (ulong.TryParse(handle, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var dec))
+            return dec.ToString("X");
+        return handle.ToUpperInvariant();
+    }
+```
+AcadRuntime.cs：三操作 = `Run(() => { FindByHandle 定位 + 单基元 RetryBusy })`：
+```csharp
+    internal static Func<dynamic, string?> HandleReader = e =>
+        RetryBusy(() => (string?)e.Handle);
+
+    private dynamic FindByHandle(string hexHandle)
+    {
+        dynamic ms = ModelSpace();
+        int count = RetryBusy(() => (int)ms.Count);
+        for (int i = 0; i < count; i++)
+        {
+            dynamic item = RetryBusy<object?>(() => ms.Item(i))!;
+            string? h = HandleReader(item);
+            if (string.Equals(h, hexHandle, StringComparison.OrdinalIgnoreCase)) return item;
+        }
+        throw new CadRuntimeException($"句柄不存在于模型空间: {hexHandle}");
+    }
+
+    public void ChangeLayerByHandle(string hexHandle, string layer) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            EnsureLayer(layer);                        // 单写调用各自忙重试（既有基元）
+            RetryBusy(() => { e.Layer = layer; });      // 单写调用独立忙重试（I2 口径）
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"ChangeLayerByHandle 失败: {ex.Message}", ex); }
+    });
+
+    public void MoveByHandle(string hexHandle, double dx, double dy) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            // IAcadEntity.Move(Point1, Point2)：位移=Point2−Point1；此处 (0,0)→(dx,dy)。
+            RetryBusy(() => { e.Move(Pt(0, 0), Pt(dx, dy)); });
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"MoveByHandle 失败: {ex.Message}", ex); }
+    });
+
+    public void DeleteByHandle(string hexHandle) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            RetryBusy(() => { e.Delete(); });
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"DeleteByHandle 失败: {ex.Message}", ex); }
+    });
+```
+实现注意：`EnsureLayer`/`Pt` 为既有 private 成员（AcadRuntime.cs:222-230），新方法同 class 内直接可用。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `dotnet test tests/CadAgent.Data.Tests --filter ComReplayHandleKindTests`
+Expected: PASS（AcadRuntime COM 实现由 Task 10 真机覆盖；单测覆盖映射与归一）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/CadAgent.Adapters.Acad src/CadAgent.Data/Cad/ComReplayService.cs tests
+git commit -m "feat(exec): 句柄寻址执行器——AcadRuntime handle ops(层/移/删)+ComReplay编辑类kind+HandleToHex归一"
+```
+
+---
+
+### Task 9: run 主闸逐实体松绑准入 + native-live 独执行路径
+
+**Files:**
+- Modify: `src/CadAgent.Cli/CommandRouter.cs`（RunPlan 主闸区 :237 之前插 Yellow+native 准入分支）
+- Create: `src/CadAgent.Cli/CommandRouter.NativeLive.cs`（native-live 独执行：判据→执行→读回→交付）
+- Test: `tests/CadAgent.Cli.Tests/NativeLiveAdmissionTests.cs`
+
+**Interfaces:**
+- Consumes: `NativeGateRefinement.Evaluate`（Task 7）、`SemanticOverlay.NativeEntities`（Task 2）、`ICadRuntime.ReadNativeParams(path?)` + handle ops（Task 1/5/8）、`ComReplayService.Replay` + `HandleToHex`（Task 8）、`GateDetector.Inspect`/`GateLevel`（src/CadAgent.Data/GateDetector.cs:5-22）、`SemanticOverlayPath`/`OpenAudit`/`Identity`（CommandRouter 既有）、`RuntimeFactory`（CommandRouter.Export.cs:18）。
+- Produces:
+  - `private static int? NativeLivePlan(...)`（返回 null=不适用回落既有闸；非 null=已处理退出码）
+  - 准入条件：`Level==Yellow` + `--live` + 计划**全部**步骤含 `handle` 参数；否则回落既有 run-rejected（生成类/全图级修改仍拒）
+  - 全 Pass（重读一致）→ native-live 独执行：`rt.Open(drawingPath)`（原生 DWG，TDb 存活）→ ops → 读回校验 → `SaveAs(drawingPath + ".live.dwg")`
+  - 审计 kind：`native-gate-pass`/`native-gate-refused`/`native-live-step`/`native-live-committed`/`native-live-failed`
+  - **原图零写入**（源件 SHA 前后比对入审计 params；唯一写出是 `.live.dwg` 新文件）
+
+- [ ] **Step 1: 写失败测试**（RuntimeFactory FakeRuntime + 三态，夹具镜像 UnparsedGateCliTests 的 Yellow 合成夹具）
 
 ```csharp
 using System.Text.Json;
@@ -901,97 +1157,112 @@ using Xunit;
 
 namespace CadAgent.Cli.Tests;
 
-public class LiveNativeGateTests
+public class NativeLiveAdmissionTests
 {
-    // 用 overlay 含 21E00(ReadOk) + fake runtime 重读一致/不一致两态，
-    // 调 LiveReplay 内部松绑预检辅助方法 NativeGatePrecheck：
+    // FakeRuntime：ReadNativeParams(path) 返回 21E00(TDbWall ReadOk,Layers="0dt",bbox 固定)；
+    // handle ops 记录调用；SaveAs 记录 outPath。夹具=Yellow 图纸（合成 TCH DXF 通知）
+    // + overlay 含 21E00 + plan change-layer 21E00→WALL。
     [Fact]
-    public void Precheck_AllPass_AllowsLive() { /* overlay 21E00 ReadOk + 重读一致 → 放行 + native-gate-pass 审计 */ }
+    public void Yellow_HandleStep_AllPass_ExecutesOps_DeliversLiveDwg()
+    { /* 期望 exit 0；ops=[change-layer:21E00:WALL]；审计 native-gate-pass + native-live-step + native-live-committed；原图 SHA 不变 */ }
 
     [Fact]
-    public void Precheck_StaleMismatch_Refuses() { /* 重读 bbox 不符 → 拒 + native-gate-refused 审计含 StaleMismatch + exit 1 */ }
+    public void Yellow_HandleStep_RereadMismatch_Refuses_NoOps()
+    { /* 重读 bbox 不符 → exit 1；审计 native-gate-refused 含 StaleMismatch；ops 空；无 .live.dwg */ }
 
     [Fact]
-    public void Precheck_NotRead_Refuses() { /* 目标句柄不在 NativeEntities → 拒 + NotRead */ }
+    public void Yellow_GenerationStep_StillRunRejected()
+    { /* 无 handle 的 add-line → 既有 run-rejected 语义（松绑不放开全图级修改） */ }
 }
 ```
-（预检抽为 `internal static NativeGateVerdict? NativeGatePrecheck(...)` 纯函数便于测试；句柄自 step.Params["handle"] 提取，无 handle 的生成类 step 跳过松绑判据。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `dotnet test tests/CadAgent.Cli.Tests --filter LiveNativeGateTests`
-Expected: 编译失败（NativeGatePrecheck 不存在）
+Run: `dotnet test tests/CadAgent.Cli.Tests --filter NativeLiveAdmissionTests`
+Expected: 失败（Yellow 一律 run-rejected，native 准入路径不存在）
 
-- [ ] **Step 3: 实现 live 松绑预检**
+- [ ] **Step 3: 实现**
 
-在 LiveReplay `using (rt)` 内 `rt.Open(liveSource)` 之后、`ComReplayService.Replay` 之前加：
+CommandRouter.cs RunPlan 主闸区（`if (GateRefusesRun(report))` 分支之前）：
 ```csharp
-                // 逐实体精准松绑（spec 切片A §4.2）：census Yellow 且计划含目标句柄 step 时，
-                // 逐句柄重读校验（ReadOk + ObjectName/bbox/Params 一致）才放行；任一非 Pass 拒。
-                if (GateRefusesRun(GateDetector.Inspect(drawing.Summarize(), new EmptySupportMatrix())))
-                {
-                    var nativeOverlay = SemanticOverlay.Load(SemanticOverlayPath(agentDir));
-                    var verdicts = new List<(string Handle, NativeGateVerdict V)>();
-                    foreach (var step in plan.Steps)
-                    {
-                        if (!step.Params.TryGetProperty("handle", out var hEl)) continue;  // 生成类 step 无 handle 跳过
-                        string handle = hEl.ValueKind == JsonValueKind.Number
-                            ? hEl.GetUInt64().ToString() : hEl.GetString() ?? "";
-                        // 句柄归一：文件级十进制 ↔ COM 十六进制（NativeEntityParam.Handle=hex）
-                        string hex = ulong.TryParse(handle, out var hv) ? hv.ToString("X") : handle;
-                        var reread = rt.ReadNativeParams().FirstOrDefault(n => n.Handle == hex);
-                        var v = NativeGateRefinement.Evaluate(nativeOverlay, hex, reread);
-                        verdicts.Add((hex, v));
-                    }
-                    if (verdicts.Any(x => x.V != NativeGateVerdict.Pass))
-                    {
-                        Audit("native-gate-refused", plan.PlanId, new { verdicts = verdicts.Select(x => new { x.Handle, verdict = x.V.ToString() }) });
-                        stderr.WriteLine("--live 逐实体松绑拒绝: 存在未读参/读参不全/重读不一致实体");
-                        return (false, null, "native-gate-refused");
-                    }
-                    if (verdicts.Count > 0)
-                        Audit("native-gate-pass", plan.PlanId, new { handles = verdicts.Select(x => x.Handle) });
-                }
+        // spec 切片A §4.2：census Yellow 逐实体精准松绑（仅 --live 且计划全部为句柄寻址步骤）。
+        if (report.Level == GateLevel.Yellow && args.Contains("--live"))
+        {
+            int? nativeRc = NativeLivePlan(drawingPath, plan, agentDir, session, audit, op, stderr);
+            if (nativeRc != null) return nativeRc.Value;
+        }
 ```
+`CommandRouter.NativeLive.cs` 要点（完整实现由实现者按此规格写）：
+1. 句柄步骤分类：任一 step 无 `handle` 参数 → `return null`（回落既有拒绝）。
+2. overlay 加载（缺失/损坏 → `native-gate-refused{reason}` 审计 + stderr + return 1）。
+3. `using(rt)`：`rt.Open(drawingPath)`（原图）；`reread = rt.ReadNativeParams()`（null=当前文档，**只读一次**）；逐 step `HandleToHex(HandleString)` → `NativeGateRefinement.Evaluate(overlay, hex, reread.FirstOrDefault(n=>n.Handle==hex))`；任一非 Pass → `native-gate-refused{verdicts}` + return 1。
+4. 全 Pass → `native-gate-pass{handles}` 审计 → `ComReplayService(rt).Replay(plan, drawing)`（句柄类不触 shadow，传 drawing 即兼容签名）→ 任一 step 失败 → `native-live-failed{step,error}` + return 1（**不 SaveAs**，原图零写入）。
+5. 读回闸：`after = rt.ReadNativeParams()`；逐 step 期望校验（change-layer→Layer==目标层；move→bbox 各分量恰平移 dx/dy（容差 1e-6）；delete→句柄消失），不符 → `native-live-failed{readback}` + return 1。
+6. `rt.SaveAs(drawingPath + ".live.dwg")`；`native-live-committed{outPath, sourceSha, liveSha}`（sourceSha/liveSha=SHA256 文件字节）；return 0。
+7. 异常路径 `native-live-failed{error}` + return 1；任何路径不写原图。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `dotnet test tests/CadAgent.Cli.Tests --filter LiveNativeGateTests`
+Run: `dotnet test tests/CadAgent.Cli.Tests --filter NativeLiveAdmissionTests`
 Expected: PASS
 
-- [ ] **Step 5: 条件真机测试**（AcadNativeLiveTests，Category=RequiresAutoCAD + Collection=AcadLive，SkippableFact 显式跳过无 AutoCAD）
-
-```csharp
-using CadAgent.Core;
-using CadAgent.Core.Cad;
-using Xunit;
-
-namespace CadAgent.Adapters.Acad.Tests;
-
-[Trait("Category", "RequiresAutoCAD")]
-[Collection("AcadLive")]
-public class AcadNativeLiveTests
-{
-    // skip-gated：标本 16#1116.dwg 在本机 outputs/tarch-elec/（真实件，不入库）。
-    // ① /p 启动+ROT 附着→ReadNativeParams 读副本：TDbWall LeftWidth=100/Height=3000/Volume=2.895
-    //    跨轮逐字闭合（spike 基准）；ObjectName 分类 TDb vs AcDb 计数与 census 398 对照。
-    // ② 忙窗注入（启动后即读）→重试后全非空。
-    // ③ CUIX/源件/副本 SHA 前后一致；tasklist 前后清零；自家实例 Close+Quit 清理。
-    // 缺标本/无 AutoCAD→Skip.IfNot(true) 显式跳过（原因记录，非静默绿）。
-}
-```
-真机测试骨架镜像既有 `AcadLiveTests`（[Trait("Category","RequiresAutoCAD")]+[Collection("AcadLive")]+SkippableFact + AcadProbe.SkipReason 四态）。
-
-- [ ] **Step 6: spec §12 追加闭环注记 + 全量门禁**
-
-spec §12 末尾追加切片 A 闭环块（读参通道 + 逐实体松绑 + 忙窗协议生产化 + 诚实边界：COM 读参不补全文件级解析/census Yellow 不变/松绑非整图 Green）。
-Run: `dotnet test CadAgent.sln`（全量门禁，含条件真机若 AutoCAD 在场）
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/CadAgent.Cli tests docs/superpowers/specs/2026-11-20-cad-agent-terminal-design.md
-git commit -m "feat(live): 逐实体松绑接线+条件真机测试+spec§12闭环——census Yellow下TDb句柄重读一致才放行live修改"
+git add src/CadAgent.Cli tests/CadAgent.Cli.Tests
+git commit -m "feat(cli): run主闸逐实体松绑准入+native-live独执行——Yellow+全句柄步骤+重读全Pass才执行,交付.live.dwg源件零写入"
+```
+
+---
+
+### Task 10: 条件真机测试 + spec §12 闭环 + 全量门禁
+
+**Files:**
+- Create: `tests/CadAgent.Adapters.Acad.Tests/AcadNativeLiveTests.cs`（条件真机）
+- Modify: `docs/superpowers/specs/2026-11-20-cad-agent-terminal-design.md`（§12 追加闭环注记）
+- Modify: `docs/superpowers/specs/2026-11-24-slice-a-com-parameter-design.md`（§7 范围外更正：句柄执行器以 T8/T9 补入）
+
+**Interfaces:**
+- Consumes: 全部前序任务实现；`AcadProbe.SkipReason` 四态（既有）；标本 `outputs/tarch-elec/16#1116.dwg`（真实件，不入库）。
+- Produces: 真机证据（读参基准/忙窗注入/句柄层改读回/金丝雀/进程零残留）；spec §12 闭环注记。
+
+- [ ] **Step 1: 写条件真机测试**（Category=RequiresAutoCAD + Collection=AcadLive + SkippableFact，骨架镜像既有 AcadLiveTests）
+
+```csharp
+[Trait("Category", "RequiresAutoCAD")]
+[Collection("AcadLive")]
+public class AcadNativeLiveTests : IDisposable
+{
+    // skip-gated（缺标本/无 AutoCAD → Skip 显式原因，非静默绿）：
+    // ① ReadNativeParams(副本路径)：TDbWall LeftWidth=100/Height=3000/Volume=2.895 逐字闭合（spike 基准）；
+    //    TDb vs AcDb ObjectName 计数与 census 398 相邻。
+    // ② 新启即读（忙窗 A 注入）→ 重试后全非空、ReadOk 全 true。
+    // ③ 句柄层改（**副本**上）：ChangeLayerByHandle(21E00, 临时层) → 读回 Layer==新层；
+    //    MoveByHandle(21E00,10,0) → bbox 平移；DeleteByHandle → 句柄消失。
+    // ④ 金丝雀：CUIX/源件/副本 SHA 前后一致；tasklist 前后零 acad；自家 Close+Quit 清理。
+}
+```
+夹具：先 CopySpecimen 到临时目录（镜像既有先例）；所有修改只作用副本；源件只 SHA 比对。
+
+- [ ] **Step 2: 跑真机测试**
+
+Run: `dotnet test tests/CadAgent.Adapters.Acad.Tests --filter AcadNativeLiveTests`
+Expected: 真机全绿（无 AutoCAD/缺标本显式跳过并录原因）
+
+- [ ] **Step 3: spec §12 追加闭环注记**
+
+spec §12 末尾追加切片 A 闭环块：COM 原生读参通道（/p 附着+忙窗协议生产化+UNKNOWNNAME 语义）+ 逐实体精准松绑（run 主闸准入+native-live 独执行+重读校验+源件零写入）+ 诚实边界（COM 读参不补全文件级解析/census Yellow 不变/松绑非整图 Green/仅句柄寻址步骤）。切片 A design §7 范围外更正注记。
+
+- [ ] **Step 4: 全量门禁**
+
+Run: `dotnet test CadAgent.sln`
+Expected: 全绿（含条件真机若 AutoCAD 在场；ZWCAD 真机串行）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests docs/superpowers/specs
+git commit -m "test(acad): 切片A条件真机证据（读参基准/忙窗/句柄层改读回/金丝雀）+spec§12闭环注记"
 ```
 
 ---
@@ -999,3 +1270,9 @@ git commit -m "feat(live): 逐实体松绑接线+条件真机测试+spec§12闭�
 ## 执行记录（SDD 填写）
 
 （每任务完成状态/fix round/裁决 R1..Rn 由 controller 执行时追加于此。）
+
+### 执行记录（SDD 子代理驱动，2026-11-24/25，分支 feat/cad-agent-slice-a-com-params）
+
+- 预检裁定 R1-R7（签名/载体/句柄 ops/拆分/生成类拒/Layer/bbox 尽力）；执行期裁定 R8-R12（--native 禁预激活/异常降级审计/助手 public/句柄双形态/层名忽略大小写）。详见 `.superpowers/sdd/2026-11-24-slice-a-com-parameter/progress.md`（workspace 已随收尾删除，裁定已收录于 controller 终报）。
+- T1 4aed43c / T2 e200f08+46085a2（fix1）/ T3 6936b19 / T4 060531f+7b90baf（fix1）/ T5 ad250c3 / T6 bd2ff2a / T7 6e5ace2 / T8 f6472a0 / T9 3807657+61c42f4（fix1）/ T10 b6e40ac+1372d76+91201b7。
+- T10 真机迫使的生产修复：acad.exe 路径解析链（注册表→ProgramFiles→裸名）+ GetBoundingBox by-ref 回写（ParameterModifier）。真机 3/3 绿；全量门禁 1445/0/0（Acad 65/65 零跳过）。
