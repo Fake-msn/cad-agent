@@ -627,6 +627,65 @@ public sealed class AcadRuntime : ICadRuntime
             }
         });
 
+    // ---- 切片A §4.2：句柄寻址执行器（Task 8）----
+    // 定位口径：ModelSpace 逐实体读 .Handle（RetryBusy 单读缝，测试注入 fake），
+    // OrdinalIgnoreCase 比对（COM 原样大写 "21E00"，调用方可能传小写归一形态）；
+    // 找不到→响亮拒绝（消息逐字按 spec，Task 9 准入按此判定 stale 并拒绝执行）。
+    // 执行口径：每个 COM 基元各自独立忙重试（I2 单调用口径）——定位是只读组合无副作用，
+    // 写入基元被拒（=未执行）仅重试该基元，不重复副作用。
+    internal static Func<dynamic, string?> HandleReader = e =>
+        RetryBusy(() => (string?)e.Handle);
+
+    private dynamic FindByHandle(string hexHandle)
+    {
+        // ModelSpace getter 为只读基元（与 ReadModelSpaceEntities 同口径：同组忙重试安全）。
+        dynamic ms = RetryBusy<object?>(() => ModelSpace())!;
+        int count = RetryBusy(() => (int)ms.Count);
+        for (int i = 0; i < count; i++)
+        {
+            int index = i;  // 闭包快照（RetryBusy 同步调用，取局部副本防捕获变异）
+            dynamic item = RetryBusy<object?>(() => ms.Item(index))!;
+            string? h = HandleReader(item);
+            if (string.Equals(h, hexHandle, StringComparison.OrdinalIgnoreCase)) return item;
+        }
+        throw new CadRuntimeException($"句柄不存在于模型空间: {hexHandle}");
+    }
+
+    public void ChangeLayerByHandle(string hexHandle, string layer) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            EnsureLayer(layer);                        // 层不存在→创建（既有基元，建层单写独立忙重试）
+            RetryBusy(() => { e.Layer = layer; });      // 单写调用独立忙重试（I2 口径）
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"ChangeLayerByHandle 失败: {ex.Message}", ex); }
+    });
+
+    public void MoveByHandle(string hexHandle, double dx, double dy) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            // IAcadEntity.Move(Point1, Point2)：位移=Point2−Point1；此处 (0,0)→(dx,dy)。
+            RetryBusy(() => { e.Move(Pt(0, 0), Pt(dx, dy)); });
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"MoveByHandle 失败: {ex.Message}", ex); }
+    });
+
+    public void DeleteByHandle(string hexHandle) => Run(() =>
+    {
+        try
+        {
+            dynamic e = FindByHandle(hexHandle);
+            RetryBusy(() => { e.Delete(); });
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"DeleteByHandle 失败: {ex.Message}", ex); }
+    });
+
     public int EntityCount() => Run(() =>
     {
         // 只读组合（ModelSpace getter + Count getter）无副作用，同组忙重试安全。
