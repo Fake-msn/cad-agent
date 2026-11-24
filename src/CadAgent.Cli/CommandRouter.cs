@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CadAgent.Core;
+using CadAgent.Core.Cad;
 using CadAgent.Data;
 using CadAgent.Data.Checks;
 using CadAgent.Data.Handlers;
@@ -628,6 +629,9 @@ public static partial class CommandRouter
     /// stdout+审计 params 加性 nonFiniteDropped 恒在（无包 0）——旧字段逐字不变。
     /// --min-block-instances 正整数旗标（镜像 --max-tiles 先例）：非法值→stderr + exit 1，
     /// 先于一切副作用（含 --vision relay——新旗标无 legacy 行为可破）。
+    /// T6（切片A）：--native → COM 原生读参落 overlay（NativeEntities 独立表 + NativeParameter
+    /// 标注），stdout/审计加性三键 nativeRead/nativeClassified/nativeReadFailed（无 --native 恒 0；
+    /// 旧键逐字不变）。读参失败诚实降级（native-read-failed 审计），扫描照常 exit 0。
     /// </summary>
     private static int SemanticScan(string[] args, string drawingPath, string agentDir, string session,
         TextWriter stdout, TextWriter stderr)
@@ -684,6 +688,71 @@ public static partial class CommandRouter
         result.Overlay.Save(overlayPath);
         // 扫描不改图纸：前后哈希一致（沿用 intake 的诚实留痕）。
         string hash = drawing.ComputeHash();
+        // T6（切片A）：--native COM 原生读参 → NativeEntities 独立表 + Class!=Unknown&&ReadOk
+        // 同步产 NativeParameter 0.95 标注（NativeParamSeeder）。顺序钉住（计划台账 T3 note）：
+        // Seed 必须在 SemanticScanner.Scan 之后——Scan 末尾按存活句柄剪枝，先 seed 会被当
+        // 陈旧标注清除。
+        // R8（裁定，覆盖 brief 草图）：--native 不得走 CreateRuntimeIfAvailable——其
+        // GetInfo()→EnsureApp() 预激活会缓存默认 profile 的 _app，ReadNativeParams 内
+        // EnsureAppTArch 会静默复用该缓存、永不加载 TArch（nativeRead=0 全空）。故：
+        // ① 测试注入 RuntimeFactory 优先；② 否则 ResolveRuntimeName()!=acad → stderr 警示
+        // 跳过（仅 acad 厂商实现读参；zwcad 诚实降级，计数全 0；未知厂商名仍按
+        // ResolveRuntimeName 契约硬失败）；③ acad → 直接 CreateRuntimeInstance("acad")
+        // （构造不激活 COM；ReadNativeParams(path≠null) 自启 /p 天正 profile+自开+读完关，
+        // 无需外部 Open——交付的是原生参数事实，理解侧只读）。
+        // R9（裁定）：构造/读参任何异常 → native-read-failed 审计（与扫描同 store/session/op，
+        // params{error}）+ stderr 含上下文警示，计数保持 0，扫描继续到正常 stdout/审计/exit 0
+        //（理解侧诚实降级：COM 不可用不得毁掉既有确定性扫描结果）。
+        int nativeRead = 0, nativeClassified = 0, nativeReadFailed = 0;
+        if (args.Contains("--native"))
+        {
+            void NativeReadFailed(Exception ex)
+            {
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "semantic", "native-read-failed", drawingPath,
+                    JsonSerializer.Serialize(new { error = ex.Message }), hash, hash, "", ""));
+                stderr.WriteLine($"--native: 原生读参失败（{ex.Message}），跳过并记录审计（理解侧降级）");
+            }
+
+            ICadRuntime? nativeRuntime = null;
+            if (RuntimeFactory != null)
+            {
+                try { nativeRuntime = RuntimeFactory(); }
+                catch (Exception ex) { NativeReadFailed(ex); }
+            }
+            else if (ResolveRuntimeName() != "acad")
+            {
+                stderr.WriteLine("--native: 该运行时不支持原生读参（仅 acad 厂商），跳过 COM 读参（理解侧降级）");
+            }
+            else
+            {
+                try { nativeRuntime = CreateRuntimeInstance("acad"); }
+                catch (Exception ex) { NativeReadFailed(ex); }
+            }
+            if (nativeRuntime is not null)
+            {
+                using (nativeRuntime)
+                {
+                    try
+                    {
+                        var parms = nativeRuntime.ReadNativeParams(drawingPath);
+                        nativeRead = parms.Count;
+                        nativeClassified = parms.Count(p => p.Class != SemanticClass.Unknown && p.ReadOk);
+                        nativeReadFailed = parms.Count(p => !p.ReadOk);
+                        NativeParamSeeder.Seed(result.Overlay, parms);
+                        // 恰一次额外 Save（扫描结果已在上方 Save）：NativeEntities 独立表须持久化，
+                        // 否则下次 scan Load 原生表为空。无 --native 路径仍恰一次 Save，旧行为逐字不变。
+                        result.Overlay.Save(overlayPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        // R9：异常前已赋值的计数一律归 0（读参整体失败=无可用原生事实，诚实口径）。
+                        nativeRead = nativeClassified = nativeReadFailed = 0;
+                        NativeReadFailed(ex);
+                    }
+                }
+            }
+        }
         // BF-T3 加性披露口径（审计与 stdout 共用）：无包→BlockMatch null→零/空恒在。
         int blockAutoSeeded = result.BlockMatch?.AutoSeeds.Sum(s => s.Handles.Count) ?? 0;
         int symbolsSkipped = result.BlockMatch?.SymbolsSkipped ?? 0;
@@ -706,7 +775,12 @@ public static partial class CommandRouter
                 blockAmbiguousCount = result.BlockMatch?.Ambiguous.Count ?? 0,
                 symbolsSkipped,
                 // R9③ 审计加性（spec §13.4）：非有限坐标实体剔除累计数（旧字段逐字不变）。
-                nonFiniteDropped
+                nonFiniteDropped,
+                // T6 审计加性（切片A）：COM 读参计数——读参总数/已分类且读成功数/读失败数
+                //（无 --native 恒 0，旧字段逐字不变）。读参失败时有独立 native-read-failed 条目。
+                nativeRead,
+                nativeClassified,
+                nativeReadFailed
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -733,7 +807,12 @@ public static partial class CommandRouter
                     histogram = a.Histogram, bbox = a.Bbox }),
             symbolsSkipped,
             // R9③ stdout 加性键恒在（spec §13.4）：NaN/∞ 实体剔除累计数（无包 0）。
-            nonFiniteDropped
+            nonFiniteDropped,
+            // T6 stdout 加性三键恒在（切片A）：COM 原生读参总数/已分类且读成功数/读失败数
+            //（无 --native 恒 0；旧键 version/annotations/ambiguous/sheets 等逐字不变）。
+            nativeRead,
+            nativeClassified,
+            nativeReadFailed
         }, SemanticJsonOpts));
         return 0;
     }
