@@ -53,17 +53,21 @@ public static class TarchDerive
     /// B1（边界补齐）：<paramref name="blockDefs"/> 为同一次桥会话的**块定义段**（块名+类计数，
     /// 定义 ≠ 实例）——**每轮 --explode 整表替换**（重扫刷新、空/缺省清空）；非 --explode 扫描
     /// 不调用本方法，磁盘上的定义段原样保留（与 ExplodeEvidence 表同语义）。
+    /// A4（技术债批次A）：<paramref name="drawingHash"/> 为**本轮**图纸哈希，逐行盖章到
+    /// <see cref="BlockDefTdbEntry.DrawingHash"/>（来源可追溯：同名块跨图纸不混读；入参行自带的旧哈希
+    /// 一律被本轮值覆盖，null 亦然——"本轮未记录来源"不得被上轮哈希冒充）。
     /// 只披露不造标注、不进证据表。</summary>
     public static TarchDeriveResult Enrich(SemanticOverlay overlay, IReadOnlyList<ExplodeEvidence> evidences,
-        IReadOnlyList<BlockDefTdbEntry>? blockDefs = null)
+        IReadOnlyList<BlockDefTdbEntry>? blockDefs = null, string? drawingHash = null)
     {
         ArgumentNullException.ThrowIfNull(overlay);
 
         // B1：块定义段全量刷新（与证据表并列的独立段；每轮以本轮读数替换，绝不残留上轮）。
+        // A4：逐行盖章本轮哈希（with 表达式保留记录其余字段；入参行的旧哈希不保留）。
         overlay.BlockDefTdb.Clear();
         if (blockDefs != null)
             foreach (var d in blockDefs)
-                if (d is not null) overlay.BlockDefTdb.Add(d);
+                if (d is not null) overlay.BlockDefTdb.Add(d with { DrawingHash = drawingHash });
 
         var list = new List<ExplodeEvidence>();
         foreach (var e in evidences ?? Array.Empty<ExplodeEvidence>())

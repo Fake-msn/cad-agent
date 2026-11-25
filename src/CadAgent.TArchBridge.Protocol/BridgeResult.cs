@@ -39,7 +39,14 @@ public sealed record ReplaceDto(string Handle, int NewCount, string SavedPath, b
 /// </summary>
 public sealed class BridgeResult
 {
+    // 三位小数口径（PRIM/BLOCK 等披露段维持不变：坐标粒度是该段既定契约）。
     private const string Num = "0.###";
+
+    // A2（技术债批次A）：ENTITY 包围盒改全精度回环（"R"）："0.###" 会把 0.0005 写成
+    // 0.000/0.001，"写→解析"丢精度，bbox 作为证据就不再可复算。注："R" 在 .NET Framework
+    // 的 Double 上存在已知不回环位型（4.6 前）——真机桥为 net45，故消费侧 T1 仍保留 1e-2 容差；
+    // 宿主/测试侧（net8）"R" 严格回环，round-trip 单测逐位钉住。
+    private const string RoundTrip = "R";
 
     /// <summary>整体状态：ok 或 fail。</summary>
     public string Status { get; set; } = "ok";
@@ -81,8 +88,8 @@ public sealed class BridgeResult
               .Append(TsCodec.Escape(e.RxClass)).Append('\t')
               .Append(TsCodec.Escape(e.WrapperType ?? string.Empty)).Append('\t')
               .Append(TsCodec.Escape(e.Layer ?? string.Empty)).Append('\t')
-              .Append(e.Bbox == null ? string.Empty : Point(e.Bbox, 0)).Append('\t')
-              .Append(e.Bbox == null ? string.Empty : Point(e.Bbox, 3)).Append('\t')
+              .Append(e.Bbox == null ? string.Empty : Point(e.Bbox, 0, RoundTrip)).Append('\t')
+              .Append(e.Bbox == null ? string.Empty : Point(e.Bbox, 3, RoundTrip)).Append('\t')
               .Append(e.FullyExplodable ? '1' : '0').Append('\n');
         }
 
@@ -102,7 +109,7 @@ public sealed class BridgeResult
         foreach (var b in Blocks)
             sb.Append("BLOCK\t").Append(TsCodec.Escape(b.Handle)).Append('\t')
               .Append(TsCodec.Escape(b.Name)).Append('\t')
-              .Append(Point(b.Position, 0)).Append('\n');
+              .Append(Point(b.Position, 0, Num)).Append('\n');
 
         foreach (var d in BlockDefs)
             sb.Append("BDEF\t").Append(TsCodec.Escape(d.BlockName)).Append('\t')
@@ -279,12 +286,13 @@ public sealed class BridgeResult
         return new[] { lo[0], lo[1], lo[2], hi[0], hi[1], hi[2] };
     }
 
-    /// <summary>取 3 值点写入 "x,y,z"（0.### 不变文化）。</summary>
-    private static string Point(double[] p, int offset)
+    /// <summary>取 3 值点写入 "x,y,z"（不变文化；<paramref name="format"/> 决定粒度）。
+    /// ENTITY bbox 用 "R"（全精度，A2）；BLOCK 位置沿用 "0.###"（披露段粒度不变）。</summary>
+    private static string Point(double[] p, int offset, string format)
     {
         if (p.Length < offset + 3) throw new ArgumentException("坐标数组长度不足", nameof(p));
-        return Format(p[offset]) + "," + Format(p[offset + 1]) + "," + Format(p[offset + 2]);
+        return Format(p[offset], format) + "," + Format(p[offset + 1], format) + "," + Format(p[offset + 2], format);
     }
 
-    private static string Format(double v) => v.ToString(Num, CultureInfo.InvariantCulture);
+    private static string Format(double v, string format) => v.ToString(format, CultureInfo.InvariantCulture);
 }

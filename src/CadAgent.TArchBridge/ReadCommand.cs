@@ -46,7 +46,7 @@ namespace CadAgent.TArchBridge
                 req.RequireOp("read");
                 if (!string.Equals(System.IO.Path.GetFileName(doc.Name), System.IO.Path.GetFileName(req.Dwg), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("错图: 当前文档 " + doc.Name + " ≠ " + req.Dwg);
-                ReadInto(result, doc.Database, req.MaxDepth);
+                ReadInto(result, doc.Database, req.MaxDepth, req.IncludeBlockDefs);
             }
             catch (System.Exception ex)
             {
@@ -69,7 +69,7 @@ namespace CadAgent.TArchBridge
             ed.WriteMessage("\nCADAGENT_TARCH_READ done\n");
         }
 
-        internal static void ReadInto(BridgeResult result, Database db, int maxDepth)
+        internal static void ReadInto(BridgeResult result, Database db, int maxDepth, bool includeBlockDefs)
         {
             using (var tr = db.TransactionManager.StartTransaction())
             {
@@ -89,7 +89,8 @@ namespace CadAgent.TArchBridge
                         // A1（边界补齐）：六分量全近零=退化 extents（零尺寸/无几何实体）——不得冒充
                         // "0,0,0..0,0,0"的可用包围盒；bbox 置 null（ENTITY 行两列为空）+ 落 FAIL 事实，
                         // 消费侧据 FailReason 区分"读不到"与"读到的就是零"。
-                        if (IsDegenerateExtents(box)) result.Fails.Add(new FailDto(handle, "extents:degenerate"));
+                        // 判据已下沉协议层（ExtentsPolicy.IsDegenerate）：桥与宿主/测试共用同一份口径。
+                        if (ExtentsPolicy.IsDegenerate(box)) result.Fails.Add(new FailDto(handle, "extents:degenerate"));
                         else bbox = box;
                     }
                     catch (System.Exception ex) { result.Fails.Add(new FailDto(handle, "extents:" + ex.GetType().Name)); }
@@ -107,31 +108,24 @@ namespace CadAgent.TArchBridge
                 }
                 // B1（边界补齐）：块定义内 TDb 聚合**独立段**（BDEF）——与上方模型空间实例段
                 // （ENTITY，按句柄）互不混同；定义计数不是实例计数。
-                CollectBlockDefs(result, db, tr);
+                // A3（技术债批次A）：块定义段按需读取（请求 bdef=1）。未索取时**不**输出任何 BDEF 行——
+                // "本轮没读块定义"与"读了但零定义"是不同事实，不得用空段互相冒充。
+                if (includeBlockDefs) CollectBlockDefs(result, db, tr);
                 tr.Commit();
             }
         }
 
-        /// <summary>A1：退化包围盒判据——六分量 |v| 全 &lt; 1e-6 即退化（零尺寸/无几何）。</summary>
-        internal static bool IsDegenerateExtents(double[] box)
-        {
-            for (int i = 0; i < box.Length; i++)
-                if (Math.Abs(box[i]) >= 1e-6) return false;
-            return true;
-        }
-
         /// <summary>
-        /// B1：块定义 TDb 聚合。遍历 BlockTable 记录，跳过模型空间/图纸空间**布局块**
-        /// （主判据 <c>BlockTableRecord.IsLayout</c>：不依赖块名约定；*Model_Space/*Paper_Space*
-        /// 名称前缀保留为兜底），对每个块定义内的 TDb 实体按 (块名, 类) 计数；
+        /// B1：块定义 TDb 聚合。遍历 BlockTable 记录**收集扫描行**（块名, 类, 是否布局块），
+        /// 再交协议层 <see cref="BlockDefAggregator.Aggregate"/> 做布局块剔除 / 按 (块名, 类) 计数 /
+        /// Ordinal 定序（口径下沉：桥与宿主/测试共用同一份判据）。
         /// 嵌套块只统计**直接**实体（不递归展开）。
-        /// 输出按 (块名, 类) Ordinal 定序，保证同一图纸多次读取行序稳定。
         /// </summary>
         internal static void CollectBlockDefs(BridgeResult result, Database db, Transaction tr)
         {
-            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-            var names = new Dictionary<string, string>(StringComparer.Ordinal);
-            var classes = new Dictionary<string, string>(StringComparer.Ordinal);
+            // B0（技术债批次B）：扫描行用具名记录（协议层 BlockDefScanRow）——元组签名需要
+            // net45 System.ValueTuple（该垫片已随批次B删除）；具名记录两腿同源、零垫片。
+            var rows = new List<BlockDefScanRow>();
 
             var bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
             if (bt == null) return;
@@ -148,13 +142,18 @@ namespace CadAgent.TArchBridge
                 if (string.IsNullOrEmpty(blockName)) continue;
                 // M-1（修复波1）：布局块判定以 BTR.IsLayout 为主判据（模型/图纸空间布局在任何
                 // 块名约定下都不会被当块定义计数）；名称前缀保留为兜底（IsLayout 读取异常时
-                // 仍能挡住 *Model_Space/*Paper_Space*）。
+                // 仍能挡住 *Model_Space/*Paper_Space*）。判定结果随行下传，剔除由聚合器统一执行。
                 bool isLayout = false;
                 try { isLayout = btr.IsLayout; }
                 catch { /* 取不到按非布局，交由名称兜底 */ }
+                if (!isLayout && string.Equals(blockName, "*Model_Space", StringComparison.OrdinalIgnoreCase))
+                    isLayout = true;
+                if (!isLayout && blockName.StartsWith("*Paper_Space", StringComparison.OrdinalIgnoreCase))
+                    isLayout = true;
+                // C-I4（技术债批次C）：布局块在**收集侧**即早退——不构建扫描行（不枚举其实体，
+                // 省掉模型/图纸空间的全量遍历）。聚合器内的 IsLayout 跳过保留为双保险
+                //（扫描行也可能来自其它来源/未来调用方）。
                 if (isLayout) continue;
-                if (string.Equals(blockName, "*Model_Space", StringComparison.OrdinalIgnoreCase)) continue;
-                if (blockName.StartsWith("*Paper_Space", StringComparison.OrdinalIgnoreCase)) continue;
 
                 foreach (ObjectId entId in btr)
                 {
@@ -167,24 +166,12 @@ namespace CadAgent.TArchBridge
                     catch { continue; }
                     if (!rx.StartsWith("TDb", StringComparison.Ordinal)) continue;
 
-                    // 具名 struct 键（net45 无 ValueTuple）：块名与类名以 NUL 连接（两者不含 NUL）。
-                    string key = blockName + "\u0000" + rx;
-                    if (!counts.ContainsKey(key))
-                    {
-                        counts[key] = 0;
-                        names[key] = blockName;
-                        classes[key] = rx;
-                    }
-                    counts[key] = counts[key] + 1;
+                    rows.Add(new BlockDefScanRow(blockName, rx, isLayout));
                 }
             }
 
-            foreach (string key in counts.Keys
-                .OrderBy(k => names[k], StringComparer.Ordinal)
-                .ThenBy(k => classes[k], StringComparer.Ordinal))
-            {
-                result.BlockDefs.Add(new BlockDefDto(names[key], classes[key], counts[key]));
-            }
+            foreach (var d in BlockDefAggregator.Aggregate(rows))
+                result.BlockDefs.Add(new BlockDefDto(d.BlockName, d.RxClass, d.Count));
         }
 
         // 递归炸开：产物继续炸到无 TDb；返回是否"完整"（>0 产物且全非 TDb 且无异常）。

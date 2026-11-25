@@ -333,4 +333,29 @@ public class TarchDeriveTests
         Assert.Equal(0.8, annotation.Confidence);
         Assert.Single(o.BlockDefTdb);
     }
+
+    /// <summary>
+    /// A4（技术债批次A）：块定义行盖章 DrawingHash——每个入表行携带**本轮**图纸哈希
+    ///（来源可追溯：同名块在不同图纸下的计数不可混读）；缺省（null）则整表为 null，
+    /// 且覆盖掉入参行自带的旧哈希（重扫整表替换，哈希随行一并不残留）。
+    /// </summary>
+    [Fact]
+    public void Enrich_BlockDefs_StampsDrawingHash()
+    {
+        var o = new SemanticOverlay();
+        var ev = new[] { Wall("21E00") };
+
+        TarchDerive.Enrich(o, ev, new[]
+        {
+            new BlockDefTdbEntry("门块A", "TDbECabletry", 3),
+            new BlockDefTdbEntry("块B", "TDbEFitting", 1, "SHA256:OLD"),
+        }, "SHA256:ABC");
+
+        Assert.Equal(2, o.BlockDefTdb.Count);
+        Assert.All(o.BlockDefTdb, d => Assert.Equal("SHA256:ABC", d.DrawingHash));
+
+        // 缺省哈希（旧调用面）：列仍为 null，且覆盖掉入参行自带的旧哈希。
+        TarchDerive.Enrich(o, ev, new[] { new BlockDefTdbEntry("块B", "TDbEFitting", 1, "SHA256:OLD") });
+        Assert.All(o.BlockDefTdb, d => Assert.Null(d.DrawingHash));
+    }
 }

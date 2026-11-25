@@ -6,7 +6,8 @@ namespace CadAgent.TArchBridge.Protocol;
 
 /// <summary>
 /// 宿主→桥请求（TSV <c>key\tvalue</c>）：<c>op</c>/<c>dwg</c> 必填，
-/// <c>explode-replace</c> 另需 <c>handle</c> 与 <c>liveout</c>。
+/// <c>explode-replace</c> 另需 <c>handle</c> 与 <c>liveout</c>；
+/// <c>bdef</c> 为可选开关（块定义段按需读取，见 <see cref="IncludeBlockDefs"/>）。
 /// </summary>
 /// <param name="Op">操作名：read 或 explode-replace。</param>
 /// <param name="Dwg">当前文档期望名，用于防错图。</param>
@@ -15,6 +16,13 @@ namespace CadAgent.TArchBridge.Protocol;
 /// <param name="LiveOut">替换产物 <c>.live.dwg</c> 保存路径。</param>
 public sealed record BridgeRequest(string Op, string Dwg, string? Handle, int MaxDepth, string? LiveOut)
 {
+    /// <summary>
+    /// 是否随本次读取索取**块定义段**（BDEF）。缺省 false = 不扫描块定义（桥不得输出任何 BDEF 行）：
+    /// 块表遍历+逐定义实体计数在真机上有可观成本，只有需要定义段事实的调用方（CLI <c>--explode</c>）
+    /// 才付这个成本。协议键 <c>bdef</c> 只接受字面量 "1"（其它值一律 <see cref="FormatException"/>）。
+    /// </summary>
+    public bool IncludeBlockDefs { get; init; }
+
     /// <summary>序列化为 TSV 文本（每行一条 key/value，行尾 <c>\n</c>）。</summary>
     public string Write()
     {
@@ -26,6 +34,8 @@ public sealed record BridgeRequest(string Op, string Dwg, string? Handle, int Ma
         };
         if (Handle != null) lines.Add("handle\t" + TsCodec.Escape(Handle));
         if (LiveOut != null) lines.Add("liveout\t" + TsCodec.Escape(LiveOut));
+        // A3：只在 true 时输出——false 缺省请求逐字不变（旧日志/旧桥面不受扰动）。
+        if (IncludeBlockDefs) lines.Add("bdef\t1");
         return string.Join("\n", lines) + "\n";
     }
 
@@ -33,6 +43,7 @@ public sealed record BridgeRequest(string Op, string Dwg, string? Handle, int Ma
     public static BridgeRequest Parse(string text)
     {
         string? op = null, dwg = null, handle = null, liveout = null; int depth = 4;
+        bool includeBlockDefs = false;
         foreach (var raw in text.Split('\n'))
         {
             var line = raw.EndsWith("\r") ? raw.Substring(0, raw.Length - 1) : raw;
@@ -45,6 +56,12 @@ public sealed record BridgeRequest(string Op, string Dwg, string? Handle, int Ma
                 case "dwg": dwg = kv[1]; break;
                 case "handle": handle = kv[1]; break;
                 case "liveout": liveout = kv[1]; break;
+                case "bdef":
+                    // 只接受 "1"：不把 "0"/"false"/其它拼写静默当 false（协议的"半开"取值一律拒绝）。
+                    if (!string.Equals(kv[1], "1", StringComparison.Ordinal))
+                        throw new FormatException($"bdef 非法（只接受 1）: {kv[1]}");
+                    includeBlockDefs = true;
+                    break;
                 case "maxdepth":
                     if (!int.TryParse(kv[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out depth))
                         throw new FormatException($"maxdepth 非法: {kv[1]}");
@@ -56,7 +73,7 @@ public sealed record BridgeRequest(string Op, string Dwg, string? Handle, int Ma
         if (dwg == null) throw new FormatException("缺少 dwg");
         if (op == "explode-replace" && (handle == null || liveout == null))
             throw new FormatException("explode-replace 需要 handle 与 liveout");
-        return new BridgeRequest(op, dwg, handle, depth, liveout);
+        return new BridgeRequest(op, dwg, handle, depth, liveout) { IncludeBlockDefs = includeBlockDefs };
     }
 
     /// <summary>

@@ -668,6 +668,14 @@ public static partial class CommandRouter
                 stderr.WriteLine("用法: semantic scan --vision 与 --skill 不能并存（视觉读图不支持 skill 别名；请去掉 --skill 或改用无 --vision 的语义扫描）");
                 return 1;
             }
+            // B9（技术债批次B）：--vision 与 --native/--explode 并存 → 用法拒绝 exit 1。
+            // relay 只转发视觉读图参数（View headless 入口无 COM 原生读参/桥深读通道），
+            // 静默丢弃这两旗标=诚实缺口；拒绝先于 relay 与一切副作用（镜像 R9 --skill 先例）。
+            if (args.Contains("--native") || args.Contains("--explode"))
+            {
+                stderr.WriteLine("用法: semantic scan --vision 与 --native/--explode 不能并存（视觉读图不支持 COM 原生读参/深度读；请去掉 --vision 或改用无 --vision 的语义扫描）");
+                return 1;
+            }
             return VisionScanRelay(args, drawingPath, agentDir, stdout, stderr);
         }
         var ruleSet = LoadRuleSet(args, stderr);
@@ -835,7 +843,9 @@ public static partial class CommandRouter
                     {
                         try
                         {
-                            var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath);
+                            // A3（技术债批次A）：--explode 是块定义段的**唯一**消费者——显式索取
+                            //（includeBlockDefs:true；native-live 等不消费定义段的路径保持缺省 false）。
+                            var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath, includeBlockDefs: true);
                             explodeRead = evidences.Count;
                             explodeFully = evidences.Count(e => e.FullyExplodable);
                             // 口径（brief 逐字）：未全炸开且仍有产物=部分；零产物=失败（基元表缺失按空）。
@@ -861,7 +871,8 @@ public static partial class CommandRouter
                             List<BlockDefTdbEntry>? retained = blockDefs is null
                                 ? result.Overlay.BlockDefTdb.ToList()
                                 : null;
-                            var derive = TarchDerive.Enrich(result.Overlay, evidences, blockDefs);
+                            // A4（技术债批次A）：块定义行逐行盖章本轮图纸哈希（来源可追溯：同名块跨图纸不混读）。
+                            var derive = TarchDerive.Enrich(result.Overlay, evidences, blockDefs, hash);
                             if (retained is not null)
                             {
                                 result.Overlay.BlockDefTdb.Clear();

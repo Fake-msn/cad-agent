@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using CadAgent.Adapters.Acad;
+using CadAgent.Core;
 using CadAgent.Core.Cad;
+using CadAgent.Data.Semantic;
 using CadAgent.TArchBridge.Protocol;
 using Xunit;
 
@@ -375,6 +377,103 @@ public class BridgeChannelTests : IDisposable
         Assert.Null(list.Single(e => e.Handle == "OK1").FailReasons);
     }
 
+    // ---- C-I3（技术债批次C）：非有限值卫生——NaN/∞ 不得进 overlay（System.Text.Json 会抛）----
+
+    // bbox 任一非有限分量 → 整盒置 null（不得当可用包围盒）+ 追加去因；无既有 FAIL 时该原因即首条。
+    [Fact]
+    public void MapExplodeEvidence_NonFiniteBbox_SanitizedToNullWithReason()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto(
+            "N1", "TDbWall", "ImpCurve", "0dt",
+            new[] { double.NaN, 0.0, 0.0, 1.0, 1.0, 1.0 }, true));
+        r.Prims.Add(new PrimDto("N1", 0, "AcDbLine", new[] { "start=0,0,0", "end=1,0,0" }));
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Null(e.Bbox);                                     // 不可验：不得冒充可用证据
+        Assert.Equal("bbox:nonfinite", e.FailReason);            // 无既有 FAIL → 该原因成为首条
+        Assert.Equal(new[] { "bbox:nonfinite" }, e.FailReasons!);
+        Assert.Equal(1, e.PrimitiveCount);                       // 基元本身有限：保留
+    }
+
+    // 既有 FAIL 存在时不覆盖首条（首条语义保持桥输出序），非有限原因追加到全量列表。
+    [Fact]
+    public void MapExplodeEvidence_NonFiniteBbox_KeepsExistingFirstReason()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("N2", "TDbWall", null, null, new[] { 0.0, double.PositiveInfinity, 0.0, 1.0, 1.0, 1.0 }, false));
+        r.Fails.Add(new FailDto("N2", "extents:Exception"));
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Null(e.Bbox);
+        Assert.Equal("extents:Exception", e.FailReason);
+        Assert.Equal(new[] { "extents:Exception", "bbox:nonfinite" }, e.FailReasons!);
+    }
+
+    // Points 含非有限分量的基元整条丢弃（不得把 NaN 坐标写进 overlay），丢弃数按句柄计一次。
+    [Fact]
+    public void MapExplodeEvidence_NonFinitePrimitivePoints_DroppedAndCountedOnce()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("P1", "TDbWall", null, null, null, true));
+        r.Prims.Add(new PrimDto("P1", 0, "AcDbLine", new[] { "start=0,0,0", "end=10,0,0" }));          // 保留
+        r.Prims.Add(new PrimDto("P1", 0, "AcDbLine", new[] { "start=NaN,0,0", "end=10,0,0" }));        // 丢弃
+        r.Prims.Add(new PrimDto("P1", 0, "AcDbCircle", new[] { "center=0,Infinity,0" }));              // 丢弃
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Equal(1, e.PrimitiveCount);
+        Assert.Single(e.Primitives);
+        Assert.All(e.Primitives[0].Points, v => Assert.True(double.IsFinite(v)));
+        Assert.Equal(new[] { "prims:nonfinite:2" }, e.FailReasons!);   // 按句柄计一次（不是两行）
+        // D（微修复波D）：与 bbox 同口径——无既有 FAIL 时该去因**同时**成为首条（FailReason）。
+        Assert.Equal("prims:nonfinite:2", e.FailReason);
+    }
+
+    // D（微修复波D）：既有 FAIL 存在时，prims 去因只追加到全量列表，不覆盖首条。
+    [Fact]
+    public void MapExplodeEvidence_NonFinitePrimitivePoints_KeepsExistingFirstReason()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("P2", "TDbWall", null, null, null, false));
+        r.Fails.Add(new FailDto("P2", "extents:Exception"));
+        r.Prims.Add(new PrimDto("P2", 0, "AcDbLine", new[] { "start=NaN,0,0", "end=0,0,0" }));   // 丢弃
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Equal("extents:Exception", e.FailReason);                              // 首条不覆盖
+        Assert.Equal(new[] { "extents:Exception", "prims:nonfinite:1" }, e.FailReasons!);
+    }
+
+    // 端到端卫生：清洗后的证据经 TarchDerive.Enrich 落 overlay → Save(JSON) 必须成功
+    //（JsonSerializer 默认拒绝 NaN/∞——旧实现会在此抛异常，overlay 保存静默失败）。
+    [Fact]
+    public void MapExplodeEvidence_NonFinite_SanitizedBeforeOverlaySave()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto(
+            "N3", "TDbWall", null, null,
+            new[] { double.NaN, 0.0, 0.0, 1.0, 1.0, 1.0 }, true));
+        r.Prims.Add(new PrimDto("N3", 0, "AcDbLine", new[] { "start=0,0,0", "end=NaN,0,0" }));
+        r.Prims.Add(new PrimDto("N3", 0, "AcDbLine", new[] { "start=0,0,0", "end=5,0,0" }));
+
+        var list = AcadRuntime.MapExplodeEvidence(r);
+        var overlay = new SemanticOverlay();
+        TarchDerive.Enrich(overlay, list, null, "hash-n3");
+        string path = Path.Combine(_dir, "semantic.json");
+
+        overlay.Save(path);   // 旧实现：NaN 进 JSON → 抛异常
+
+        string json = File.ReadAllText(path);
+        Assert.DoesNotContain("NaN", json);
+        var loaded = SemanticOverlay.Load(path);
+        var row = Assert.Single(loaded.ExplodeEvidence);
+        Assert.Null(row.Bbox);
+        Assert.All(row.Primitives.SelectMany(p => p.Points), v => Assert.True(double.IsFinite(v)));
+    }
+
     [Fact]
     public void PrimitiveKind_FamiliesCollapse()
     {
@@ -462,7 +561,8 @@ public class BridgeChannelTests : IDisposable
         AcadAttach.ActiveObjectResolver = _ => app;
 
         using var rt = new AcadRuntime();
-        rt.ReadExplodeEvidence("16#1116.dwg");
+        // A3：块定义段按需读取——缓存测试须显式请求（includeBlockDefs: true）。
+        rt.ReadExplodeEvidence("16#1116.dwg", includeBlockDefs: true);
         int afterRead = calls.Count;
 
         var defs = rt.ReadExplodeBlockDefs("16#1116.dwg");
@@ -487,6 +587,29 @@ public class BridgeChannelTests : IDisposable
         Assert.Contains("ReadExplodeEvidence", ex.Message);
     }
 
+    // A3（技术债批次A）：块定义段按需读取——本次读取**未请求**（includeBlockDefs=false，缺省）
+    // 时缓存不写入：ReadExplodeBlockDefs 必响亮拒绝（绝不凭空返回空表，也不隐式二次开图；
+    // "读到了 0 个块定义"与"本轮没读块定义"是不同事实）。
+    [Fact]
+    public void ReadExplodeBlockDefs_WithoutIncludeBlockDefs_Throws()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls);
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        using var rt = new AcadRuntime();
+        var evidences = rt.ReadExplodeEvidence("16#1116.dwg");   // 缺省 false
+        Assert.NotEmpty(evidences);
+        int afterRead = calls.Count;
+
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("includeBlockDefs", ex.Message);
+        Assert.Equal(afterRead, calls.Count);   // 拒绝也不得二次开图
+    }
+
     // M-3(a)（修复波1）：Dispose 清空块定义缓存——实例销毁后不得再返回上一会话的块定义表
     //（缓存生命周期 = 桥会话生命周期；残留缓存会让已销毁实例"复活"旧读数）。
     [Fact]
@@ -501,7 +624,7 @@ public class BridgeChannelTests : IDisposable
         var rt = new AcadRuntime();
         try
         {
-            rt.ReadExplodeEvidence("16#1116.dwg");
+            rt.ReadExplodeEvidence("16#1116.dwg", includeBlockDefs: true);
             Assert.NotEmpty(rt.ReadExplodeBlockDefs("16#1116.dwg"));   // 销毁前命中
         }
         finally
@@ -526,7 +649,7 @@ public class BridgeChannelTests : IDisposable
         AcadAttach.ActiveObjectResolver = _ => app;
 
         using var rt = new AcadRuntime();
-        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg"));
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg", includeBlockDefs: true));
         Assert.Contains("Close 失败", ex.Message);
 
         var cacheEx = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));

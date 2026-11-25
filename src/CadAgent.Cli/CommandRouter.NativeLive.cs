@@ -103,6 +103,20 @@ public static partial class CommandRouter
     // move 读回 bbox 分量容差（R6：after bbox 可得则必验平移）。
     private const double BboxTolerance = 1e-6;
 
+    /// <summary>
+    /// B10（技术债批次B）：native-live 深读退化提示。仅当**生产解析**口径下运行时厂商非 acad
+    ///（RuntimeFactory 注入=false 的生产判定；注入工厂路径不改既有文案）时追加。
+    /// 只用于 stderr/拒绝文案；审计 verdict payload 不变（<see cref="DeepReadVendorHintText"/> 不入审计）。
+    /// </summary>
+    internal const string DeepReadVendorHintText = "（深读需 CADAGENT_RUNTIME=acad）";
+
+    internal static string DeepReadVendorHint()
+    {
+        if (RuntimeFactory != null) return string.Empty;
+        try { return ResolveRuntimeName() == "acad" ? string.Empty : DeepReadVendorHintText; }
+        catch { return string.Empty; }   // 未知厂商名由既有 ResolveRuntimeName 硬失败路径处理，此处不抢答
+    }
+
     // 哈希缝（复审 finding 2d）：测试注入空串/定向空值以覆盖 fail-closed 分支；
     // 生产默认=真实 SHA256（不可读→空串，由调用侧判定失败）。
     internal static Func<string, string> Sha256File = SafeSha256File;
@@ -140,7 +154,8 @@ public static partial class CommandRouter
             return 1;
         }
 
-        int RefuseVerdicts(IReadOnlyList<(string Handle, string Verdict, string? ParamsVerdict)> verdicts)
+        int RefuseVerdicts(IReadOnlyList<(string Handle, string Verdict, string? ParamsVerdict)> verdicts,
+            string notice = "")
         {
             // R14：verdict=合并判据结论（炸开门拒因优先），paramsVerdict=参数门独立结论
             // （仅解释用，nullable=该阶段未取参数门结论，如 InvalidLayer 用法拒绝）。
@@ -150,7 +165,7 @@ public static partial class CommandRouter
             // R12 层名准入属用法错误：独立 usage 文案（其余判据拒绝给逐实体 verdict 明细）。
             string message = verdicts.Any(v => v.Verdict == "InvalidLayer")
                 ? $"用法: change-layer 需要非空 layer 参数（逐实体判据: {detail}）"
-                : $"native-live 拒绝: 逐实体判据未通过（{detail}）";
+                : $"native-live 拒绝: 逐实体判据未通过（{detail}）{notice}";
             return Refuse(new
             {
                 verdicts = verdicts.Select(v => new
@@ -389,7 +404,13 @@ public static partial class CommandRouter
                 else
                     explodeGateHandles.Add(handle);
             }
-            if (gateVerdicts.Count > 0) return RefuseVerdicts(gateVerdicts);
+            if (gateVerdicts.Count > 0)
+            {
+                // B10（技术债批次B）：深读退化若源于运行时厂商非 acad（生产解析口径），
+                // 在既有拒绝文案尾部追加可执行指引（审计 payload 不变——只改 stderr 文本）。
+                string notice = deepRead ? DeepReadVendorHint() : "";
+                return RefuseVerdicts(gateVerdicts, notice);
+            }
             if (layerNoParams.Count > 0) return RefuseLayerNoParams(layerNoParams);
 
             // 台账 T7@T9：准入重读指纹（定序 "handle|objectName|bbox|params" 的 SHA256）

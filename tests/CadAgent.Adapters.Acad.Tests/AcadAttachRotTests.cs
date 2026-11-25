@@ -16,16 +16,21 @@ namespace CadAgent.Adapters.Acad.Tests;
 public class AcadAttachRotTests : IDisposable
 {
     private readonly Func<string, int, object?> _origRot = AcadAttach.RotAttachByPid;
-    private readonly Func<object, int> _origHwnd = AcadAttach.HwndReader;
-    private readonly Func<int, int> _origWindowPid = AcadAttach.WindowProcessId;
+    // B5（技术债批次B）：窗口句柄/窗口→PID 缝已统一到 AcadWindows（AcadAttach 与 AcadRuntime
+    // 共用同一生产实现与同一注入点；本类只保存/还原这一对）。
+    private readonly Func<object?, int> _origHwnd = AcadWindows.HwndReader;
+    private readonly Func<IntPtr, int> _origWindowPid = AcadWindows.WindowProcessId;
     private readonly Func<int, bool> _origAlive = AcadAttach.PidAlive;
+    // C-I2（技术债批次C）：显示名预过滤跳过诊断缝（默认 noop；宿主可注入日志）。
+    private readonly Action<string> _origSkipDiag = AcadAttach.RotSkipDiagnostics;
 
     public void Dispose()
     {
         AcadAttach.RotAttachByPid = _origRot;
-        AcadAttach.HwndReader = _origHwnd;
-        AcadAttach.WindowProcessId = _origWindowPid;
+        AcadWindows.HwndReader = _origHwnd;
+        AcadWindows.WindowProcessId = _origWindowPid;
         AcadAttach.PidAlive = _origAlive;
+        AcadAttach.RotSkipDiagnostics = _origSkipDiag;
     }
 
     private const int OurPid = 4242;
@@ -65,7 +70,9 @@ public class AcadAttachRotTests : IDisposable
         };
         var sw = Stopwatch.StartNew();
 
-        var ex = Assert.Throws<CadRuntimeException>(
+        // B7（技术债批次B）：耗尽按**内部终局类型**上抛（不再靠消息子串判定可回退）；
+        // 文案逐字不变（真机排障口径保持）。
+        var ex = Assert.Throws<RotFilterExhaustedException>(
             () => AcadAttach.AttachByPid("AutoCAD.Application", OurPid, maxAttempts: 2));
 
         sw.Stop();
@@ -149,8 +156,8 @@ public class AcadAttachRotTests : IDisposable
     [Fact]
     public void OwnedByPid_DeadProcess_Excluded()
     {
-        AcadAttach.HwndReader = _ => 7777;
-        AcadAttach.WindowProcessId = _ => OurPid;
+        AcadWindows.HwndReader = _ => 7777;
+        AcadWindows.WindowProcessId = _ => OurPid;
         AcadAttach.PidAlive = _ => false;
 
         Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));
@@ -165,18 +172,18 @@ public class AcadAttachRotTests : IDisposable
     {
         AcadAttach.PidAlive = _ => true;
 
-        AcadAttach.HwndReader = _ => 7777;
-        AcadAttach.WindowProcessId = _ => ForeignPid;
+        AcadWindows.HwndReader = _ => 7777;
+        AcadWindows.WindowProcessId = _ => ForeignPid;
         Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 窗口属他方 PID
 
-        AcadAttach.WindowProcessId = _ => OurPid;
-        AcadAttach.HwndReader = _ => throw new InvalidOperationException("HWND 不可读");
+        AcadWindows.WindowProcessId = _ => OurPid;
+        AcadWindows.HwndReader = _ => throw new InvalidOperationException("HWND 不可读");
         Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 读不出窗口
 
-        AcadAttach.HwndReader = _ => 0;
+        AcadWindows.HwndReader = _ => 0;
         Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 无窗口句柄
 
-        AcadAttach.HwndReader = _ => 7777;
+        AcadWindows.HwndReader = _ => 7777;
         Assert.False(AcadAttach.OwnedByPid(null, OurPid));           // 无候选
         Assert.False(AcadAttach.OwnedByPid(new object(), 0));        // 无目标 PID
     }
@@ -186,9 +193,9 @@ public class AcadAttachRotTests : IDisposable
     [Fact]
     public void OwnedByPid_WindowProcessIdThrows_Excluded()
     {
-        AcadAttach.HwndReader = _ => 7777;
+        AcadWindows.HwndReader = _ => 7777;
         AcadAttach.PidAlive = _ => true;
-        AcadAttach.WindowProcessId = _ => throw new InvalidOperationException("窗口→PID 查询失败");
+        AcadWindows.WindowProcessId = _ => throw new InvalidOperationException("窗口→PID 查询失败");
 
         Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 不抛，且不认
     }
@@ -197,8 +204,8 @@ public class AcadAttachRotTests : IDisposable
     [Fact]
     public void OwnedByPid_PidAliveThrows_Excluded()
     {
-        AcadAttach.HwndReader = _ => 7777;
-        AcadAttach.WindowProcessId = _ => OurPid;
+        AcadWindows.HwndReader = _ => 7777;
+        AcadWindows.WindowProcessId = _ => OurPid;
         AcadAttach.PidAlive = _ => throw new InvalidOperationException("存活判定失败");
 
         Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 不抛，且不认
@@ -218,17 +225,76 @@ public class AcadAttachRotTests : IDisposable
     [Fact]
     public void Seams_RestoredToDefaults_AfterDispose()
     {
-        AcadAttach.HwndReader = _ => 1;
+        AcadWindows.HwndReader = _ => 1;
         AcadAttach.PidAlive = _ => false;
-        AcadAttach.WindowProcessId = _ => 1;
+        AcadWindows.WindowProcessId = _ => 1;
         AcadAttach.RotAttachByPid = (_, _) => null;
+        AcadAttach.RotSkipDiagnostics = _ => { };
 
         Dispose();
 
-        Assert.Same(_origHwnd, AcadAttach.HwndReader);
+        Assert.Same(_origHwnd, AcadWindows.HwndReader);
         Assert.Same(_origAlive, AcadAttach.PidAlive);
-        Assert.Same(_origWindowPid, AcadAttach.WindowProcessId);
+        Assert.Same(_origWindowPid, AcadWindows.WindowProcessId);
         Assert.Same(_origRot, AcadAttach.RotAttachByPid);
+        Assert.Same(_origSkipDiag, AcadAttach.RotSkipDiagnostics);
+    }
+
+    // ---- C-I2（技术债批次C）：显示名预过滤的安全阀与跳过诊断 ----
+
+    // 混合名单：正常路径逐条按策略判定（含 null=不可判定仍考虑）；跳过项逐条发诊断。
+    [Fact]
+    public void PrefilterDisplayNames_MixedList_NormalPathUnchanged()
+    {
+        var skipped = new List<string>();
+        AcadAttach.RotSkipDiagnostics = s => skipped.Add(s);
+
+        var decided = AcadAttach.ResolveDisplayNameConsiderations(
+            new string?[] { @"C:\dwg\Drawing1.dwg", "AutoCAD.Application", null, "!{00020906-0000-0000-C000-000000000046}" });
+
+        Assert.Equal(new[] { true, false, true, true }, decided);
+        Assert.Equal(new[] { "skip:AutoCAD.Application" }, skipped);
+    }
+
+    // 安全阀：整轮**零** moniker 通过策略 → 全部按"考虑"处理（不逐条 skip）。
+    // 防的是策略判据失灵（如显示名布局变化）把本方实例整轮漏掉、回退路径又恰好不可用。
+    // D（微修复波D）：安全阀触发须**一次留痕** "valve:all-rejected"——排障者要能区分
+    // "预过滤整轮放行（策略失灵）"与"根本没有候选（ROT 空）"。
+    [Fact]
+    public void PrefilterDisplayNames_AllRejected_SafetyValveConsidersAllAndTracesOnce()
+    {
+        var skipped = new List<string>();
+        AcadAttach.RotSkipDiagnostics = s => skipped.Add(s);
+
+        var decided = AcadAttach.ResolveDisplayNameConsiderations(
+            new string?[] { "AutoCAD.Application", @"C:\Program Files\Autodesk\AutoCAD 2014\acad.exe", "TypeLib" });
+
+        Assert.All(decided, Assert.True);
+        Assert.Equal(new[] { "valve:all-rejected" }, skipped);   // 一次留痕，不逐条 skip
+    }
+
+    // D（微修复波D）：跳过诊断节流——每轮至多首 3 条 "skip:{name}"（ROT 杂项多时不刷屏）；
+    // 第 4 条起仅省略诊断，被拒项仍按"考虑"=false 处理（诊断节流不改变判定语义）。
+    [Fact]
+    public void PrefilterDisplayNames_ManySkips_EmitsAtMostThreePerRound()
+    {
+        var skipped = new List<string>();
+        AcadAttach.RotSkipDiagnostics = s => skipped.Add(s);
+
+        var decided = AcadAttach.ResolveDisplayNameConsiderations(new string?[]
+        {
+            "AutoCAD.Application", "TypeLib", "Ole", "ProgID4", "ProgID5", @"C:\dwg\Drawing1.dwg"
+        });
+
+        Assert.Equal(new[] { false, false, false, false, false, true }, decided);
+        Assert.Equal(new[] { "skip:AutoCAD.Application", "skip:TypeLib", "skip:Ole" }, skipped);
+    }
+
+    // 空轮：无 moniker → 空判定（不触发安全阀、不迭代）。
+    [Fact]
+    public void PrefilterDisplayNames_EmptyRound_NoDecisions()
+    {
+        Assert.Empty(AcadAttach.ResolveDisplayNameConsiderations(Array.Empty<string?>()));
     }
 }
 
@@ -254,6 +320,9 @@ public class EnsureAppTArchPidFilterTests : IDisposable
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
     private readonly TimeSpan? _origOwnershipWindow = AcadRuntime.OwnershipRetryWindowOverride;
+    private readonly TimeSpan? _origAttachDeadline = AcadRuntime.AttachTotalDeadlineOverride;
+    // C-I1（技术债批次C）：回退保留预算测试缝（相位预算：总时限 - 保留 = PID 相位上界）。
+    private readonly TimeSpan? _origFallbackReserve = AcadRuntime.AttachFallbackReserveOverride;
 
     public EnsureAppTArchPidFilterTests()
     {
@@ -282,6 +351,8 @@ public class EnsureAppTArchPidFilterTests : IDisposable
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
         AcadRuntime.OwnershipRetryWindowOverride = _origOwnershipWindow;
+        AcadRuntime.AttachTotalDeadlineOverride = _origAttachDeadline;
+        AcadRuntime.AttachFallbackReserveOverride = _origFallbackReserve;
     }
 
     private const int LaunchedPid = 4242;
@@ -468,6 +539,172 @@ public class EnsureAppTArchPidFilterTests : IDisposable
         Assert.Contains("已退出", ex.Message);
         Assert.Equal(0, rotCalls);            // 首轮即中止：未做 ROT 枚举
         Assert.Same(launched, cleaned);       // 失败清理仍只针对本方进程
+    }
+
+    // B8（技术债批次B）+ C-I1/I5（技术债批次C）：附着总时限（PID 路径）——相位1 无候选即耗尽时
+    // **不得**再发起回退（回退预算已被总时限吃掉）；文案按 I5 逐字：PID 过滤 Xs 已耗 + 回退未完成。
+    // 失败清理仍只处置本方进程。
+    [Fact]
+    public void EnsureAppTArch_AttachTotalDeadlineExceeded_ThrowsDeadlineMessageAndCleansOwnProcess()
+    {
+        AcadRuntime.AttachTotalDeadlineOverride = TimeSpan.FromMilliseconds(50);
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => launched = new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadRuntime.PidAttachAttempts = 10;   // 轮询上界远大于总时限：钉住"总时限先生效"
+        // 慢扫描：相位1 唯一一轮即耗尽总时限（相位1 不带 deadline 中止，靠相位预算兜底）。
+        AcadAttach.RotAttachByPid = (_, _) => { Thread.Sleep(120); return null; };
+        AcadAttach.ActiveObjectResolver = _ =>
+            throw new InvalidOperationException("总时限耗尽：不得回退 GetActiveObject");
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        using var rt = new AcadRuntime();
+        var sw = Stopwatch.StartNew();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        sw.Stop();
+        Assert.Contains("附着总时限", ex.Message);
+        Assert.Contains("耗尽：PID 过滤", ex.Message);
+        Assert.Contains("回退未完成", ex.Message);   // 回退根本没跑：不得写成"回退失败"
+        Assert.Same(launched, cleaned);              // 失败清理仍只针对本方进程
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"总时限中止耗时 {sw.ElapsedMilliseconds}ms");
+    }
+
+    // B8 + I5：PID 不可判定（AttachOnly 路径）同样受总时限约束——旧语义（无进程退出早退）不变，
+    // 只叠加共享的 Stopwatch；文案**不含**回退措辞（该路径没有回退相位）。
+    [Fact]
+    public void EnsureAppTArch_PidUnknown_AttachTotalDeadlineExceeded_ThrowsDeadlineMessage()
+    {
+        AcadRuntime.AttachTotalDeadlineOverride = TimeSpan.FromMilliseconds(50);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => 0;
+        AcadAttach.ActiveObjectResolver = _ => null;
+        AcadRuntime.TarchProcessCleanup = _ => true;
+        using var rt = new AcadRuntime();
+        var sw = Stopwatch.StartNew();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        sw.Stop();
+        Assert.Contains("附着总时限", ex.Message);
+        Assert.Contains("GetActiveObject 附着未完成", ex.Message);
+        Assert.DoesNotContain("回退", ex.Message);   // pid=0 路径无回退相位
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"总时限中止耗时 {sw.ElapsedMilliseconds}ms");
+    }
+
+    // C-I1：相位预算的核心承诺——180 轮常量不再是"附着总时限"内的真实上界：
+    // 生产默认 120s - 15s 保留 = 105 轮（回退留 15s）。
+    [Fact]
+    public void ComputeEffectivePidAttachAttempts_ProductionConstants_LeaveFallbackReserve()
+    {
+        Assert.Equal(105, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(15)));
+        // 预算被保留吃掉（<=0）→ 夹到 1 轮（仍给相位1 一次机会，不出现 0/负数）。
+        Assert.Equal(1, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(15)));
+    }
+
+    // D（微修复波D）：相位（重）入按**剩余预算**夹取——总时限 - 已耗时 - 保留，向上取整；
+    // 剩余不足 1s 仍保底 1 轮（不出现 0/负数轮）。首入（elapsed=0）与旧口径一致。
+    [Fact]
+    public void ComputeEffectivePidAttachAttempts_ElapsedClampsToRemainingBudget()
+    {
+        var total = TimeSpan.FromSeconds(4);
+        var reserve = TimeSpan.FromSeconds(2);
+        Assert.Equal(2, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, total, TimeSpan.Zero, reserve));                       // 首入：4-0-2
+        Assert.Equal(2, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, total, TimeSpan.FromSeconds(0.5), reserve));           // 4-0.5-2=1.5→向上取整 2
+        Assert.Equal(1, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, total, TimeSpan.FromSeconds(2), reserve));             // 4-2-2=0 → 保底 1
+        Assert.Equal(1, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, total, TimeSpan.FromSeconds(3.5), reserve));           // 剩余为负 → 保底 1
+        Assert.Equal(1, AcadRuntime.ComputeEffectivePidAttachAttempts(
+            180, total, TimeSpan.FromSeconds(1.6), reserve));           // 4-1.6-2=0.4→1（向上取整）
+    }
+
+    // C-I1：3s 总时限 + 1s 保留 ⇒ effective=2（不是 180）：相位1 恰好两轮后耗尽，
+    // 回退恰发起一次并成功——旧实现（180 轮 > 120s 时限）会让回退永远不可达（dead code）。
+    [Fact]
+    public void EnsureAppTArch_PhaseBudget_PidExhausts_TwoAttemptsThenFallbackOnce()
+    {
+        AcadRuntime.AttachTotalDeadlineOverride = TimeSpan.FromSeconds(3);
+        AcadRuntime.AttachFallbackReserveOverride = TimeSpan.FromSeconds(1);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        Assert.Equal(2, AcadRuntime.EffectivePidAttachAttempts());   // 180 → 2（3s-1s）
+        int rotCalls = 0;
+        AcadAttach.RotAttachByPid = (_, _) => { rotCalls++; return null; };   // 过滤恒无本方候选
+        var fake = new PidFilterGateApp();
+        int activeCalls = 0;
+        AcadAttach.ActiveObjectResolver = _ => { activeCalls++; return fake; };
+        using var rt = new AcadRuntime();
+
+        var app = (object)rt.EnsureAppTArch("TElec20V5");
+
+        Assert.Same(fake, app);       // 回退命中→过归属校验→返回
+        Assert.Equal(2, rotCalls);    // 相位1 恰两轮（预算收敛，不是 180）
+        Assert.Equal(1, activeCalls); // 回退恰一次
+    }
+
+    // D（微修复波D）：相位**重入**预算收敛——归属重试再次进入相位1 时，轮询上界按**剩余预算**
+    // 重新夹取，不得沿用首轮满预算（否则各轮预算相加越过总时限）。
+    // 场景：总时限 4s、保留 2s ⇒ 首轮 effective=2（1s 节拍后耗尽）→ 归属不符 → 1s 重试等待
+    // → 次轮剩余 0s ⇒ effective=1。钉住：次轮耗尽文案为"ROT 过滤 1s 超时"（旧实现沿用 2s），
+    // ROT 枚举总数 3（旧实现 2+2=4）。
+    [Fact]
+    public void EnsureAppTArch_Reentry_ClampsPidAttemptsToRemainingBudget()
+    {
+        AcadRuntime.AttachTotalDeadlineOverride = TimeSpan.FromSeconds(4);
+        AcadRuntime.AttachFallbackReserveOverride = TimeSpan.FromSeconds(2);
+        AcadRuntime.OwnershipRetryWindowOverride = TimeSpan.FromSeconds(5);   // 覆盖 1 个重试节拍
+        AcadRuntime.PidAttachAttempts = 180;   // 配置夹取不参与收敛（剩余预算才是真实上界）
+        AcadRuntime.PidFallbackAttempts = 1;
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        int rotCalls = 0;
+        AcadAttach.RotAttachByPid = (_, _) => { rotCalls++; return null; };    // 过滤恒无本方候选
+        var foreign = new PidFilterGateApp();
+        int activeCalls = 0;
+        AcadAttach.ActiveObjectResolver = _ => { activeCalls++; return foreign; };  // 回退命中他方实例
+        AcadRuntime.OwnershipMatches = (_, __) => false;   // 归属恒不符 → 重入相位1
+        AcadRuntime.TarchProcessCleanup = _ => true;
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("未见本方 AutoCAD 实例注册", ex.Message);
+        Assert.Contains("ROT 过滤 1s 超时", ex.Message);   // 次轮剩余预算不足 1s → 保底 1 轮
+        Assert.Equal(3, rotCalls);                        // 首轮 2 + 次轮 1（不沿用满预算 2+2）
+        Assert.Equal(1, activeCalls);                     // 回退全局至多一次
+    }
+
+    // C-I1/I5：相位1 正常耗尽（未超时）→ 回退相位内超时：文案须是"回退失败"
+    //（与"回退未完成"区分：后者是回退根本没跑）。
+    [Fact]
+    public void EnsureAppTArch_DeadlineDuringFallback_ReportsFallbackFailed()
+    {
+        AcadRuntime.AttachTotalDeadlineOverride = TimeSpan.FromMilliseconds(300);
+        AcadRuntime.AttachFallbackReserveOverride = TimeSpan.FromMilliseconds(100);
+        AcadRuntime.PidFallbackAttempts = 3;   // 回退 3 轮：第 2 轮轮询前总时限（300ms）已耗尽
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => launched = new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadAttach.RotAttachByPid = (_, _) => null;   // 相位1 立即耗尽（effective=1）
+        int activeCalls = 0;
+        AcadAttach.ActiveObjectResolver = _ => { activeCalls++; return null; };
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("附着总时限", ex.Message);
+        Assert.Contains("回退失败", ex.Message);
+        Assert.DoesNotContain("回退未完成", ex.Message);
+        Assert.Equal(1, activeCalls);   // 回退第 1 轮之后即被时限中止（第 2 轮未发起 resolver）
+        Assert.Same(launched, cleaned);
     }
 }
 

@@ -48,13 +48,17 @@ public interface ICadRuntime : IDisposable
     // 切片B 深度炸开（explode-native）；默认实现=零厂商改动：取证读空/写通道响亮拒绝
     /// <summary>深度炸开取证（spec 切片B §3）：逐实体递归炸开到叶并记录基元/XData/bbox。
     /// 无厂商/不支持→空（默认实现）。</summary>
-    IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) =>
+    /// <param name="drawingPath">待读图纸路径（实现自开自读自关）。</param>
+    /// <param name="includeBlockDefs">A3（技术债批次A）：是否随本次读取索取**块定义段**（BDEF）。
+    /// 缺省 false——只有需要定义段事实的调用方（CLI <c>semantic scan --explode</c>）才付块表扫描成本；
+    /// 未索取时实现不得缓存块定义表，后续 <see cref="ReadExplodeBlockDefs"/> 必响亮拒绝。</param>
+    IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false) =>
         Array.Empty<ExplodeEvidence>();
 
     /// <summary>块定义内 TDb 聚合（边界补齐 B1）：**定义段**（块名+类计数），与
     /// <see cref="ReadExplodeEvidence"/> 的模型空间实例段互不混同。契约：须紧接
-    /// <c>ReadExplodeEvidence(path)</c> 之后以同一 path 调用（实现在同一次桥会话内缓存，
-    /// 缓存命中不二次开图；无缓存由实现响亮拒绝）。无厂商/不支持→空（默认实现）。</summary>
+    /// <c>ReadExplodeEvidence(path, includeBlockDefs: true)</c> 之后以同一 path 调用（实现在同一次桥会话内缓存，
+    /// 缓存命中不二次开图；未请求块定义段或无缓存由实现响亮拒绝）。无厂商/不支持→空（默认实现）。</summary>
     IReadOnlyList<BlockDefTdbEntry> ReadExplodeBlockDefs(string drawingPath) =>
         Array.Empty<BlockDefTdbEntry>();
 

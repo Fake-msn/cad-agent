@@ -134,6 +134,37 @@ public class ExplodeEvidenceModelTests
         finally { Directory.Delete(dir, true); }
     }
 
+    // A4（技术债批次A）：块定义行加性末位 DrawingHash（本轮图纸哈希）——往返保真；
+    // 旧文件（无该字段）与缺省构造一律 null（加性：不得凭块名/坐标猜测来源）。
+    [Fact]
+    public void BlockDefTdb_DrawingHash_Additive_RoundTrip_And_LegacyNull()
+    {
+        var dir = Directory.CreateTempSubdirectory("blockdef-hash").FullName;
+        try
+        {
+            // 旧文件：行内无 DrawingHash 字段 → 反序列化为 null。
+            string legacy = Path.Combine(dir, "legacy.json");
+            File.WriteAllText(legacy,
+                """{"Annotations":[],"Mappings":[],"Version":1,"BlockDefTdb":[{"BlockName":"块A","RxClass":"TDbEFitting","Count":2}]}""");
+            var legacyRow = Assert.Single(SemanticOverlay.Load(legacy).BlockDefTdb);
+            Assert.Equal("块A", legacyRow.BlockName);
+            Assert.Null(legacyRow.DrawingHash);
+
+            // 新文件：带哈希行保真，无哈希行仍为 null（同一张表允许混存）。
+            string path = Path.Combine(dir, "semantic.json");
+            var o = new SemanticOverlay();
+            o.BlockDefTdb.Add(new BlockDefTdbEntry("块A", "TDbEFitting", 2, "SHA256:ABC123"));
+            o.BlockDefTdb.Add(new BlockDefTdbEntry("块B", "TDbECabletry", 1));
+            o.Save(path);
+
+            var loaded = SemanticOverlay.Load(path);
+            Assert.Equal(2, loaded.BlockDefTdb.Count);
+            Assert.Equal("SHA256:ABC123", loaded.BlockDefTdb[0].DrawingHash);
+            Assert.Null(loaded.BlockDefTdb[1].DrawingHash);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Fact]
     public void Overlay_Json_Additive_And_RoundTrip()
     {

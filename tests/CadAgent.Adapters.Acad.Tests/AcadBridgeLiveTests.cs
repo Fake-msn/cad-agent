@@ -31,7 +31,8 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
 {
     private const string WallHandle = "21E00";
 
-    // 桥 extents 以 "0.###" 不变文化输出（127749.9958→127749.996）：1e-2 容差覆盖三位小数取整。
+    // A2（技术债批次A）：桥 extents 改以 "R"（全精度）不变文化输出——三位小数取整不再丢精度；
+    // 1e-2 容差仍保留（吸收标本基准的手工三位小数口径与真机浮点噪声，基准不因此变严/变松）。
     private const double BboxTolerance = 1e-2;
 
     // 探针基准（PR#28 tarch-dotnet-probe）：TDb 实体 343 条。下限 300 吸收标本/版本可变，
@@ -352,7 +353,8 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         {
             string shaBefore = AcadNativeLiveFixture.Sha256File(copy);
             using var rt = new AcadRuntime();
-            var evidences = rt.ReadExplodeEvidence(copy);
+            // A3：块定义段按需读取——本用例要取定义段，须显式请求。
+            var evidences = rt.ReadExplodeEvidence(copy, includeBlockDefs: true);
             var blockDefs = rt.ReadExplodeBlockDefs(copy);
             rt.Dispose();
 
