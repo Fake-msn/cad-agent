@@ -4,7 +4,8 @@ namespace CadAgent.Core;
 public enum SemanticClass { Unknown, Wall, Door, Window, Column, Axis, Annotation, Room, Auxiliary, Lighting, Equipment, Device }
 
 // 切片A：NativeParameter 追加于枚举末尾（JSON 字符串枚举兼容；既有成员数值序不扰动）
-public enum Provenance { NativeObject, LayerInference, GeometryInference, LlmInference, HumanConfirmed, NativeParameter }
+// 切片B：NativeExplode 追加于枚举末尾（同上口径：仅尾部追加）
+public enum Provenance { NativeObject, LayerInference, GeometryInference, LlmInference, HumanConfirmed, NativeParameter, NativeExplode }
 
 // R6（T4 前移）：末尾可选 SheetId——既有构造点全兼容；旧 JSON 无此字段加载=null（legacy 无幅面归属）
 public sealed record SemanticAnnotation(string TargetHandle, SemanticClass Class, Provenance Provenance, double Confidence, string Evidence, string? SheetId = null);

@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using CadAgent.Adapters.Acad;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
 using CadAgent.Data;
@@ -23,12 +25,24 @@ public class NativeLiveAdmissionTests : IDisposable
     private readonly FakeNativeRuntime _rt = new();
     // 哈希缝（finding 2d/5c）：注入空串/定向空值覆盖 fail-closed 分支，用毕还原。
     private readonly Func<string, string> _origSha256 = CommandRouter.Sha256File;
+    // 桥缝（复审修复波 I1/I2/I3）：深读用例需要"桥可用"事实——占位桥文件含真桥命令标记，
+    // 信任位置指向其目录（生产=AcadRuntime.CheckBridgeAvailability 的同一路径）。
+    private readonly string? _origBridgeDll = AcadRuntime.BridgeDllOverride;
+    private readonly Func<string, string?> _origTrustedSource = AcadRuntime.TrustedPathsSource;
+    private readonly Func<string, bool> _origStubScan = AcadRuntime.StubScan;
+    private readonly string _bridgeDir;
 
     public NativeLiveAdmissionTests()
     {
         Directory.CreateDirectory(_project);
         _drawing = DxfFixture.CreateTempTchDxf();
         CommandRouter.RuntimeFactory = () => _rt;
+        _bridgeDir = Path.Combine(_project, "bridge");
+        Directory.CreateDirectory(_bridgeDir);
+        string bridgeDll = Path.Combine(_bridgeDir, AcadRuntime.BridgeDllName);
+        File.WriteAllBytes(bridgeDll, Encoding.ASCII.GetBytes("CADAGENT_TARCH_READ"));
+        AcadRuntime.BridgeDllOverride = bridgeDll;
+        AcadRuntime.TrustedPathsSource = _ => _bridgeDir;
     }
 
     public void Dispose()
@@ -37,6 +51,9 @@ public class NativeLiveAdmissionTests : IDisposable
         CommandRouter.RuntimeFactory = null;
         CommandRouter.IdentityOverride = null;
         CommandRouter.Sha256File = _origSha256;
+        AcadRuntime.BridgeDllOverride = _origBridgeDll;
+        AcadRuntime.TrustedPathsSource = _origTrustedSource;
+        AcadRuntime.StubScan = _origStubScan;
         Directory.Delete(_project, true);
         File.Delete(_drawing);
         if (File.Exists(_drawing + ".live.dwg")) File.Delete(_drawing + ".live.dwg");
@@ -55,10 +72,24 @@ public class NativeLiveAdmissionTests : IDisposable
             bbox ?? new[] { 0.0, 0.0, 0.0, 100.0, 100.0, 3000.0 },
             DateTimeOffset.UtcNow, ReadOk: true, Layer: layer);
 
-    private void WriteOverlay(params NativeEntityParam[] records)
+    /// <summary>炸开取证行（Fully=true；bbox 与 21E00 原生参数/执行会话一致）——供"参数门漂移
+    /// 仅凭炸开门放行"的深读用例。</summary>
+    private static ExplodeEvidence ExplodeRow(string handle = "21E00") =>
+        new(handle, "TDbWall", "ImpCurve", "0dt",
+            new[] { 0.0, 0.0, 0.0, 100.0, 100.0, 3000.0 }, true, 2, 0,
+            new List<ExplodePrimitive>
+            {
+                new("line", new[] { 0.0, 0.0, 0.0, 100.0, 0.0, 0.0 }, null, null)
+            },
+            new Dictionary<string, string>(), null, DateTimeOffset.UtcNow);
+
+    private void WriteOverlay(params NativeEntityParam[] records) => WriteOverlay(records, null);
+
+    private void WriteOverlay(NativeEntityParam[] records, ExplodeEvidence[]? evidences)
     {
         var overlay = new SemanticOverlay();
         foreach (var r in records) overlay.UpsertNative(r);
+        foreach (var e in evidences ?? Array.Empty<ExplodeEvidence>()) overlay.UpsertExplode(e);
         overlay.Save(Path.Combine(_project, ".cadagent", "semantic.json"));
     }
 
@@ -163,7 +194,9 @@ public class NativeLiveAdmissionTests : IDisposable
     public void Yellow_HandleStep_RereadMismatch_Refuses_NoOps()
     {
         WriteOverlay(Wall());
-        // 重读 bbox 与 overlay 不符（实体已漂移）→ StaleMismatch 拒绝。
+        // 重读 bbox 与 overlay 不符（实体已漂移）→ 参数门 StaleMismatch；R16：全部步骤走合并
+        // 判据（参数门 ∨ 炸开门），overlay 无该句柄炸开证据 → 合并判据 ExplodeNotRead（炸开门
+        // 拒因优先，R14）——dual verdict 逐字钉死。
         SeedNative(Wall(bbox: new[] { 0.0, 0.0, 0.0, 200.0, 100.0, 3000.0 }));
         string plan = WritePlan(
             """{"planId":"NL-2","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
@@ -177,9 +210,13 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.False(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
         var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
-        Assert.Contains("StaleMismatch", VerdictsOf(refused));
         using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
-            Assert.Equal("21E00", p.RootElement.GetProperty("verdicts")[0].GetProperty("handle").GetString());
+        {
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            Assert.Equal("ExplodeNotRead", v.GetProperty("verdict").GetString());
+            Assert.Equal("StaleMismatch", v.GetProperty("paramsVerdict").GetString());
+        }
         Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
         Assert.DoesNotContain(records, r => r.Entry.Kind == "run-rejected");
     }
@@ -300,7 +337,8 @@ public class NativeLiveAdmissionTests : IDisposable
     [Fact]
     public void Yellow_RereadHandleAbsent_StaleMismatch_Refused()
     {
-        // 满 overlay 但 live 重读无该句柄（stale overlay）→ StaleMismatch 拒绝。
+        // 满 overlay 但 live 重读无该句柄（stale overlay）→ 参数门 StaleMismatch；R16 合并判据
+        // （参数门 ∨ 炸开门）：无炸开证据 → ExplodeNotRead，dual verdict 逐字钉死。
         WriteOverlay(Wall());
         string plan = WritePlan(
             """{"planId":"NL-9","steps":[{"kind":"move","params":{"handle":"21E00","dx":1,"dy":2}}]}""");
@@ -311,7 +349,13 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.DoesNotContain(_rt.Calls, c => c.StartsWith("move"));
         var records = AuditRecords();
         var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
-        Assert.Equal(new[] { "StaleMismatch" }, VerdictsOf(refused));
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+        {
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            Assert.Equal("ExplodeNotRead", v.GetProperty("verdict").GetString());
+            Assert.Equal("StaleMismatch", v.GetProperty("paramsVerdict").GetString());
+        }
         Assert.False(File.Exists(_drawing + ".live.dwg"));
     }
 
@@ -359,14 +403,19 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-start");
     }
 
+    // ---- I5（复审修复波）：会话开路序=按需深读；两项场景分别钉住 ----
+
+    /// <summary>
+    /// I5(i) 全参数门放行：会话序=ReadNativeParams(path) → Open → op → null 形态读回；
+    /// **不触桥**（无 read-explode）。fake 的 ReadExplodeEvidence 被置为"一调即抛"——
+    /// 若生产仍无条件深读，本用例必炸（旧断言被接口默认实现掩盖的正是这一点，I5 根因）。
+    /// </summary>
     [Fact]
-    public void TArchSessionOrder_AdmissionPathRead_ThenOpen()
+    public void TArchSessionOrder_AllParamsPass_NoDeepReadReadNativeThenOpen()
     {
-        // @T10 会话开路顺序：ReadNativeParams(path≠null) 才经 EnsureAppTArch 以 /p 拉起
-        // 天正 profile 并缓存 _app；若先 Open（EnsureApp 默认 profile 先缓存），TArch 永不
-        // 加载→真机 TDb 目标全 StaleMismatch。首个运行时调用必须是 path 形态读参。
         WriteOverlay(Wall());
         SeedNative(Wall());
+        _rt.ThrowOnExplodeRead = true;   // 断言"从未深读"的强判据（非仅断言未记录）
         string plan = WritePlan(
             """{"planId":"NL-12","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
 
@@ -374,7 +423,9 @@ public class NativeLiveAdmissionTests : IDisposable
 
         Assert.Equal(0, code);
         Assert.True(_rt.Calls.Count > 0, "无运行时调用");
+        // @T10：path 形态读参最先（EnsureAppTArch 以 /p 拉起 TArch 并缓存 _app）。
         Assert.Equal("read-native:path", _rt.Calls[0]);
+        Assert.DoesNotContain("read-explode", _rt.Calls);
         int openIdx = _rt.Calls.IndexOf("open:" + Path.GetFileName(_drawing));
         Assert.True(openIdx > 0, $"calls={string.Join("|", _rt.Calls)}");
         // 执行窗口在读参之后；执行后读回为 null 形态（活文档），亦不得先于 Open。
@@ -383,6 +434,126 @@ public class NativeLiveAdmissionTests : IDisposable
         int docReadIdx = _rt.Calls.IndexOf("read-native:doc");
         Assert.True(docReadIdx > opIdx, $"calls={string.Join("|", _rt.Calls)}");
         Assert.Contains("native-live-committed", AuditRecords().Select(r => r.Entry.Kind));
+        // I1：native-gate-pass 加性披露 deepRead=false（纯参数门结论、未触桥）。
+        var pass = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-gate-pass");
+        using var p = JsonDocument.Parse(pass.Entry.ParamsJson);
+        Assert.False(p.RootElement.GetProperty("deepRead").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, p.RootElement.GetProperty("trustedPaths").ValueKind);
+    }
+
+    /// <summary>
+    /// I5(ii) 参数门未放行（bbox 漂移）→ 需要合并判据 → 深读在**读参之后、Open 之前**插入
+    /// （取代旧"深读最先"的无条件顺序）；move 仅凭炸开门放行后正常执行交付，deepRead=true
+    /// 且 explodeGateHandles 逐字披露。
+    /// </summary>
+    [Fact]
+    public void TArchSessionOrder_ParamsFailDeepRead_AfterParamsReadBeforeOpen()
+    {
+        WriteOverlay(new[] { Wall() }, new[] { ExplodeRow() });
+        // 参数门重读与 overlay 漂移（bbox 不同）→ StaleMismatch → 触发深读。
+        // 活会话起始事实与参数门重读一致（真实世界同源）：move 读回以参数面 before-bbox
+        // 为基准，比较的是"同一实体被平移"，不得让夹具自己造出基准漂移。
+        var liveBbox = new[] { 0.0, 0.0, 0.0, 200.0, 100.0, 3000.0 };
+        _rt.PathReadResults.Add(Wall(bbox: liveBbox));
+        _rt.ReadResults.Add(Wall(bbox: liveBbox));
+        _rt.ExplodeReadResults.Add(ExplodeRow());
+        string plan = WritePlan(
+            """{"planId":"NL-30b","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
+
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(0, code);
+        Assert.True(_rt.Calls.Count >= 3, $"calls={string.Join("|", _rt.Calls)}");
+        Assert.Equal("read-native:path", _rt.Calls[0]);
+        Assert.Equal("read-explode", _rt.Calls[1]);   // 深读紧随读参（契约=无打开文档）
+        Assert.Equal("open:" + Path.GetFileName(_drawing), _rt.Calls[2]);
+        var records = AuditRecords();
+        var pass = Assert.Single(records, r => r.Entry.Kind == "native-gate-pass");
+        using (var p = JsonDocument.Parse(pass.Entry.ParamsJson))
+        {
+            Assert.True(p.RootElement.GetProperty("deepRead").GetBoolean());
+            // I4：深读会话披露信任位置快照（本夹具=桥目录）。
+            Assert.Equal(_bridgeDir, p.RootElement.GetProperty("trustedPaths").GetString());
+            Assert.Equal(new[] { "21E00" },
+                p.RootElement.GetProperty("explodeGateHandles").EnumerateArray()
+                    .Select(h => h.GetString()).ToArray());
+        }
+        Assert.Contains("native-live-committed", records.Select(r => r.Entry.Kind));
+    }
+
+    /// <summary>
+    /// I1(b)：计划含 explode-native（深读需求静态确定）+ 桥不可用（覆盖缝指向不存在文件）→
+    /// 起会话前 fail-fast：native-bridge-unavailable{reason:"dll-missing"} + stderr 指引 + exit 1，
+    /// **运行时零调用**（不建实例/不 Open/不 NETLOAD——缺失/不受信桥绝不进 3600s 安全框）。
+    /// </summary>
+    [Fact]
+    public void ExplodeNativePlan_BridgeUnavailable_RefusedBeforeSession_NoOps()
+    {
+        WriteOverlay(new[] { Wall() }, new[] { ExplodeRow() });
+        SeedNative(Wall());
+        AcadRuntime.BridgeDllOverride =
+            Path.Combine(_project, "missing", AcadRuntime.BridgeDllName);   // 不存在的桥
+        string plan = WritePlan(
+            """{"planId":"NL-31","steps":[{"kind":"explode-native","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("桥不可用", stderr);
+        Assert.Empty(_rt.Calls);                       // 起会话前拒绝：零运行时副作用
+        Assert.False(File.Exists(_drawing + ".live.dwg"));
+        var records = AuditRecords();
+        var refused = Assert.Single(records, r => r.Entry.Kind == "native-bridge-unavailable");
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+        {
+            Assert.Equal("dll-missing", p.RootElement.GetProperty("reason").GetString());
+            Assert.Contains("CADAGENT_BRIDGE_DLL", p.RootElement.GetProperty("guidance").GetString());
+            Assert.EndsWith(AcadRuntime.BridgeDllName, p.RootElement.GetProperty("dllPath").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-gate-pass");
+    }
+
+    /// <summary>I2：桥文件存在但是空桩产物 → native-bridge-unavailable{reason:"stub"}（不 NETLOAD）。</summary>
+    [Fact]
+    public void ExplodeNativePlan_StubBridge_RefusedWithStubReason()
+    {
+        WriteOverlay(new[] { Wall() }, new[] { ExplodeRow() });
+        SeedNative(Wall());
+        string stub = Path.Combine(_bridgeDir, "stub-" + AcadRuntime.BridgeDllName);
+        File.WriteAllBytes(stub, Encoding.ASCII.GetBytes("NoAcadRefsStub"));
+        AcadRuntime.BridgeDllOverride = stub;
+        string plan = WritePlan(
+            """{"planId":"NL-32","steps":[{"kind":"explode-native","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("空桩", stderr);
+        Assert.Empty(_rt.Calls);
+        var refused = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-bridge-unavailable");
+        using var p = JsonDocument.Parse(refused.Entry.ParamsJson);
+        Assert.Equal("stub", p.RootElement.GetProperty("reason").GetString());
+    }
+
+    /// <summary>I1：桥可用但目录不受信（TRUSTEDPATHS 不含）→ native-bridge-unavailable{untrusted}。</summary>
+    [Fact]
+    public void ExplodeNativePlan_UntrustedBridgeDir_RefusedWithUntrustedReason()
+    {
+        WriteOverlay(new[] { Wall() }, new[] { ExplodeRow() });
+        SeedNative(Wall());
+        AcadRuntime.TrustedPathsSource = _ => @"C:\not-trusted";
+        string plan = WritePlan(
+            """{"planId":"NL-33","steps":[{"kind":"explode-native","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("TRUSTEDPATHS", stderr);
+        Assert.Empty(_rt.Calls);
+        var refused = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-bridge-unavailable");
+        using var p = JsonDocument.Parse(refused.Entry.ParamsJson);
+        Assert.Equal("untrusted", p.RootElement.GetProperty("reason").GetString());
     }
 
     [Fact]
@@ -517,7 +688,8 @@ public class NativeLiveAdmissionTests : IDisposable
     [Fact]
     public void OverlayReadIncomplete_RefusedVerdict_NoHandleOps()
     {
-        // overlay 行 ReadOk=false（读参不完整）→ ReadIncomplete 拒绝（理解侧不完整不得放行）。
+        // overlay 行 ReadOk=false（读参不完整）→ 参数门 ReadIncomplete；R16 合并判据无炸开
+        // 证据 → ExplodeNotRead（炸开门拒因优先），dual verdict 逐字钉死。
         WriteOverlay(Wall() with { ReadOk = false });
         SeedNative(Wall());
         string plan = WritePlan(
@@ -531,7 +703,13 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.False(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
         var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
-        Assert.Equal(new[] { "ReadIncomplete" }, VerdictsOf(refused));
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+        {
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            Assert.Equal("ExplodeNotRead", v.GetProperty("verdict").GetString());
+            Assert.Equal("ReadIncomplete", v.GetProperty("paramsVerdict").GetString());
+        }
     }
 
     [Fact]
@@ -806,13 +984,25 @@ public class NativeLiveAdmissionTests : IDisposable
         public List<string> Calls { get; } = new();
         public List<NativeEntityParam> PathReadResults { get; } = new();
         public List<NativeEntityParam> ReadResults { get; } = new();
+        public List<ExplodeEvidence> ExplodeReadResults { get; } = new();
         public string? SavedPath { get; private set; }
         public bool IgnoreHandleOps { get; set; }
         public bool FailOps { get; set; }
         public string? SabotageSourcePath { get; set; }
         public bool SabotageOnDispose { get; set; }
         public bool MoveNullsBbox { get; set; }
+        /// <summary>I5：ReadExplodeEvidence 被调到即抛——"从未深读"的强判据（非仅断言未记录）。</summary>
+        public bool ThrowOnExplodeRead { get; set; }
         private string? _openedPath;
+
+        // I5：接口默认实现会静默返回空表，掩盖"生产是否真的深读"——fake 必须如实记录该调用。
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath)
+        {
+            Calls.Add("read-explode");
+            if (ThrowOnExplodeRead)
+                throw new CadRuntimeException("不应深读（本用例计划全参数门放行）");
+            return ExplodeReadResults.ToList();
+        }
 
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
         public void Open(string path)

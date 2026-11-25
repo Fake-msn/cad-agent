@@ -121,4 +121,42 @@ public class NativeGateRefinementTests
         var o = OvWith(stored);
         Assert.Equal(expected, NativeGateRefinement.Evaluate(o, "21E00", reread));
     }
+
+    // R13（controller 裁定，ledger）：TarchDerive 经炸开通道并入的 "XData:*" 参数在 live 重读白名单中不存在，
+    // ParamsEq 必须双侧忽略 XData:* 键，否则任何带 XData 的句柄在 semantic scan --explode 后永久 StaleMismatch。
+    [Fact]
+    public void R13a_StoredXDataIgnored_Pass()
+    {
+        var stored = P("21E00") with
+        {
+            Params = new Dictionary<string, string> { ["LeftWidth"] = "100", ["XData:HYDRANT_RADIUS"] = "28" }
+        };
+        var reread = P("21E00");  // 重读白名单不含 XData:*
+        Assert.Equal(NativeGateVerdict.Pass,
+            NativeGateRefinement.Evaluate(OvWith(stored), "21E00", reread));
+    }
+
+    [Fact]
+    public void R13b_OnlyXDataBothSides_Pass()
+    {
+        var stored = P("21E00") with { Params = new Dictionary<string, string> { ["XData:K"] = "1" } };
+        var reread = P("21E00") with { Params = new Dictionary<string, string>() };
+        Assert.Equal(NativeGateVerdict.Pass,
+            NativeGateRefinement.Evaluate(OvWith(stored), "21E00", reread));
+    }
+
+    [Fact]
+    public void R13c_NonXDataDrift_StillStaleMismatch()
+    {
+        var stored = P("21E00") with
+        {
+            Params = new Dictionary<string, string> { ["LeftWidth"] = "100", ["XData:K"] = "1" }
+        };
+        var reread = P("21E00") with
+        {
+            Params = new Dictionary<string, string> { ["LeftWidth"] = "101", ["XData:K"] = "2" }
+        };
+        Assert.Equal(NativeGateVerdict.StaleMismatch,
+            NativeGateRefinement.Evaluate(OvWith(stored), "21E00", reread));
+    }
 }

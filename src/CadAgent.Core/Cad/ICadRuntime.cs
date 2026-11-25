@@ -44,6 +44,17 @@ public interface ICadRuntime : IDisposable
         throw new CadRuntimeException("运行时不支持句柄寻址操作（move）");
     void DeleteByHandle(string hexHandle) =>
         throw new CadRuntimeException("运行时不支持句柄寻址操作（delete）");
+
+    // 切片B 深度炸开（explode-native）；默认实现=零厂商改动：取证读空/写通道响亮拒绝
+    /// <summary>深度炸开取证（spec 切片B §3）：逐实体递归炸开到叶并记录基元/XData/bbox。
+    /// 无厂商/不支持→空（默认实现）。</summary>
+    IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) =>
+        Array.Empty<ExplodeEvidence>();
+
+    /// <summary>句柄级炸开替换（spec 切片B §4）：炸开后原子替换原实体并另存 liveOut。
+    /// 不支持→响亮拒绝（默认实现）。</summary>
+    ExplodeReplaceResult ExplodeReplaceByHandle(string hexHandle, string liveOutPath) =>
+        throw new CadRuntimeException("运行时不支持深度炸开（explode-native）");
 }
 
 /// <summary>厂商运行时调用失败。</summary>

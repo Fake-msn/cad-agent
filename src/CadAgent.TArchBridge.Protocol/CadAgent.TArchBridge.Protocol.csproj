@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 同一份源码双 TFM：netstandard2.0 供 net8 宿主与测试引用；net45 供 AutoCAD 2014 桥
+         引用（net45 不能消费 netstandard2.0 程序集，故本工程须为桥单独产出 net45 程序集）。 -->
+    <TargetFrameworks>netstandard2.0;net45</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- 本工程为纯协议层：net45 桥与 net8 宿主共用，零外部依赖。
+       两条 TFM 的引用程序集都不含 SupportedOSPlatformAttribute，
+       故移除根 Directory.Build.props 注入的平台标注，避免编译失败。 -->
+  <ItemGroup>
+    <AssemblyAttribute Remove="System.Runtime.Versioning.SupportedOSPlatformAttribute" />
+  </ItemGroup>
+
+  <!-- net45 TFM 需引用程序集包（本机未装 .NET Framework 开发包时由 NuGet 提供）。 -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net45'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

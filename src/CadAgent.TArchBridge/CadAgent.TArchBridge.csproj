@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- AutoCAD 2014 宿主为 .NET 4.5：桥保持 net45（部署保守面，不升 net461）。
+         协议层以多目标 net45 资产被引用（net45 无法消费 netstandard2.0 程序集）。 -->
+    <TargetFramework>net45</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>7.3</LangVersion>
+
+    <!-- 扫描目录可用 CADAGENT_ACMG_DIR 覆盖（另装 AutoCAD 的机器只需设环境变量，无需改工程）。 -->
+    <CADAGENT_ACMG_DIR Condition="'$(CADAGENT_ACMG_DIR)' == ''">C:\Program Files\Autodesk\AutoCAD 2014</CADAGENT_ACMG_DIR>
+    <!-- 托管 API 程序集齐备才走真编译；否则退化为空桩，保证无 CAD 机器仍可构建。
+         AutoCAD 2013+ 把 CommandMethod/CommandClass 等 Autodesk.AutoCAD.Runtime 特性拆到
+         AcCoreMgd.dll（实证：AcMgd.dll 无 CommandMethodAttribute、AcCoreMgd.dll 有），
+         故除 AcMgd/AcDbMgd 外 AcCoreMgd 亦为编译必需。 -->
+    <HasAcadRefs Condition="Exists('$(CADAGENT_ACMG_DIR)\AcMgd.dll') and Exists('$(CADAGENT_ACMG_DIR)\AcDbMgd.dll') and Exists('$(CADAGENT_ACMG_DIR)\AcCoreMgd.dll')">true</HasAcadRefs>
+    <HasAcadRefs Condition="'$(HasAcadRefs)' == ''">false</HasAcadRefs>
+  </PropertyGroup>
+
+  <!-- net45 引用程序集包：本机无 .NET Framework 开发包时由 NuGet 提供。 -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <ProjectReference Include="..\CadAgent.TArchBridge.Protocol\CadAgent.TArchBridge.Protocol.csproj" />
+  </ItemGroup>
+
+  <!-- net45 引用程序集不含 SupportedOSPlatformAttribute：移除根 Directory.Build.props 注入的平台标注。 -->
+  <ItemGroup>
+    <AssemblyAttribute Remove="System.Runtime.Versioning.SupportedOSPlatformAttribute" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(HasAcadRefs)' == 'true'">
+    <Reference Include="AcMgd">
+      <HintPath>$(CADAGENT_ACMG_DIR)\AcMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AcDbMgd">
+      <HintPath>$(CADAGENT_ACMG_DIR)\AcDbMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AcCoreMgd">
+      <HintPath>$(CADAGENT_ACMG_DIR)\AcCoreMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(HasAcadRefs)' != 'true'">
+    <Compile Remove="**\*.cs" />
+    <Compile Include="NoAcadRefsStub.cs" />
+  </ItemGroup>
+
+</Project>
