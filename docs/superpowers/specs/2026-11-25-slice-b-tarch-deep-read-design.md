@@ -173,3 +173,14 @@ run --live（Yellow）步骤 kind=explode-native params{handle}
 ## 7. 范围外（§7 认可）
 
 弧墙中心线复杂形态；TDbSymbArrow 根因；零 extents 文本几何恢复；块定义内部 55 TDb（仅模型空间）；电气 TDbE\* 逐类核实；explode-native 批量/多实体；TRUSTEDPATHS 自动配置写入（含 `cadagent tarch trust` 辅助命令）；符号块→语义自动落标注；Autoloader 全局加载；多版本 AcMgd（按 19.1）；explode-native 后 overlay 语义迁移。
+
+### 7.1 更正注记（T11 收口：实现事实与设计措辞差异，2026-11-25）
+
+> 追加式更正（旧文 0 删）：以下条目在实现/真机实证中推翻或收紧了本文前六节措辞，实施以更正后口径为准；对照记录见 2026-11-20 主设计 §12「切片 B 收尾闭环」块。
+
+- **(a) 桥通道目录＝实例级，非"每调用一目录"**（推翻 §2「会话航道」与 §4.1 流程序列）：AutoCAD 子进程只在 `CreateProcess` 时**快照**环境变量 `CADAGENT_TARCH_CHANNEL`；若每次调用新建目录，第二次调用写入的是子进程看不见的新目录（第二次桥操作必超时）。落地：`EnsureChannelDir` 在本实例**首次启动前**创建目录并注入变量，READ 与 EXPLODE_REPLACE 全程复用同一目录；目录删除与环境变量还原只在 `Dispose`（实例生命周期＝桥会话生命周期）；写请求前先放弃目录内"有 req 无 done"的历史请求（否则桥 `NextPending` 恒拾最早旧请求）。原 §4.1「Open → 建 channel → … → 清理 channel」的每调用形态不可行。
+- **(b) explode-native bbox 判据＝包含性＋叶数一致，非"并集≈原 bbox 相等"**（更正 §4.2「bbox 并集≈原 bbox（容差 1e-3）」）：相等判据在真机必败——墙体原实体带高度（Z≈3000）而炸开面线在 Z=0，且面线 Y 止 130000 而 extents Y=130100（21E00 实证）。落地：叶集 bbox 并集 ⊆ 原 extents 外扩 1e-3（**仅比 X/Y**），且叶集非空、叶数>0、**替换叶数＝校验叶数**（同一次校验递归的确定性交叉核对）；任一不过→事务内 Abort，不留半替换。
+- **(c) T2 递归措辞不可表达 → 收窄为条件样本披露**（更正 §6「T2 递归：TDbSpace NestedTdb>0 且 depth>0 产物记录」）：Core 模型内不可表达——`ExplodeEvidence.NestedTdbCount` 只统计**递归失败残留**（桥内"递归超深/非实体产物"的失败叶，成功路径恒 0），`ExplodePrimitive` 无 depth 字段。落地：证据中存在任一 NestedTdbCount>0 的行→断言其 >0 且 `FullyExplodable=false`（自洽），标本无此类行→Skip（如实，不伪造残留）；"嵌套全量炸开"改由**桥侧递归证据**承担（`PrimDto` 带 depth 入 TSV；真机 T1 fully=284/343 即递归到底成功计数），T2 仅保留样本条件披露，不单独作递归充分性证据。
+- **(d) TRUSTEDPATHS 读取＝注册表优先，非先建 COM 实例**（更正 §5「TRUSTEDPATHS 预检」与 §4.1 步骤）：原 `GetSystemVariable`/COM 实读须 `/p` 拉起整实例，而启动初始化期 `Quit` 被忽略 → 孤儿 acad.exe（真机实证）。落地：`AcadRuntime.ReadTrustedPathsFromRegistry`（HKCU `…\R19.1\ACAD-*\Profiles\TElec20V5\Variables` 的 REG_SZ，只读、零实例、零 COM）优先；注册表无该值才回退 COM **文档面** `GetVariable("TRUSTEDPATHS")`（活动文档取用同走忙重试）。SECURELOAD 仍保持默认 1（不降级）。
+- **(e) "不支持硬件加速"信息框关窗＝机器特定防御，非通用能力**（收敛 §5 弹窗面）：该框是本机核显指令集限制的启动层**信息性**提示（非 AutoCAD 缺陷通用现象），**用户已永久关闭**弹出；`AcadWindows.DismissDialogs`（本方 PID + 标题子串「不支持硬件加速」+ 仅 `PostMessage(WM_CLOSE)`，绝不按键/点击/结束进程）保留为机器特定纵深防御。残留风险（复审在案）：标题子串若用户**主框架**标题恰含该短语可能被命中（缓解：仅本方 PID、仅 WM_CLOSE、窗口类校验延后）。
+- **附注：SendCommand 语义补充**（§2「时序」）：桥**全部**发送点（NETLOAD／注册探针／正式命令）经同一缝走忙重试（`RPC_E_CALL_REJECTED` 0x80010001，TArch 启动窗真机实证；被拒＝命令未执行故重试无副作用，与既有 30s 预算共享）；"是否已注册"改用**探针握手**判定（写 `op=read`/`dwg="__probe__"` 请求→桥因图纸名不符必然回 `status fail`+done；10s 内无 done→`native-load-denied`），不依赖 SendCommand 回显（ActiveX 口径返回 void）。

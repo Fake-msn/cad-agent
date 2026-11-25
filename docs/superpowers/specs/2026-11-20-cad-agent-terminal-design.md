@@ -678,6 +678,37 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **门禁**：`outputs/fixwave-final/gate-sln.log` — **1456 通过 / 0 失败 / 0 跳过**（= Llm 33 + Core 250 + Data 405 + View 381 + Zwcad 16 真机 + Cli 303（295+8 新）+ **Acad 68**（65+3 新，含 3 T10 真机 + 4 AcadLive 真机 + 1 ExportSnapshot 真机全实跑，0 跳过）；本波新增 11 测试——Cli +8 / Acad +3；Acad 真机链含新归属校验/ReadOnly 读参路径，全绿）。
 - **代价与边界**：Dispose 后哈希使 native-live 成功路径多一次进程退出等待（正确性优先）；归属校验在 HWND 不可判定时 fail-open 到既有行为（守卫 EnsureNoForeignInstance 仍为第一防线，本校验为纵深防御）。
 
+**切片 B 收尾闭环（天正 .NET 深度读 + explode-native 放行，feat/cad-agent-slice-b-tarch-deep，2026-11-25 记录；T1-T11 全交付、T10 条件真机转绿；追加式，旧文 0 删；设计=docs/superpowers/specs/2026-11-25-slice-b-tarch-deep-read-design.md，实现口径更正见其 §7.1）**：
+
+- **桥通道闭环（真机固化；R17/R18 根因修复入内）**：
+  - **NETLOAD 经 TRUSTEDPATHS 免弹窗**：用户批准的**一次性配置**（实际写入值见 `outputs/trustedpaths-after.txt`：`C:\Tangent\TElecT20V5\SYS;C:\Tangent\TElecT20V5\SYS19x64;C:\Tangent\TElecT20V5\lisp;"E:\随机任务 ·Qoder·\src\CadAgent.TArchBridge\bin\Debug\net45"`）；**SECURELOAD 保持默认 1**——不降级、不自动写配置（变更由用户执行）。
+  - **TRUSTEDPATHS 读取＝注册表优先**：`HKCU\Software\Autodesk\AutoCAD\R19.1\ACAD-*\Profiles\TElec20V5\Variables` 的 REG_SZ（只读、**零实例、零 COM**）；注册表无该值才回退 COM **文档面** `GetVariable("TRUSTEDPATHS")`（活动文档取用同走忙重试）。根因（真机）：COM 实读必须先 `/p` 拉起整实例，而启动初始化期 `Quit` 被忽略 → 孤儿 acad.exe，随后守卫只会自跳过"残留进程"，真因被残留掩盖。
+  - **桥 SendCommand 全部忙重试**：NETLOAD／注册探针／正式命令三处发送经同一注入缝走 `RetryBusy`（`RPC_E_CALL_REJECTED` 0x80010001，TArch 启动窗真机 run7 实证；被拒＝命令未执行故重试无副作用；与既有 30s 预算共享）。
+  - **通道目录＝实例级**：`EnsureChannelDir` 在本实例**首次启动前**创建目录并注入 `CADAGENT_TARCH_CHANNEL`（子进程只在 `CreateProcess` 时**快照**环境变量），READ 与 EXPLODE_REPLACE 全程复用；目录删除与环境变量还原只在 `Dispose`；写请求前先放弃目录内"有 req 无 done"的历史请求（否则桥 `NextPending` 恒拾最早旧请求→第二次桥操作必超时）。
+  - **误拒检测＝探针握手**：NETLOAD 返回后写 `op=read`/`dwg="__probe__"`（与当前文档名必然不符）请求并发送 READ 命令；桥必然回 `status fail`+done → 已注册；10s 内无 done → `native-load-denied` 明文三因（误点【不加载】/TRUSTEDPATHS 未含/SECURELOAD 阻止）。不依赖 SendCommand 回显（ActiveX 口径返回 void）。
+  - **看门狗与硬超时**：NETLOAD 总上限 **3600s**（人工授权动作，人在场未必及时）+ **20s 无进展无条件打印一次**明文指引（检出安全框时附诊断，仍继续等待）；命令等待 **120s**。**硬超时只终止本方** `/p` 启动的进程（既有 `TarchProcessCleanup` 缝，不触 COM、绝不碰他方实例），阻塞中的 COM 异常随后包装为"NETLOAD 超时（3600s）：已终止本方 AutoCAD 会话"。
+
+- **真机证据与断言强度分级**（`outputs/trx6/bridge6.trx` + `outputs/bridge-live-run8.log`；3 通过/1 设计性跳过，1m36s，收尾 0 acad）：
+  - **T1 Passed（18.0s）**：`evidence=343`（探针基线 343）、`tdb=343`、`fully=284`、`notFully=59`、`elapsed=14.9s`。**断言强度**：计数仅断言 **≥300**（343 为**观测值**，精确相等只记日志——标本/天正版本可变属设计内噪声）。`21E00` TDbWall `wrapper=ImpCurve prims=4 bbox=(127749.996,120300,0,127849.996,130100,3000)`——断言 RxClass 逐字 + bbox 逐分量 **1e-2** 容差（桥以 `0.###` 三位小数输出）。`HYDRANT_RADIUS=28` 命中多个 TDbEquipment（3EB5D/3EB5F/…/3EB7D）——断言**任一行等于 28**（不锁句柄、不锁行数）。
+  - **A4 Passed（23.3s）**：TDbSymbArrow `rows=4`、`notFully=2`，`FAIL handle=321A/328F`（`prims=0 nested=0 bbox=null`）——断言 **≥1 行 FullyExplodable=false**（行数/句柄只记日志）；标本无样本→Skip（不伪造残留）。
+  - **T3 Passed（55.2s）**：`REPLACED handle=21E00 newCount=4 bboxMatch=True tolerance=0.001`；`entityCount 1958→1961`（断言 after == before−1+newCount）；读回 `records=342 containsWall=False`（断言原句柄消失）；`.live.dwg` **3,182,297 B** 落盘（断言**存在且 >0**，字节数为观测值）；源件/副本 SHA 与 **acad.CUIX f355d54f…633f63** 前后逐字一致；收尾 **0 acad 残留**（硬断言）。
+  - **T2 NotExecuted by design**（Skip"标本无嵌套 TDb 样本"）——措辞更正见下条。
+
+- **T2 递归措辞更正（设计 §6 不可表达 → 范围收窄，已同步设计 §7.1(c)）**：原"T2 递归：TDbSpace NestedTdb>0 且 depth>0 产物记录"在 Core 模型内**不可表达**——`ExplodeEvidence.NestedTdbCount` 只统计**递归失败残留**（桥内"递归超深/非实体产物"的失败叶；成功路径恒 0），`ExplodePrimitive` 无 depth 字段。故 T2 收窄为**样本条件披露**（nested 行存在→断言 >0 且 `FullyExplodable=false` 自洽；无样本→Skip 如实）。**嵌套全量炸开由桥侧递归证据承担**（`PrimDto` 带 depth 入 TSV；T1 `fully=284/343` 即递归到底成功计数）——T2 不单独作递归充分性证据。
+
+- **explode-native 语义（落地口径，含两处设计更正）**：
+  - **递归叶替换**：一次递归炸开到底取叶集（>0 且全非 TDb）→ 事务内删原实体 + **逐叶 append**（绝不把 TDb 中间层写进空间）；**替换叶数须等于校验叶数**（同一次校验递归的确定性交叉核对）；任一校验不过→事务未 Commit（自动回滚），不留半替换。
+  - **bbox 判据更正**（设计 §4.2"并集≈原 bbox 相等 1e-3" → **包含性 + 叶数一致**）：叶集并集 ⊆ 原 extents 外扩 1e-3，且**仅比 X/Y**——墙体原实体带高度（Z≈3000）而炸开面线在 Z=0，且面线 Y 止 130000 而 extents Y=130100（21E00 实证），相等判据对该类必败。
+  - **准入更正**（R16）：change-layer/move/delete 与 explode-native 同用合并判据（参数门 ∨ 炸开门）；**仅凭炸开门**放行时有一例例外——**change-layer 拒绝**（层名读回无 before/after 参数面记录，放行后必然不可对账），move 的期望 bbox 回退炸开证据、delete 只验句柄消失，故放行并逐句柄落 `explodeGateHandles` 披露；合并判据永不返回参数门拒因（炸开门拒因优先），审计并行落 `paramsVerdict`（R14）。
+  - **零写入与语义降级**：源件 SHA256 复核窗口移至 SaveAs/Close/**运行时 Dispose 之后**（空 SHA/`liveSha` 不可验→fail-closed）；唯一写出 `<drawing>.live.dwg`；explode-native 新基元**无原生语义**（降级为普通 CAD 图元，审计/overlay 如实记录）。
+
+- **环境事实（机器特定，不冒充通用能力）**：**"不支持硬件加速"信息框＝本机核显指令集限制**的启动层**信息性**提示（**用户已永久关闭**该弹出）；`AcadWindows.DismissDialogs`（本方 PID + 标题子串「不支持硬件加速」+ **仅 `PostMessage(WM_CLOSE)`**，绝不按键/点击/结束进程）保留为**机器特定纵深防御**。复审在案两项残留风险：① 标题 needle 子串若用户**主框架**标题恰含该短语可能被命中（缓解：仅本方 PID、仅 WM_CLOSE，窗口类校验延后）；② EXPLODE_REPLACE 的忙重试理论上存在"拒绝在命令实际执行后才到达"的重复执行窗口（**未观测**，留观察）。
+
+- **诚实边界（不假装已验）**：TDbSymbArrow 双通道 `eInvalidInput` → **永久 FAIL**（321A/328F 实证）；符号块**仅候选披露**（不落 ≥0.8 标注）；XData 同键**只取首个值**（1001=天正键名、后续值行归入该键的天正排布属**图纸依赖**口径，异排布图纸会缺值）；`CenterlineJson` 为**首线方向归一**的通用轴语义（非墙轴专用；首产物为封口线→证据不足 null）；**TRUSTEDPATHS 为本机一次性配置前提**（未配置/不含桥目录→Skip 并给指引，绝不伪造绿）；SECURELOAD 保持默认 1；census Yellow 不变（炸开证据是**附加通道**，不改文件级解析结论）。
+
+- **门禁**：`outputs/slice-b-t11/gate-sln-attempt4.log` — **1589 通过 / 1 失败 / 1 跳过**（= TArchBridge.Protocol 13 + Llm 33 + Core 260 + Data 443 + View 380 + Zwcad 16 真机实跑 + Cli 327 + **Acad 117**（含桥 4 真机：T1/A4/T3 实跑 + T2 设计性 Skip））。唯一失败＝View `SemanticViewModelTests.Map_WithoutOverlay_Fails_NoAuditNoFile` teardown `audit.db` 文件锁（**并行负载 flaky**，与 §12 既有 View flaky 同口径，非本切片改动）→ 该工程隔离复跑 **381/381 绿**（`outputs/slice-b-t11/view-isolated.log`）⇒ 合并口径 **1590 通过 / 0 失败 / 1 跳过**；门禁前后 `tasklist` **0 acad**（`outputs/slice-b-t11/tasklist-{pre,post-gate4}.txt`）。
+- **门禁过程诚实记录（两次前序失败均为环境噪声，零代码改动）**：① 首跑 11 例失败——本会话中途被中止的一次构建遗留**自家** acad.exe 孤儿，真机用例全部被 `EnsureNoForeignInstance` 拒绝（"检测到已有 AutoCAD 进程"）；清理该孤儿（`CloseMainWindow`→无窗口→`Stop-Process` **自家 PID**，记录 `FORCE_KILLED_OWN`）后重跑，日志留档 `gate-sln-attempt1-orphan.log`。② 第二次 4 例失败、Acad 隔离复跑 1 例失败——桥类与前一真机类交接时 `GetActiveObject` 返回刚退出实例的残留注册 → "ROT 附着实例非本方启动（归属校验失败）"（`AcadAttach.AttachOnly` 的既有归属校验，非切片 B 代码路径）。**二者非产品缺陷**（生产单实例无类间交接面），但暴露**真机用例类间交接**在并行项目负载下的稳定性风险，记观察项（attempt2/attempt3/acad-isolated 日志同目录留档）。
+
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 
 **动机（语料实证）**：用户日常图纸为**无属性 plain 块语料**——两真实标本块普查 `withAttr=0`（电施强电 246 非空块/105 匿名；1#配套用房 235/87，`outputs/api-probe/block-census-out.txt`），§4 块属性 NativeObject 种子（Tag=="A" 路径）对该语料零命中。块级纠偏＝几何指纹匹配 skill 符号库（324 强电/弱电 + 17 灯具矢量化 DXF）产三级输出，落 §4.1② 不明确区域人工纠偏的块级落点。
