@@ -65,4 +65,14 @@ public class NativeGateRefinementExplodeTests
     public void BboxWithinTolerance_Pass()
         => Assert.Equal(NativeGateVerdict.Pass,
             NativeGateRefinement.EvaluateCombined(Ov(E("H9", b: 0.0)), "H9", null, E("H9", b: 5e-4)));
+
+    // R15（控制器义务，顺带修）：非有限 bbox 分量必须按**不符** fail-closed——旧写法
+    // `Math.Abs(diff) > tol` 对 NaN 恒 false，会把 NaN/Inf 漂移当"容差内一致"放行。
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void BboxNonFiniteComponent_StaleExplode(double bad)
+        => Assert.Equal(NativeGateVerdict.StaleExplode,
+            NativeGateRefinement.EvaluateCombined(Ov(E("HA", b: bad)), "HA", null, E("HA", b: 0)));
 }

@@ -65,12 +65,14 @@ public static class NativeGateRefinement
         (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b));
 
     // 炸开 bbox 近等：双 null 相等，单 null 即不符（裁定：不视同通配）；长度/维度不符即不符。
+    // R15 非有限守卫（fail-closed）：NaN/Inf 分量按不符处理——`Math.Abs(diff) > tol` 对 NaN
+    // 恒为 false，旧写法会把非有限漂移当"容差内一致"放行（安全关键比较器 fail-open 面）。
     private static bool BboxNearEq(double[]? a, double[]? b)
     {
         if (a == null || b == null) return a == null && b == null;
         if (a.Length != b.Length) return false;
         for (int i = 0; i < a.Length; i++)
-            if (Math.Abs(a[i] - b[i]) > ExplodeBboxTol) return false;
+            if (!(Math.Abs(a[i] - b[i]) <= ExplodeBboxTol)) return false;
         return true;
     }
 
