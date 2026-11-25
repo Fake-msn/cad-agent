@@ -40,7 +40,7 @@ namespace CadAgent.TArchBridge
 
     /// <summary>
     /// EXPLODE_REPLACE：把模型空间指定句柄的 TArch 实体就地递归炸开为其叶产物。
-    /// 校验链——错图→liveout 守卫→句柄存在→递归炸开完整（叶&gt;0 且全非 TDb）→
+    /// 校验链——目标文档按名解析→liveout 守卫→句柄存在→递归炸开完整（叶&gt;0 且全非 TDb）→
     /// 叶集 bbox 并集 ⊆ 原 extents 外扩 1e-3（仅 X/Y）→ 事务内删原实体+递归 append 叶产物→
     /// 叶数一致→Commit→另存 liveout。任一校验失败即未 Commit（自动回滚）并回 fail 结果。
     /// 只写通道目录与宿主给定的 liveout；不改配置、不动源图。
@@ -53,8 +53,9 @@ namespace CadAgent.TArchBridge
         [CommandMethod("CADAGENT_TARCH_EXPLODE_REPLACE")]
         public void ExplodeReplaceCmd()
         {
-            var doc = Application.DocumentManager.MdiActiveDocument;
-            var ed = doc.Editor;
+            // 消息面仍走活动文档编辑器（命令行输出与目标文档无关）；目标文档按请求名解析（见下）。
+            var active = Application.DocumentManager.MdiActiveDocument;
+            var ed = active.Editor;
             string channel = BridgeFiles.ChannelDir();
             // 通道不可用（env 未设置/空串/目录不存在）：只提示，不抛异常、不写任何文件。
             if (string.IsNullOrEmpty(channel) || !Directory.Exists(channel))
@@ -74,12 +75,23 @@ namespace CadAgent.TArchBridge
                 var req = BridgeRequest.Parse(File.ReadAllText(p.ReqPath));
                 // M10（复审修复波）：命令只服务 op=explode-replace——错 op 请求一律拒绝（不碰库）。
                 req.RequireOp("explode-replace");
-                if (!string.Equals(Path.GetFileName(doc.Name), Path.GetFileName(req.Dwg), StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("错图: 当前文档 " + doc.Name + " ≠ " + req.Dwg);
+                // 目标文档按请求 dwg 名在 DocumentManager 内解析（不再用 MdiActiveDocument）：
+                // 宿主 Documents.Open 打开新图后未必激活它——真机 T5 实证同款，活动文档可能仍是
+                // Drawing1.dwg；按名解析让替换作用于"请求的图"，而不是"当前窗口的图"。
+                Document doc = ResolveTargetDocument(req.Dwg);
                 if (req.Handle == null || req.LiveOut == null)
                     throw new InvalidOperationException("请求缺少 handle/liveout");
                 // 当前文档路径与请求 dwg 路径都传入守卫：liveout 指向二者之一即为覆盖源图，必须拒绝。
-                result.Replace = ReplaceCore(doc.Database, doc.Name, req.Dwg, req.Handle, req.LiveOut, req.MaxDepth);
+                // 非活动文档的数据库修改必须持有文档锁（.NET API 契约：Document.LockDocument）；
+                // 宿主打开后未激活的图没有 AutoCAD 自身的编辑锁，无锁写入事务/SaveAs 会被宿主拒绝。
+                // 活动文档由 AutoCAD 自身持锁，直接执行（重复加锁徒增风险面）。
+                bool isActive = ReferenceEquals(doc, active)
+                    || (active != null && string.Equals(doc.Name, active.Name, StringComparison.OrdinalIgnoreCase));
+                if (isActive)
+                    result.Replace = ReplaceCore(doc.Database, doc.Name, req.Dwg, req.Handle, req.LiveOut, req.MaxDepth);
+                else
+                    using (doc.LockDocument())
+                        result.Replace = ReplaceCore(doc.Database, doc.Name, req.Dwg, req.Handle, req.LiveOut, req.MaxDepth);
             }
             catch (System.Exception ex)
             {
