@@ -10,8 +10,9 @@ namespace CadAgent.Adapters.Acad.Tests;
 /// ① 桥 DLL 已构建（<c>CADAGENT_BRIDGE_DLL</c> 覆盖，或仓库
 ///    <c>src/CadAgent.TArchBridge/bin/{Debug|Release}/net45/CadAgent.TArchBridge.dll</c>）；
 /// ② 本机 AutoCAD ProgID 注册 + 桥目录在 <c>TRUSTEDPATHS</c> 内（ProgID 检查**先于任何 COM**；
-///    <c>AcadRuntime.GetTrustedPaths()</c> 实读；缺失/为空/不可读/不含桥目录 → Skip 并附只读
-///    leftover acad PID 诊断 + spec §5 一次性配置指引）——**不尝试 NETLOAD**：
+///    TRUSTEDPATHS 经 <c>AcadRuntime.ReadTrustedPathsFromRegistry</c> 读**注册表**（R17：不建实例、
+///    不发 COM——旧 COM 实读会启动实例并在初始化期留孤儿 acad.exe）；缺失/为空/不可读/不含桥目录 →
+///    Skip 并附只读 leftover acad PID 诊断 + spec §5 一次性配置指引）——**不尝试 NETLOAD**：
 ///    AutoCAD 2014 对未签名程序集弹安全确认框，SendCommand 同步阻塞（spike 实测 45 分钟）；
 /// ③ 标本副本可用（复用 <see cref="AcadNativeLiveFixture"/>：副本 + 源件/副本 SHA + acad 零残留金丝雀）；
 /// ④ CUIX 金丝雀基线**非空**（与切片A 同一定位器 <see cref="AcadNativeLiveFixture.CuixHashes"/>；
@@ -339,10 +340,11 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
 
 /// <summary>
 /// 桥真机守卫（Lazy 一次求值，类内各测试共享）：
-/// 桥 DLL 定位 → **ProgID 注册前置检查（不触 COM/不启动进程）** → 实读 TRUSTEDPATHS
-/// （<c>AcadRuntime.GetTrustedPaths()</c>，/p 天正 profile，F2 口径）
+/// 桥 DLL 定位 → **ProgID 注册前置检查（不触 COM/不启动进程）** → 注册表面读 TRUSTEDPATHS
+/// （<c>AcadRuntime.ReadTrustedPathsFromRegistry(TArchProfileName)</c>，R17：**不建实例、不发 COM**；
+/// 旧写法 <c>GetTrustedPaths()</c> 会 /p 拉起整实例、启动期 Quit 被忽略而留孤儿，已改）
 /// → 桥目录是否落在信任位置（TRUSTEDPATHS 含子目录，故祖先目录亦算信任）。
-/// 任何失败（含 COM 异常）→ Skip 原因（附**只读** leftover acad PID 诊断；绝不强杀，人工清理）；绝不上抛失败；
+/// 任何失败 → Skip 原因（附**只读** leftover acad PID 诊断；绝不强杀，人工清理）；绝不上抛失败；
 /// 绝不写注册表 / 改任何 AutoCAD 设置。
 /// </summary>
 internal static class BridgeLiveGuard
@@ -370,29 +372,25 @@ internal static class BridgeLiveGuard
                 $"本机无 AutoCAD ProgID 注册（{VendorProfiles.Acad.ProgId}）——无法实读 TRUSTEDPATHS，"
                 + "不尝试 NETLOAD。" + LeftoverNote("ProgID 预检"), dll, null);
 
-        string? trusted;
-        try
+        // R17：注册表优先——**不创建 AcadRuntime、不触 COM、不启动 acad.exe**。
+        // 真机根因（Fix round 4）：经 COM 读 TRUSTEDPATHS 必须先 /p 拉起整实例，而启动初始化期
+        // Quit 被忽略 → 孤儿 acad.exe；守卫随后只会自跳过"残留进程"，真因被残留掩盖。
+        // 注册表值即「选项→文件→信任位置」的持久化镜像（只读 REG_SZ），读它无需实例。
+        string? trusted = AcadRuntime.ReadTrustedPathsFromRegistry(AcadRuntime.TArchProfileName);
+        if (trusted == null)
         {
-            using var rt = new AcadRuntime();
-            trusted = rt.GetTrustedPaths();   // /p TArch profile；Dispose=Close(false)+Quit+等进程退出
-        }
-        catch (Exception ex)
-        {
-            // 本机真机实证（2026-11-25，Task 10）：AutoCAD 2014 每次启动弹「AutoCAD - 不支持硬件加速」
-            // WPF 模态框；人工未关闭前 COM 调用持续 RPC_E_CALL_REJECTED → Gate1 超时、Quit 滞留
-            // （acad.exe 残留须人工处理）。属环境前置，不改任何 AutoCAD 设置，只如实 Skip。
-            // leftover 计数在 using 释放（Close/Quit 已尽力执行）之后实读：正是"我们退出失败"的残留证据。
+            // 注册表也无值：**不以启动实例为代价回退**（正是本轮要消除的根因），如实 Skip。
             return new BridgeGuard(false,
-                $"TRUSTEDPATHS 不可读（{ex.GetType().Name}: {ex.Message}）——不尝试 NETLOAD（安全框会阻塞）。"
-                + "诊断提示：若为天正实例未就绪/Gate1 超时，先确认启动期模态框（如「不支持硬件加速」）已人工关闭。"
-                + LeftoverNote("COM 实读失败、本测试实例已 Dispose 后")
-                + Guidance(dll), dll, null);
+                $"注册表未找到 TRUSTEDPATHS（HKCU\\{AcadRuntime.RegistryProductRoot}"
+                + $"\\ACAD-*\\Profiles\\{AcadRuntime.TArchProfileName}\\Variables）——"
+                + "守卫不启动 AutoCAD 实例（启动期 Quit 会被忽略、留孤儿），故不尝试 NETLOAD。"
+                + LeftoverNote("预检前") + Guidance(dll), dll, null);
         }
 
         var leftover = AcadNativeLiveFixture.AcadProcessTokens();
         string leftoverNote = leftover.Count == 0
             ? ""
-            : $"（注意：TRUSTEDPATHS 预检后残留 acad 进程 {string.Join(",", leftover)}——退出期模态框滞留，须人工处理后方可重跑；测试不做强杀）";
+            : $"（注意：预检前已存在 acad 进程 {string.Join(",", leftover)}，不并发激活；须人工处理后方可重跑，测试不做强杀）";
 
         string dir = Path.GetDirectoryName(dll) ?? dll;
         if (string.IsNullOrWhiteSpace(trusted))
@@ -405,7 +403,7 @@ internal static class BridgeLiveGuard
                 + leftoverNote + Guidance(dll), dll, trusted);
         if (leftover.Count > 0)
             return new BridgeGuard(false,
-                $"TRUSTEDPATHS 预检后残留 acad 进程 {string.Join(",", leftover)}（不并发激活）" + leftoverNote, dll, trusted);
+                $"预检前已存在 acad 进程 {string.Join(",", leftover)}（不并发激活；非本守卫产生的残留）" + leftoverNote, dll, trusted);
 
         return new BridgeGuard(true, null, dll, trusted);
     }

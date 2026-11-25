@@ -29,6 +29,7 @@ public class BridgeChannelTests : IDisposable
     private readonly TimeSpan _origThreshold = AcadRuntime.NetLoadNoProgressThreshold;
     private readonly TimeSpan _origCmdTimeout = AcadRuntime.BridgeCommandTimeout;
     private readonly Func<string, Process?> _origLauncher = AcadRuntime.ProcessLauncher;
+    private readonly Func<string, string?> _origTrustedSource = AcadRuntime.TrustedPathsSource;
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
     private readonly Func<string[]> _origNames = VendorGuard.ProcessNames;
     private readonly Func<string, Type?> _origProgId = AcadRuntime.ProgIdResolver;
@@ -62,6 +63,7 @@ public class BridgeChannelTests : IDisposable
         AcadRuntime.NetLoadNoProgressThreshold = _origThreshold;
         AcadRuntime.BridgeCommandTimeout = _origCmdTimeout;
         AcadRuntime.ProcessLauncher = _origLauncher;
+        AcadRuntime.TrustedPathsSource = _origTrustedSource;
         AcadAttach.ActiveObjectResolver = _origActive;
         VendorGuard.ProcessNames = _origNames;
         AcadRuntime.ProgIdResolver = _origProgId;
@@ -450,6 +452,7 @@ public class BridgeChannelTests : IDisposable
     {
         string channelDir = Path.Combine(_dir, "channel");
         AcadRuntime.ChannelDirFactory = () => channelDir;
+        AcadRuntime.TrustedPathsSource = _ => null;   // R17：强制走 COM 回退分支（本用例钉住启动路径的副作用）
         AcadRuntime.ProcessLauncher = _ => new Process();
         AcadAttach.ActiveObjectResolver = _ => new FakeBridgeApp(new FakeBridgeDoc(new List<string>()));
 
@@ -467,12 +470,14 @@ public class BridgeChannelTests : IDisposable
 
     // 复审 F2：TRUSTEDPATHS 必须取自天正 profile（/p）实例——不得走 EnsureApp()（默认 profile）
     // 而缓存错误实例、返回错误 profile 的信任路径。
+    // Fix round 4（R17）：此口径只在**注册表无值时的 COM 回退分支**成立；缝注入 null 强制走该分支。
     [Fact]
     public void GetTrustedPaths_LaunchesTArchProfile()
     {
         var calls = new List<string>();
         var doc = new FakeBridgeDoc(calls);
         var app = new FakeBridgeApp(doc);
+        AcadRuntime.TrustedPathsSource = _ => null;   // R17：注册表优先不开实例；钉住回退分支
         AcadRuntime.ProcessLauncher = name => { calls.Add("Launch(" + name + ")"); return new Process(); };
         AcadAttach.ActiveObjectResolver = _ => app;
 

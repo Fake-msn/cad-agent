@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
 using CadAgent.TArchBridge.Protocol;
@@ -699,7 +700,8 @@ public sealed class AcadRuntime : ICadRuntime
 
     // ---- 切片A §4.1：COM 原生读参编排（Task 5）----
     // 天正 profile 名（spike 实证值）：/p 启动仅此 profile 加载 TArch 自定义面。
-    private const string TArchProfileName = "TElec20V5";
+    // R17：守卫经注册表面读 TRUSTEDPATHS 时也用它（单一口径，不复制字面量）。
+    internal const string TArchProfileName = "TElec20V5";
 
     // 逐实体读缝（spec 切片A §5）：默认走 dynamic COM + RetryBusy；测试注入 fake。
     // UNKNOWNNAME(0x80020006)=属性不存在→记缺省不重试；忙窗拒绝经 RetryBusy 内层处理。
@@ -1072,22 +1074,77 @@ public sealed class AcadRuntime : ICadRuntime
         return DocumentVariableReader(doc, "TRUSTEDPATHS");
     }
 
-    /// <summary>TRUSTEDPATHS 现值（TRUSTEDPATHS 预检=信息性；真机测试据此决定 Skip/运行）。</summary>
-    internal string GetTrustedPaths() => Run(() =>
+    // ---- TRUSTEDPATHS 预检（R17：注册表优先，绝不为此启动实例）----
+    // 真机根因（Fix round 4）：经 COM 读 TRUSTEDPATHS 必须先 EnsureAppTArch → /p 拉起**整实例**；
+    // 启动初始化期 Quit 被忽略 → 孤儿 acad.exe；守卫随后只会自跳过"残留进程"（真因被残留掩盖）。
+    // 注册表与「选项→文件→信任位置」是同源配置（只读 REG_SZ），读它即可，无需实例。
+    // 产品版本根 R19.1（AutoCAD 2014 + 天正 T20V5 实证）；产品子键形如 ACAD-D001:804。
+    internal const string RegistryProductRoot = @"Software\Autodesk\AutoCAD\R19.1";
+    internal const string TrustedPathsVariableName = "TRUSTEDPATHS";
+
+    /// <summary>
+    /// 注册表面读 TRUSTEDPATHS（**只读**，无 COM、不启动进程）：
+    /// <c>HKCU\Software\Autodesk\AutoCAD\R19.1\ACAD-*\Profiles\&lt;profileName&gt;\Variables</c>
+    /// 的值 TRUSTEDPATHS（REG_SZ）；枚举 ACAD-* 子键，返回首个非 null 值（空串=「已配置但为空」，
+    /// 与「无此值」语义不同，交调用方如实披露）；全无/不可读→null。
+    /// 只读访问：绝不写注册表、不改任何 AutoCAD 设置。
+    /// </summary>
+    internal static string? ReadTrustedPathsFromRegistry(string profileName)
     {
-        // 复审 F2：必须走天正 profile 启动路径——EnsureApp()（默认 profile，无 /p）会返回
-        // 错误 profile 的 TRUSTEDPATHS，且把默认 profile 的实例缓存进 _app，污染后续桥会话。
+        if (string.IsNullOrWhiteSpace(profileName)) return null;
+        // CA1416：宿主机恒为 Windows（AutoCAD COM 宿主，本适配器不跨平台），此处显式静默平台告警。
+#pragma warning disable CA1416
         try
         {
-            EnsureAppTArch(TArchProfileName);
-            // 系统变量在文档面（见 DocumentVariableReader 注释）：会话已有文档优先，否则取活动文档。
-            dynamic? doc = _doc;
-            if (doc == null) doc = _app!.ActiveDocument;
-            return ReadTrustedPaths(doc);
+            using RegistryKey? root = Registry.CurrentUser.OpenSubKey(RegistryProductRoot);
+            if (root == null) return null;
+            foreach (string product in root.GetSubKeyNames())
+            {
+                if (!product.StartsWith("ACAD-", StringComparison.OrdinalIgnoreCase)) continue;
+                using RegistryKey? variables = root.OpenSubKey(
+                    product + @"\Profiles\" + profileName + @"\Variables");
+                if (variables?.GetValue(TrustedPathsVariableName) is string value) return value;
+            }
         }
-        catch (Exception ex) when (ex is not CadRuntimeException)
-        { throw new CadRuntimeException($"读取 TRUSTEDPATHS 失败: {ex.Message}", ex); }
-    });
+        catch (Exception ex) when (ex is System.Security.SecurityException
+                                   or UnauthorizedAccessException or System.IO.IOException)
+        {
+            return null;   // 只读探测失败按「无该值」处理：回退 COM 兜底 / 守卫如实 Skip，绝不抛
+        }
+#pragma warning restore CA1416
+        return null;
+    }
+
+    // 注册表读取缝（R17）：默认=ReadTrustedPathsFromRegistry；单测注入以钉住
+    // 「注册表命中→零 COM/零实例」，注入 (_ => null) 则强制走 COM 回退分支（复现旧行为）。
+    internal static Func<string, string?> TrustedPathsSource = ReadTrustedPathsFromRegistry;
+
+    /// <summary>
+    /// TRUSTEDPATHS 现值（TRUSTEDPATHS 预检=信息性；真机测试据此决定 Skip/运行）。
+    /// R17：**注册表优先**——不启动实例；仅当注册表无该 profile/值时才回退 COM 实读
+    /// （回退须 /p 拉起实例：启动初始化期 Quit 被忽略会留孤儿，故只作兜底而非主路）。
+    /// </summary>
+    internal string GetTrustedPaths()
+    {
+        string? fromRegistry = TrustedPathsSource(TArchProfileName);
+        if (fromRegistry != null) return fromRegistry;
+
+        return Run(() =>
+        {
+            // 复审 F2：兜底路径必须走天正 profile 启动路径——EnsureApp()（默认 profile，无 /p）会返回
+            // 错误 profile 的 TRUSTEDPATHS，且把默认 profile 的实例缓存进 _app，污染后续桥会话。
+            try
+            {
+                EnsureAppTArch(TArchProfileName);
+                // 系统变量在文档面（见 DocumentVariableReader 注释）：会话已有文档优先，否则取活动文档。
+                dynamic? doc = _doc;
+                if (doc == null) doc = _app!.ActiveDocument;
+                return ReadTrustedPaths(doc);
+            }
+            catch (Exception ex) when (ex is not CadRuntimeException)
+            { throw new CadRuntimeException($"读取 TRUSTEDPATHS 失败: {ex.Message}", ex); }
+        });
+    }
 
     /// <summary>
     /// 桥缝注入（R6）：静态 SendCommand 在每次公开入口赋值——委托捕获本实例文档。

@@ -11,10 +11,14 @@ namespace CadAgent.Adapters.Acad.Tests;
 /// "'System.__ComObject' does not contain a definition for 'GetSystemVariable'"；
 /// 系统变量属 <b>Document</b>（<c>doc.GetVariable(name)</c>）。此处钉住纯助手
 /// <see cref="AcadRuntime.ReadTrustedPaths"/> 的 API 口径、缝注入、无活动文档拒绝与端到端取数。
+/// Fix round 4（R17）：<see cref="AcadRuntime.GetTrustedPaths"/> 改为**注册表优先**——命中即返回、
+/// 零 COM/零实例（COM 实读会 /p 拉起实例，启动期 Quit 被忽略→孤儿 acad.exe）；COM 文档面路径
+/// 降级为注册表无值时的兜底，仍由本类（缝注入 null）逐项钉住。
 /// </summary>
 public class AcadTrustedPathsTests : IDisposable
 {
     private readonly Func<dynamic, string, string> _origReader = AcadRuntime.DocumentVariableReader;
+    private readonly Func<string, string?> _origTrustedSource = AcadRuntime.TrustedPathsSource;
     private readonly Func<string, Process?> _origLauncher = AcadRuntime.ProcessLauncher;
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
     private readonly Func<string[]> _origNames = VendorGuard.ProcessNames;
@@ -30,6 +34,7 @@ public class AcadTrustedPathsTests : IDisposable
     public void Dispose()
     {
         AcadRuntime.DocumentVariableReader = _origReader;
+        AcadRuntime.TrustedPathsSource = _origTrustedSource;
         AcadRuntime.ProcessLauncher = _origLauncher;
         AcadAttach.ActiveObjectResolver = _origActive;
         VendorGuard.ProcessNames = _origNames;
@@ -82,12 +87,42 @@ public class AcadTrustedPathsTests : IDisposable
     }
 
     /// <summary>
-    /// 端到端（fake app，无 COM）：GetTrustedPaths 先走 EnsureAppTArch（/p 天正 profile + Gate1），
-    /// 再取 <c>_doc ?? _app.ActiveDocument</c> 读文档面系统变量。
+    /// R17 缝：注册表命中即返回，**零 COM、零实例**——ProcessLauncher 若被调用即失败
+    /// （证明注册表优先路径不再 /p 拉起 acad.exe，孤儿进程根因被切断）。
     /// </summary>
     [Fact]
-    public void GetTrustedPaths_ReadsFromActiveDocument()
+    public void GetTrustedPaths_RegistrySeamHit_ReturnsWithoutComOrLaunch()
     {
+        var launched = new List<string>();
+        AcadRuntime.ProcessLauncher = name => { launched.Add(name); return new Process(); };
+        AcadRuntime.TrustedPathsSource = profile => "REG:" + profile;
+
+        using var rt = new AcadRuntime();
+        Assert.Equal("REG:TElec20V5", rt.GetTrustedPaths());   // profile 口径随缝传入
+        Assert.Empty(launched);                                // 未启动任何实例
+    }
+
+    /// <summary>R17 缝透传口径：GetTrustedPaths 以天正 profile 名调用读取缝（非硬编码在别处）。</summary>
+    [Fact]
+    public void GetTrustedPaths_SeamReceivesTArchProfileName()
+    {
+        var profiles = new List<string>();
+        AcadRuntime.TrustedPathsSource = profile => { profiles.Add(profile); return ""; };
+
+        using var rt = new AcadRuntime();
+        Assert.Equal("", rt.GetTrustedPaths());                // 空串=已配置但为空：照实返回，不吞成 null
+        Assert.Equal(new[] { AcadRuntime.TArchProfileName }, profiles);
+        Assert.Equal("TElec20V5", AcadRuntime.TArchProfileName);
+    }
+
+    /// <summary>
+    /// 端到端（fake app，无 COM）：注册表无值（缝注入 null）→ 回退路径先走 EnsureAppTArch
+    /// （/p 天正 profile + Gate1），再取 <c>_doc ?? _app.ActiveDocument</c> 读文档面系统变量。
+    /// </summary>
+    [Fact]
+    public void GetTrustedPaths_RegistryMiss_FallsBackToActiveDocument()
+    {
+        AcadRuntime.TrustedPathsSource = _ => null;             // 强制回退（不读真机注册表，保持确定性）
         var doc = new FakeVariableDoc(@"C:\trusted");
         var app = new FakeGate1App(doc);
         var launches = new List<string>();
