@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Autodesk.AutoCAD.ApplicationServices;
@@ -22,24 +23,47 @@ namespace CadAgent.TArchBridge
         [CommandMethod("CADAGENT_TARCH_READ")]
         public void ReadCmd()
         {
-            var ed = Application.DocumentManager.MdiActiveDocument.Editor;
+            var doc = Application.DocumentManager.MdiActiveDocument;
+            var ed = doc.Editor;
             string channel = BridgeFiles.ChannelDir();
-            if (channel == null) { ed.WriteMessage("\nCADAGENT_TARCH_READ: 缺少 CADAGENT_TARCH_CHANNEL\n"); return; }
-            var pending = BridgeFiles.NextPending(channel);
-            if (pending == null) { ed.WriteMessage("\nCADAGENT_TARCH_READ: 无待处理请求\n"); return; }
-            var p = pending.Value;
+            // 通道不可用（env 未设置/空串/目录不存在）：只提示，不抛异常、不写任何文件。
+            if (string.IsNullOrEmpty(channel) || !System.IO.Directory.Exists(channel))
+            {
+                ed.WriteMessage("\nCADAGENT_TARCH_READ: 通道不可用（CADAGENT_TARCH_CHANNEL 未设置或目录不存在）\n");
+                return;
+            }
+
+            PendingRequest? pending = null;
             var result = new BridgeResult { Status = "ok" };
             try
             {
+                pending = BridgeFiles.NextPending(channel);
+                if (pending == null) { ed.WriteMessage("\nCADAGENT_TARCH_READ: 无待处理请求\n"); return; }
+                // PendingRequest 为具名 struct（net45 无 ValueTuple）：一律用 .Value.ReqPath/.Id 具名访问。
+                var p = pending.Value;
                 var req = BridgeRequest.Parse(System.IO.File.ReadAllText(p.ReqPath));
-                var doc = Application.DocumentManager.MdiActiveDocument;
                 if (!string.Equals(System.IO.Path.GetFileName(doc.Name), System.IO.Path.GetFileName(req.Dwg), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("错图: 当前文档 " + doc.Name + " ≠ " + req.Dwg);
                 ReadInto(result, doc.Database, req.MaxDepth);
             }
             catch (System.Exception ex)
-            { result.Status = "fail"; result.Error = ex.GetType().Name + ": " + ex.Message; }
-            BridgeFiles.WriteResultAtomic(channel, p.Id, result.Write());
+            {
+                result.Status = "fail";
+                result.Error = ex.GetType().Name + ": " + ex.Message;
+                if (pending == null)
+                {
+                    // 连请求都未定位（扫描通道即失败）：没有可写的 res-<id>，只提示。
+                    ed.WriteMessage("\nCADAGENT_TARCH_READ: 通道扫描失败——" + result.Error + "\n");
+                    return;
+                }
+            }
+
+            try { BridgeFiles.WriteResultAtomic(channel, pending.Value.Id, result.Write()); }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nCADAGENT_TARCH_READ: 写结果失败——" + ex.GetType().Name + ": " + ex.Message + "\n");
+                return;
+            }
             ed.WriteMessage("\nCADAGENT_TARCH_READ done\n");
         }
 
@@ -66,7 +90,7 @@ namespace CadAgent.TArchBridge
                     try
                     {
                         var xd = ent.XData;
-                        if (xd != null) foreach (TypedValue tv in xd) result.XData.Add(new XDataDto(handle, tv.TypeCode, Convert.ToString(tv.Value)));
+                        if (xd != null) foreach (TypedValue tv in xd) result.XData.Add(new XDataDto(handle, tv.TypeCode, Convert.ToString(tv.Value, CultureInfo.InvariantCulture)));
                     }
                     catch (System.Exception ex) { result.Fails.Add(new FailDto(handle, "xdata:" + ex.GetType().Name)); }
                 }
@@ -112,17 +136,17 @@ namespace CadAgent.TArchBridge
             var line = e as Line;
             if (line != null) return new[] { "start=" + F(line.StartPoint), "end=" + F(line.EndPoint) };
             var arc = e as Arc;
-            if (arc != null) return new[] { "center=" + F(arc.Center), "r=" + arc.Radius.ToString("0.###"), "ang=" + arc.StartAngle.ToString("0.######") + ".." + arc.EndAngle.ToString("0.######") };
+            if (arc != null) return new[] { "center=" + F(arc.Center), "r=" + N(arc.Radius, "0.###"), "ang=" + N(arc.StartAngle, "0.######") + ".." + N(arc.EndAngle, "0.######") };
             var circ = e as Circle;
-            if (circ != null) return new[] { "center=" + F(circ.Center), "r=" + circ.Radius.ToString("0.###") };
+            if (circ != null) return new[] { "center=" + F(circ.Center), "r=" + N(circ.Radius, "0.###") };
             var txt = e as DBText;
-            if (txt != null) return new[] { "text=" + txt.TextString, "pos=" + F(txt.Position) };
+            if (txt != null) return new[] { "text=" + OneLine(txt.TextString), "pos=" + F(txt.Position) };
             var mt = e as MText;
-            if (mt != null) return new[] { "mtext=" + mt.Contents.Replace("\n", "\\n"), "loc=" + F(mt.Location) };
+            if (mt != null) return new[] { "mtext=" + mt.Contents.Replace("\t", " ").Replace("\r", " ").Replace("\n", "\\n"), "loc=" + F(mt.Location) };
             var pl = e as Polyline;
             if (pl != null)
             {
-                var s = new List<string> { "verts=" + pl.NumberOfVertices };
+                var s = new List<string> { "verts=" + pl.NumberOfVertices.ToString(CultureInfo.InvariantCulture) };
                 for (int i = 0; i < pl.NumberOfVertices && i < 32; i++) s.Add(F(pl.GetPoint3dAt(i)));
                 return s.ToArray();
             }
@@ -130,7 +154,17 @@ namespace CadAgent.TArchBridge
             catch { return new[] { "geom=?" }; }
         }
 
+        /// <summary>
+        /// 协议契约：单个 token 内不得含字面 TAB/CR/LF——TAB 会撕裂 PRIM 列，CR/LF 会伪造记录。
+        /// 文本类实体一律降格为空格（MText 的字面换行另行转义为 <c>\n</c> 以保留段落语义）。
+        /// </summary>
+        internal static string OneLine(string s)
+            => s.Replace("\t", " ").Replace("\r", " ").Replace("\n", " ");
+
+        /// <summary>数字一律按不变文化格式化（宿主 Parse 亦 Invariant；中文区域的小数点/千分位会污染协议）。</summary>
+        internal static string N(double v, string format) => v.ToString(format, CultureInfo.InvariantCulture);
+
         internal static string F(Autodesk.AutoCAD.Geometry.Point3d p)
-            => p.X.ToString("0.###") + "," + p.Y.ToString("0.###") + "," + p.Z.ToString("0.###");
+            => N(p.X, "0.###") + "," + N(p.Y, "0.###") + "," + N(p.Z, "0.###");
     }
 }
