@@ -760,6 +760,75 @@ public static partial class CommandRouter
                 }
             }
         }
+        // T8（切片B）：--explode 深度读 → ExplodeEvidence 独立表 + 直墙中心线推导 + NativeExplode 0.9
+        // 标注 + XData 并入原生参数 + 符号块候选披露（TarchDerive.Enrich 纯数据层）。
+        // 顺序同 --native：必须在 SemanticScanner.Scan 之后（Scan 末尾按存活句柄剪枝，先落标注会被清）；
+        // Enrich 恰一次喂**全量**证据（逐条增量调用会让后一轮的陈旧清理回收其他句柄的标注）。
+        // R8 直构口径 = --native：RuntimeFactory 优先；否则 ResolveRuntimeName()!=acad → stderr 警示
+        // 跳过（计数全 0）；acad → 直接 CreateRuntimeInstance("acad")（不走 GetInfo 预激活）。
+        // R9：构造/读证据任何异常 → explode-read-failed 审计 + stderr 降级提示，五键保持 0/空，
+        // 扫描继续到正常 stdout/审计/exit 0（理解侧诚实降级；--explode 失败同骑该降级）。
+        int explodeRead = 0, explodeFully = 0, explodePartial = 0, explodeFailed = 0;
+        IReadOnlyList<SymbolCandidate> explodeCandidates = Array.Empty<SymbolCandidate>();
+        if (args.Contains("--explode"))
+        {
+            void ExplodeReadFailed(Exception ex)
+            {
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "semantic", "explode-read-failed", drawingPath,
+                    JsonSerializer.Serialize(new { Error = ex.Message }), hash, hash, "", ""));
+                stderr.WriteLine($"--explode: 深度读失败（{ex.Message}），理解侧降级");
+            }
+
+            ICadRuntime? explodeRuntime = null;
+            if (RuntimeFactory != null)
+            {
+                try { explodeRuntime = RuntimeFactory(); }
+                catch (Exception ex) { ExplodeReadFailed(ex); }
+            }
+            else if (ResolveRuntimeName() != "acad")
+            {
+                stderr.WriteLine("--explode: 该运行时不支持深度读（--explode 需 CADAGENT_RUNTIME=acad），跳过深度读（理解侧降级）");
+            }
+            else
+            {
+                try { explodeRuntime = CreateRuntimeInstance("acad"); }
+                catch (Exception ex) { ExplodeReadFailed(ex); }
+            }
+            if (explodeRuntime is not null)
+            {
+                using (explodeRuntime)
+                {
+                    try
+                    {
+                        var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath);
+                        explodeRead = evidences.Count;
+                        explodeFully = evidences.Count(e => e.FullyExplodable);
+                        // 口径（brief 逐字）：未全炸开且仍有产物=部分；零产物=失败（基元表缺失按空）。
+                        explodePartial = evidences.Count(e =>
+                            !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount > 0);
+                        explodeFailed = evidences.Count(e =>
+                            !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount == 0);
+                        var derive = TarchDerive.Enrich(result.Overlay, evidences);
+                        explodeCandidates = derive.SymbolCandidates;
+                        // 恰一次额外 Save（扫描结果已在上方 Save）：证据行/标注须持久化，否则下次
+                        // scan Load 深度表为空。无 --explode 路径仍恰一次 Save，旧行为逐字不变。
+                        result.Overlay.Save(overlayPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 异常前已赋值的计数一律归 0（读证据整体失败=无可用深度事实，诚实口径）。
+                        explodeRead = explodeFully = explodePartial = explodeFailed = 0;
+                        explodeCandidates = Array.Empty<SymbolCandidate>();
+                        ExplodeReadFailed(ex);
+                    }
+                }
+            }
+        }
+        // 候选披露载荷（审计与 stdout 共用；字段序固定 handle/blockName/kind/classHint，只披露不落标注）。
+        var explodeCandidateDtos = explodeCandidates
+            .Select(c => new { handle = c.Handle, blockName = c.BlockName, kind = c.Kind, classHint = c.ClassHint })
+            .ToArray();
         // BF-T3 加性披露口径（审计与 stdout 共用）：无包→BlockMatch null→零/空恒在。
         int blockAutoSeeded = result.BlockMatch?.AutoSeeds.Sum(s => s.Handles.Count) ?? 0;
         int symbolsSkipped = result.BlockMatch?.SymbolsSkipped ?? 0;
@@ -787,7 +856,14 @@ public static partial class CommandRouter
                 //（无 --native 恒 0，旧字段逐字不变）。读参失败时有独立 native-read-failed 条目。
                 nativeRead,
                 nativeClassified,
-                nativeReadFailed
+                nativeReadFailed,
+                // T8 审计加性（切片B）：深度读四计数 + 符号块候选（无 --explode 恒 0/空；
+                // 旧字段逐字不变）。读证据失败时有独立 explode-read-failed 条目。
+                explodeRead,
+                explodeFully,
+                explodePartial,
+                explodeFailed,
+                explodeSymbolCandidates = explodeCandidateDtos
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -819,7 +895,15 @@ public static partial class CommandRouter
             //（无 --native 恒 0；旧键 version/annotations/ambiguous/sheets 等逐字不变）。
             nativeRead,
             nativeClassified,
-            nativeReadFailed
+            nativeReadFailed,
+            // T8 stdout 加性五键恒在（切片B）：深度读总数/全炸开数/部分产物数/零产物数 +
+            // 符号块候选数组 {handle,blockName,kind,classHint}（无 --explode 恒 0/空；
+            // 旧键逐字不变）。
+            explodeRead,
+            explodeFully,
+            explodePartial,
+            explodeFailed,
+            explodeSymbolCandidates = explodeCandidateDtos
         }, SemanticJsonOpts));
         return 0;
     }
