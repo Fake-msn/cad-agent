@@ -10,7 +10,7 @@ public sealed record ExplodePrimitive(
 
 /// <summary>一实体一次深度炸开取证（spec 切片B §3）。Core 零 COM——纯数据。
 /// FullyExplodable=递归炸开到叶全部成功；NestedTdbCount=炸开后残留 TDb 叶数（0=干净）；
-/// CenterlineJson=桥侧推导的中心线（可为 null）；ReadAt=取证时刻。</summary>
+/// CenterlineJson=通用轴（推导对任意≥2平行线成立；消费侧按 TDbWall/Class 过滤），可为 null；ReadAt=取证时刻。</summary>
 public sealed record ExplodeEvidence(
     string Handle,
     string RxClass,

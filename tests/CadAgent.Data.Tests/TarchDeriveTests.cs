@@ -134,4 +134,100 @@ public class TarchDeriveTests
         Assert.Contains("\"p1\":[0,50,0]", cl);
         Assert.Contains("\"p2\":[100,50,0]", cl);
     }
+
+    // ---- 复审补充 M1：标注回收（上轮 0.9 不得残留授权）----
+
+    [Fact]
+    public void Enrich_Rescan_HandleVanished_AnnotationReclaimed()
+    {
+        var o = new SemanticOverlay();
+        TarchDerive.Enrich(o, new[] { Wall("H1", Line(0, 0, 100, 0), Line(0, 100, 100, 100)) });
+        Assert.Single(o.Annotations);
+
+        // 第二轮证据不含 H1（H9 不满足种子条件）：证据行被陈旧清理删掉，标注必须同步回收。
+        TarchDerive.Enrich(o, new[] { Wall("H9") with { FullyExplodable = false } });
+        Assert.Empty(o.Annotations);
+        Assert.DoesNotContain(o.ExplodeEvidence, e => e.Handle == "H1");
+    }
+
+    [Fact]
+    public void Enrich_Rescan_BboxMismatch_AnnotationReclaimed_RowKept()
+    {
+        var o = new SemanticOverlay();
+        o.UpsertNative(new NativeEntityParam("H2", "TDbWall", SemanticClass.Wall,
+            new Dictionary<string, string>(), new[] { 0.0, 0.0, 0, 100.0, 300.0, 3000 },
+            DateTimeOffset.UtcNow, true, "0dt"));
+        TarchDerive.Enrich(o, new[] { Wall("H2", Line(0, 0, 100, 0), Line(0, 100, 100, 100)) });
+        Assert.Single(o.Annotations);
+
+        // 第二轮 bbox 漂移 → 种子条件不满足（存疑）；行保留，但上轮 0.9 标注必须回收。
+        var drifted = Wall("H2", Line(0, 0, 100, 0), Line(0, 100, 100, 100))
+            with { Bbox = new[] { 0.0, 0, 0, 250, 300, 3000 } };
+        TarchDerive.Enrich(o, new[] { drifted });
+        Assert.Empty(o.Annotations);
+        Assert.Single(o.ExplodeEvidence);
+    }
+
+    // ---- 复审补充 L1：符号块候选正向用例（只披露不落标注）----
+
+    [Fact]
+    public void Enrich_DorLibBlockName_YieldsDoorWindowCandidate_NoAnnotation()
+    {
+        var o = new SemanticOverlay();
+        var ev = Wall("21E00",
+            new ExplodePrimitive("block", new[] { 0.0, 0, 0 }, null, "$DorLib2D$DOOR-TAG"))
+            with { FullyExplodable = false };   // 不触发种子，独立验证"永不落标注"
+        var r = TarchDerive.Enrich(o, new[] { ev });
+
+        var c = Assert.Single(r.SymbolCandidates);
+        Assert.Equal("21E00", c.Handle);
+        Assert.Equal("$DorLib2D$DOOR-TAG", c.BlockName);
+        Assert.Equal("door-window", c.Kind);
+        Assert.Contains("门窗", c.ClassHint);
+        Assert.Empty(o.Annotations);
+    }
+
+    // ---- 复审补充 L3：零宽（重合线）不得给中心线 ----
+
+    [Fact]
+    public void Enrich_ZeroWidthCoincidentLines_NoCenterline()
+    {
+        var o = new SemanticOverlay();
+        o.UpsertNative(new NativeEntityParam("21E00", "TDbWall", SemanticClass.Wall,
+            new Dictionary<string, string> { ["TotalWidth"] = "0" }, null, DateTimeOffset.UtcNow, true, null));
+        TarchDerive.Enrich(o, new[] { Wall("21E00", Line(0, 0, 100, 0), Line(0, 0, 100, 0)) });
+        Assert.Null(o.ExplodeEvidence[0].CenterlineJson);
+    }
+
+    // ---- 复审补充 L4：重扫 XData 不得残留幽灵键，非 XData 参数保留 ----
+
+    [Fact]
+    public void Enrich_Rescan_XData_NoGhostKeys_NonXDataParamsKept()
+    {
+        var o = new SemanticOverlay();
+        o.UpsertNative(new NativeEntityParam("3EB5D", "TDbEquipment", SemanticClass.Equipment,
+            new Dictionary<string, string> { ["PScale"] = "100" }, null, DateTimeOffset.UtcNow, true, null));
+
+        TarchDerive.Enrich(o, new[]
+        {
+            Wall("3EB5D", Line(0, 0, 1, 0)) with
+            {
+                XData = new Dictionary<string, string> { ["HYDRANT_RADIUS"] = "28", ["GONE_KEY"] = "1" },
+            },
+        });
+        Assert.Equal("1", o.NativeEntities.Single(n => n.Handle == "3EB5D").Params["XData:GONE_KEY"]);
+
+        // 第二轮 XData 不再含 GONE_KEY → 该键必须消失（不得叠加残留）。
+        TarchDerive.Enrich(o, new[]
+        {
+            Wall("3EB5D", Line(0, 0, 1, 0)) with
+            {
+                XData = new Dictionary<string, string> { ["HYDRANT_RADIUS"] = "30" },
+            },
+        });
+        var p = o.NativeEntities.Single(n => n.Handle == "3EB5D");
+        Assert.Equal("30", p.Params["XData:HYDRANT_RADIUS"]);
+        Assert.False(p.Params.ContainsKey("XData:GONE_KEY"));
+        Assert.Equal("100", p.Params["PScale"]);
+    }
 }

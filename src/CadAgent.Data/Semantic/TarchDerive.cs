@@ -31,20 +31,23 @@ public static class TarchSymbolPrefixes
 /// <summary>天正深度炸开证据派生（spec 切片B Task6）：中心线推导 + XData 并入原生参数 +
 /// NativeExplode 标注种子 + 符号块候选 + 陈旧证据行清理。纯数据层（零 COM/零 IO）。
 /// 幂等：按句柄 Upsert，重扫刷新 CenterlineJson；重扫先删本轮未读到的证据行（镜像
-/// NativeParamSeeder "当前原生数据"语义）。空/缺基元、null XData 一律按空处理（不 NRE）。</summary>
+/// NativeParamSeeder "当前原生数据"语义）。空/缺基元、null XData 一律按空处理（不 NRE）。
+/// 标注同口径：本轮未成功种子的 NativeExplode 标注一律回收（证据消失/存疑→不得残留授权）。</summary>
 public static class TarchDerive
 {
     private const double ParallelTol = 1e-3;   // |cross(dir, dirK)| 平行判据
     private const double WidthTol = 0.5;       // 推导间距 vs TotalWidth 容差（mm）
     private const double BboxTol = 1e-3;       // 种子的原生/炸开 bbox 逐分量容差
     private const double LengthEps = 1e-9;     // XY 长度下限（退化线剔除）
+    private const double ZeroWidthEps = 1e-6;  // 推导宽度下限（重合线无墙厚，不给中心线）
     private const double NativeExplodeConfidence = 0.9;
     private const int RoundDigits = 3;
 
     private static readonly JsonSerializerOptions JsonOpts = new();
 
     /// <summary>一轮炸开证据落 overlay。返回符号块候选（不落标注）。
-    /// 顺序：先按入参算 live 句柄集 → 删陈旧证据行 → 逐条 upsert（本轮行不会被误删）。</summary>
+    /// 顺序：先按入参算 live 句柄集 → 删陈旧证据行 → 逐条 upsert（本轮行不会被误删）
+    /// → 回收本轮未成功种子的 NativeExplode 标注。</summary>
     public static TarchDeriveResult Enrich(SemanticOverlay overlay, IReadOnlyList<ExplodeEvidence> evidences)
     {
         ArgumentNullException.ThrowIfNull(overlay);
@@ -58,32 +61,40 @@ public static class TarchDerive
         overlay.ExplodeEvidence.RemoveAll(e => !live.Contains(e.Handle));
 
         var candidates = new List<SymbolCandidate>();
+        var seeded = new HashSet<string>(StringComparer.Ordinal);
         foreach (var ev in list)
         {
             overlay.UpsertExplode(ev with { CenterlineJson = DeriveCenterline(overlay, ev) });
 
-            SeedNativeExplode(overlay, ev);
+            if (SeedNativeExplode(overlay, ev)) seeded.Add(ev.Handle);
             MergeXData(overlay, ev);
             CollectSymbolCandidates(ev, candidates);
         }
+
+        // 标注回收（重扫口径）：证据行消失或本轮种子条件不满足 → 上轮 0.9 不得残留（否则可单凭 SemanticGate 放行）。
+        overlay.Annotations.RemoveAll(a =>
+            a.Provenance == Provenance.NativeExplode && !seeded.Contains(a.TargetHandle));
+
         return new TarchDeriveResult(candidates);
     }
 
     // ---- 种子：Fully && 类已知 && bbox 口径一致（参数面缺失即不比）----
 
-    private static void SeedNativeExplode(SemanticOverlay overlay, ExplodeEvidence ev)
+    /// <summary>返回是否本轮成功种子（供标注回收判定）。</summary>
+    private static bool SeedNativeExplode(SemanticOverlay overlay, ExplodeEvidence ev)
     {
         var cls = TDbClassMap.ClassFor(ev.RxClass);
-        if (!ev.FullyExplodable || cls == SemanticClass.Unknown) return;
+        if (!ev.FullyExplodable || cls == SemanticClass.Unknown) return false;
 
         var p = overlay.NativeEntities.FirstOrDefault(n => n.Handle == ev.Handle);
         if (p?.Bbox is not null && ev.Bbox is not null && !BboxClose(p.Bbox, ev.Bbox, BboxTol))
-            return;   // 原生 bbox 与炸开 bbox 不一致：证据存疑，不种子
+            return false;   // 原生 bbox 与炸开 bbox 不一致：证据存疑，不种子
 
         // UpsertAnnotation 以 (handle+provenance) 去重 → 重扫幂等。
         overlay.UpsertAnnotation(new SemanticAnnotation(
             ev.Handle, cls, Provenance.NativeExplode, NativeExplodeConfidence,
             $"NETLOAD 炸开证据: {ev.RxClass}"));
+        return true;
     }
 
     /// <summary>bbox 逐分量容差比较（仅共同分量；生产者两侧均为 X/Y/Z 六分量）。</summary>
@@ -110,8 +121,10 @@ public static class TarchDerive
 
         var row = overlay.NativeEntities[idx];
         var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+        // 非 XData 参数原样保留；既有 XData:* 一律丢弃后由本轮 XData 重建（否则上轮已消失的键会残留成幽灵）。
         if (row.Params is not null)
-            foreach (var kv in row.Params) merged[kv.Key] = kv.Value;
+            foreach (var kv in row.Params)
+                if (!kv.Key.StartsWith("XData:", StringComparison.Ordinal)) merged[kv.Key] = kv.Value;
         foreach (var kv in xdata)
         {
             if (kv.Key is null || kv.Value is null) continue;   // 空键/空值按缺失处理
@@ -140,7 +153,7 @@ public static class TarchDerive
     // ---- 中心线推导（直墙：平行对 + 宽度匹配）----
 
     /// <summary>直墙中心线：取全部 Kind=="line" 且 6 分量有限的基元，按首线方向归一；
-    /// 每线两端点在法向投影均值=offset；少于 2 条平行线→null。
+    /// 每线两端点在法向投影均值=offset；少于 2 条平行线或推导宽度≈0（重合线）→null。
     /// TotalWidth 存在且可解析时，外线间距须在 0.5mm 内（不可解析按缺失，不拒推）。
     /// 端点=两条外线沿方向的投影区间并集。输出 JSON 固定字段序，分量四舍五入 3 位。</summary>
     private static string? DeriveCenterline(SemanticOverlay overlay, ExplodeEvidence ev)
@@ -148,7 +161,8 @@ public static class TarchDerive
         var segs = CollectLines(ev);
         if (segs.Count < 2) return null;
 
-        // 首线方向归一；法向右旋 90°（n=(-dy,dx)）。
+        // 参考方向取自首条基元线并从首线方向归一；若某类墙首产物为封口线，会判证据不足（fail-safe）。
+        // 法向右旋 90°（n=(-dy,dx)）。
         double dx = segs[0].DirX, dy = segs[0].DirY;
         double nx = -dy, ny = dx;
 
@@ -180,6 +194,7 @@ public static class TarchDerive
         }
 
         double width = maxOff - minOff;
+        if (width <= ZeroWidthEps) return null;   // 重合线（无墙厚）→ 证据不足，不给中心线
         double? totalWidth = TryTotalWidth(overlay, ev.Handle);
         if (totalWidth is double tw && Math.Abs(width - tw) > WidthTol) return null;
 
