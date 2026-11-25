@@ -31,28 +31,29 @@ public class AcadAttachRotTests : IDisposable
     private const int OurPid = 4242;
     private const int ForeignPid = 1111;
 
-    // 主场景：ROT 里同时有他方 PID 的实例与本方实例——按本方 PID 请求只认本方实例
-    // （他方实例即"交接残留/用户自开实例"的那一类，绝不能被附着）。
+    // I-2（PR#31 评审）：该用例只钉住 PID 透传（AttachByPid → RotAttachByPid 的 pid 实参）；
+    // 多候选在 ROT 层的选择由 DefaultRotAttachByPid（私有+P/Invoke，结构性不可单测）承担，
+    // 由真机轮次覆盖。故不得据此宣称"他方实例并存时只认本方"——那是过滤器内部的职责。
     [Fact]
-    public void AttachByPid_ForeignInstanceAlsoRunning_PicksOwnInstanceOnly()
+    public void AttachByPid_PassesOwnPidToFilter()
     {
         var oursApp = new object();
-        var foreignApp = new object();
         var askedPids = new List<int>();
         AcadAttach.RotAttachByPid = (progId, pid) =>
         {
             askedPids.Add(pid);
-            // 同一 ProgID 下他方实例也注册着：按 PID 请求时只能拿到属于该 PID 的那个。
-            return pid == OurPid ? oursApp : foreignApp;
+            return pid == OurPid ? oursApp : null;
         };
 
         var app = AcadAttach.AttachByPid("AutoCAD.Application", OurPid, maxAttempts: 1);
 
         Assert.Same(oursApp, app);
-        Assert.Equal(new[] { OurPid }, askedPids);
+        Assert.Equal(new[] { OurPid }, askedPids);   // 过滤器收到的恰是本方 PID（不写死、不透传 0）
     }
 
     // 只有他方/已退出实例注册（过滤器恒无本方候选）→ 有界轮询耗尽→响亮拒绝（CLI 据此降级）。
+    // M-4：末轮不 Sleep ⇒ maxAttempts=2 只有 1 个节拍（≈1s）。阈值取 1800ms 而非 2500ms：
+    // 后者放过"末轮仍 Sleep"的回归（=2 个节拍≈2s 也判绿），1800ms 才有判别力。
     [Fact]
     public void AttachByPid_OnlyForeignRegistration_ThrowsAfterExhaustion()
     {
@@ -62,26 +63,30 @@ public class AcadAttachRotTests : IDisposable
             calls++;
             return null;   // 过滤后无本方候选（他方/已退出实例不算）
         };
+        var sw = Stopwatch.StartNew();
 
         var ex = Assert.Throws<CadRuntimeException>(
             () => AcadAttach.AttachByPid("AutoCAD.Application", OurPid, maxAttempts: 2));
 
+        sw.Stop();
         Assert.Contains("未见本方 AutoCAD 实例注册", ex.Message);
         Assert.Contains(OurPid.ToString(), ex.Message);
         Assert.Equal(2, calls);
+        Assert.True(sw.Elapsed < TimeSpan.FromMilliseconds(1800), $"耗尽耗时 {sw.ElapsedMilliseconds}ms");
     }
 
-    // 绑定异常被跳过（ROT 枚举内部吞掉、该轮返回 null）→ 下一轮命中本方实例：
-    // 证明"单次绑定失败"不会终止整个附着轮询。
+    // M-1：某轮过滤器返回 null（如该轮的 GetObject 查表对全部 moniker 都判负）→ 下一轮命中本方实例：
+    // 证明"单轮无候选"不会终止整个附着轮询。注意此处语义是 **IRunningObjectTable.GetObject 查表**
+    // （不是 IMoniker.BindToObject 绑定——绑定语义已在评审 follow-up 1 移除）。
     [Fact]
-    public void AttachByPid_BindFailureThenLaterMatch_PicksLaterCandidate()
+    public void AttachByPid_FirstPollNullThenMatch_PicksLaterCandidate()
     {
         var oursApp = new object();
         int calls = 0;
         AcadAttach.RotAttachByPid = (_, pid) =>
         {
             calls++;
-            if (calls == 1) return null;            // 该轮 BindToObject 全部失败（模型：被跳过）
+            if (calls == 1) return null;            // 该轮查表无有效候选（模型：全部判负被跳过）
             return pid == OurPid ? oursApp : null;
         };
 
@@ -92,7 +97,8 @@ public class AcadAttachRotTests : IDisposable
     }
 
     // I2（评审 follow-up 1）：本方进程已退出 → 立即中止，不空转满轮询上界；消息精确钉住。
-    // abortIf 首轮即真 ⇒ 一次 ROT 枚举都不该做（连 1s 节拍都不该等），故 maxAttempts 取大值。
+    // abortIf 首轮即真 ⇒ 一次 ROT 枚举都不该做（连 1s 节拍都不该等）。
+    // M-2：maxAttempts 由 1000 收至 5——首轮即中止时轮询上界无关紧要，5 已足够区分"中止 vs 空转"。
     [Fact]
     public void AttachByPid_AbortIfTrue_ThrowsExitedMessageOnFirstPoll()
     {
@@ -105,12 +111,38 @@ public class AcadAttachRotTests : IDisposable
         var sw = Stopwatch.StartNew();
 
         var ex = Assert.Throws<CadRuntimeException>(() => AcadAttach.AttachByPid(
-            "AutoCAD.Application", OurPid, maxAttempts: 1000, abortIf: () => true));
+            "AutoCAD.Application", OurPid, maxAttempts: 5, abortIf: () => true));
 
         sw.Stop();
         Assert.Equal("本方 AutoCAD 进程已退出（附着中止）", ex.Message);
         Assert.Equal(0, rotCalls);                             // 首轮即中止：未做无意义的 ROT 枚举
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2));     // 不等 1s 节拍（更不空转 1000s 上界）
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2));     // 不等 1s 节拍（更不空转 5s 上界）
+    }
+
+    // I-1（PR#31 评审）：abortIf **每轮都要问**——不只首轮。场景：首轮进程尚在（abortIf=false）
+    // → 该轮过滤器无候选 → 1 个节拍后进程已退出（abortIf=true）→ 立刻中止，不再做第二轮枚举。
+    // 若把 abortIf 判定提到循环外（只问一次），该用例即退化为满 5 轮 polling（rotCalls=5、≈4s）。
+    [Fact]
+    public void AttachByPid_AbortIfTurnsTrueOnSecondPoll_ThrowsExitedMessage()
+    {
+        int rotCalls = 0;
+        AcadAttach.RotAttachByPid = (_, _) =>
+        {
+            rotCalls++;
+            return null;   // 首轮：本方实例尚未注册（/p 启动慢）
+        };
+        int abortCalls = 0;
+        var sw = Stopwatch.StartNew();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => AcadAttach.AttachByPid(
+            "AutoCAD.Application", OurPid, maxAttempts: 5,
+            abortIf: () => ++abortCalls > 1));   // 第 1 问 false；第 2 问起 true
+
+        sw.Stop();
+        Assert.Equal("本方 AutoCAD 进程已退出（附着中止）", ex.Message);
+        Assert.Equal(1, rotCalls);                // 第二轮判定为"已退出"→ 中止，不再枚举
+        Assert.Equal(2, abortCalls);              // 确实问了两轮（不是首轮就中止）
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"中止耗时 {sw.ElapsedMilliseconds}ms");
     }
 
     // 进程已死 → 候选被排除（ROT 残留的退出实例注册不得被认成本方实例）。
@@ -147,6 +179,29 @@ public class AcadAttachRotTests : IDisposable
         AcadAttach.HwndReader = _ => 7777;
         Assert.False(AcadAttach.OwnedByPid(null, OurPid));           // 无候选
         Assert.False(AcadAttach.OwnedByPid(new object(), 0));        // 无目标 PID
+    }
+
+    // M-3（PR#31 评审）：归属判定的**两个**下游查询各自抛异常时均 fail-closed——
+    // 候选被排除且异常不得逃逸到轮询（否则单轮 COM/系统错误会被当成"附着失败"打死整个进程等待）。
+    [Fact]
+    public void OwnedByPid_WindowProcessIdThrows_Excluded()
+    {
+        AcadAttach.HwndReader = _ => 7777;
+        AcadAttach.PidAlive = _ => true;
+        AcadAttach.WindowProcessId = _ => throw new InvalidOperationException("窗口→PID 查询失败");
+
+        Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 不抛，且不认
+    }
+
+    // M-3：存活判定抛异常（进程查询竞态/无权限）→ 同样 fail-closed。
+    [Fact]
+    public void OwnedByPid_PidAliveThrows_Excluded()
+    {
+        AcadAttach.HwndReader = _ => 7777;
+        AcadAttach.WindowProcessId = _ => OurPid;
+        AcadAttach.PidAlive = _ => throw new InvalidOperationException("存活判定失败");
+
+        Assert.False(AcadAttach.OwnedByPid(new object(), OurPid));   // 不抛，且不认
     }
 
     // 默认存活判定缝（无 COM、无 acad.exe）：非法 PID=false，宿主自身 PID=true。
@@ -335,6 +390,30 @@ public class EnsureAppTArchPidFilterTests : IDisposable
 
         Assert.Contains("未见本方 AutoCAD 实例注册", ex.Message);   // 原根因
         Assert.Contains("ROT 附着超时", ex.Message);               // 回退失败一并披露
+    }
+
+    // M-5（PR#31 评审）：ROT 过滤耗尽 + 回退亦耗尽 → 上抛必须是**耗尽**文案，不是"归属校验失败"。
+    // 两类失败不同源（"根本没附上" vs "附上了但不属于本方"），混同会误导真机排障。
+    // 同时钉住"回退恰发起一次"：PidFallbackAttempts=2 ⇒ ActiveObjectResolver 恰被问 2 次
+    // （即一次 AttachOnly 的完整小预算，而不是两次回退各问 1 次）。
+    [Fact]
+    public void EnsureAppTArch_RotAndFallbackBothExhausted_ReportsExhaustionNotOwnership()
+    {
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadRuntime.PidAttachAttempts = 1;      // 一轮即耗尽
+        AcadRuntime.PidFallbackAttempts = 2;    // 回退小预算（1 个节拍，单测快）
+        AcadAttach.RotAttachByPid = (_, _) => null;
+        int activeCalls = 0;
+        AcadAttach.ActiveObjectResolver = _ => { activeCalls++; return null; };   // 回退亦恒空
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("未见本方 AutoCAD 实例注册", ex.Message);   // 根因=耗尽
+        Assert.Contains("ROT 过滤", ex.Message);
+        Assert.DoesNotContain("归属校验失败", ex.Message);          // 不是归属判定结论
+        Assert.Equal(2, activeCalls);                              // 回退恰一次（一次预算 = 2 次轮询）
     }
 
     // 评审 follow-up 2（守卫）：回退**全局至多一次**——归属不符会再进一轮附着，若闸门每轮重置，

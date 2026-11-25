@@ -126,8 +126,10 @@ public static class AcadAttach
     /// → 读 HWND→窗口 PID→与目标 PID 比对→进程存活→返回**首个命中**者；全不命中→null。
     /// try/catch 只保留在**确实会抛**的环节（HWND 读取/窗口→PID/存活判定，见 <see cref="OwnedByPid"/>）
     /// 与 ROT 层整体（GetRunningObjectTable/EnumRunning/Next 异常→本轮 null，交调用方轮询）。
-    /// 返回的实例对象**不**释放（所有权交给调用方；其余被拒候选/枚举器/ROT 在 finally 内
-    /// best-effort 释放）。不需要 IBindCtx，也不读 moniker 显示名（DisplayName-free）。</summary>
+    /// **释放对称性**（评审 M-8）：moniker 无论接受/拒绝**一律** best-effort 释放——它只是枚举句柄，
+    /// 命中后不再需要；**候选对象只在被拒时释放**——接受的候选所有权转交调用方（若同一 RCW 经不同
+    /// moniker 再次出现，已返回的那个绝不能被这里二次 Release，否则调用方持到的是被减过的引用）。
+    /// 枚举器/ROT 在 finally 内释放；不接受也不读取 moniker 显示名（DisplayName-free）。</summary>
     private static object? DefaultRotAttachByPid(string progId, int pid)
     {
         // progId 参与签名以保持缝口径与诊断一致；过滤维度只有 PID（见 RotAttachByPid 注释）。
@@ -151,8 +153,12 @@ public static class AcadAttach
                 // MK_E_UNAVAILABLE=0x800401E3），**不**抛 COMException——判负即置 null 跳过该候选。
                 // 此形态下 out 形参无定义（未写），不得使用其内容。
                 object? candidate = rot.GetObject(moniker, out object resolved) < 0 ? null : resolved;
-                if (candidate != null && OwnedByPid(candidate, pid)) return candidate;
-                ReleaseQuietly(candidate);
+                if (candidate != null && OwnedByPid(candidate, pid))
+                {
+                    ReleaseQuietly(moniker);      // M-8：moniker 不随命中泄漏（候选已取得，句柄无用）
+                    return candidate;             // 候选所有权转交调用方——此处**不**释放
+                }
+                ReleaseQuietly(candidate);        // M-8：只有被拒候选才释放（接受的绝不二次 Release）
                 ReleaseQuietly(moniker);
             }
             return null;
