@@ -99,7 +99,8 @@ namespace CadAgent.TArchBridge
         }
 
         // 递归炸开：产物继续炸到无 TDb；返回是否"完整"（>0 产物且全非 TDb 且无异常）。
-        internal static bool TryExplodeDeep(Entity ent, string handle, int depth, int maxDepth, List<PrimDto> outp, BridgeResult result)
+        // bounds 非空时在同一次递归里累计叶数与其 bbox 并集（REPLACE 的包含性判据复用本次结果，不再二次炸开）。
+        internal static bool TryExplodeDeep(Entity ent, string handle, int depth, int maxDepth, List<PrimDto> outp, BridgeResult result, LeafBounds bounds = null)
         {
             if (depth > maxDepth) { result.Fails.Add(new FailDto(handle, "递归超深")); return false; }
             DBObjectCollection exploded = null;
@@ -121,6 +122,7 @@ namespace CadAgent.TArchBridge
                     else
                     {
                         outp.Add(new PrimDto(handle, depth, rx2, GeomTokens(e2)));
+                        if (bounds != null) bounds.Add(e2);
                         if (e2 is BlockReference br) result.Blocks.Add(new BlockDto(handle, br.Name, new[] { br.Position.X, br.Position.Y, br.Position.Z }));
                     }
                 }
