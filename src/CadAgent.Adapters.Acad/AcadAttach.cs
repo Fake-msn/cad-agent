@@ -66,8 +66,8 @@ public static class AcadAttach
     /// <summary>ROT 候选过滤器（缝，单测注入；默认 <see cref="DefaultRotAttachByPid"/>）：
     /// 返回**属于 <paramref name="pid"/> 且进程仍存活**的实例对象；无匹配→null（调用方轮询）。
     /// 只按 PID 过滤，不按 ProgID：ROT 显示名是 exe 路径/文档名而非 ProgID，按名过滤会漏掉本方实例。
-    /// COM 层异常（ROT 不可用/枚举失败/查表失败）一律吞掉返回 null——附着是轮询式等待，
-    /// 单轮失败不等于终局。</summary>
+    /// 查表失败（MK_E_UNAVAILABLE）是 **HRESULT 返回值**而非异常（见 <see cref="DefaultRotAttachByPid"/>）；
+    /// ROT 不可用/枚举中断等 COM 层异常一律吞掉返回 null——附着是轮询式等待，单轮失败不等于终局。</summary>
     internal static Func<string, int, object?> RotAttachByPid = DefaultRotAttachByPid;
 
     /// <summary>实例窗口句柄读取缝（默认 <c>(int)app.HWND</c>；单测注入，绝不触 COM）。</summary>
@@ -119,9 +119,13 @@ public static class AcadAttach
 
     /// <summary>默认过滤器：GetRunningObjectTable→EnumRunning→逐个 moniker
     /// **<c>IRunningObjectTable.GetObject</c> 查表直取**（无 moniker 绑定语义——文档 moniker 的
-    /// 服务器已退出时 BindToObject 会触发激活副作用；查表拿不到即 MK_E_UNAVAILABLE，跳过该候选）
+    /// 服务器已退出时 BindToObject 会触发激活副作用）。
+    /// **该接口方法是 PreserveSig**（BCL 签名 <c>int GetObject(IMoniker, out object)</c>，net8.0 实测）：
+    /// 表内已无效时以**返回值** MK_E_UNAVAILABLE(0x800401E3) 报告而**不**抛 COMException——故按
+    /// HRESULT&lt;0 显式判负，把候选置 null 跳过（此时 out 形参无定义/未写，绝不得当候选用）。
     /// → 读 HWND→窗口 PID→与目标 PID 比对→进程存活→返回**首个命中**者；全不命中→null。
-    /// 任何 ROT 层 COM 异常吞掉返回 null（调用方按 1s 节拍轮询，单轮失败不是终局）。
+    /// try/catch 只保留在**确实会抛**的环节（HWND 读取/窗口→PID/存活判定，见 <see cref="OwnedByPid"/>）
+    /// 与 ROT 层整体（GetRunningObjectTable/EnumRunning/Next 异常→本轮 null，交调用方轮询）。
     /// 返回的实例对象**不**释放（所有权交给调用方；其余被拒候选/枚举器/ROT 在 finally 内
     /// best-effort 释放）。不需要 IBindCtx，也不读 moniker 显示名（DisplayName-free）。</summary>
     private static object? DefaultRotAttachByPid(string progId, int pid)
@@ -143,16 +147,10 @@ public static class AcadAttach
                 if (enumMoniker.Next(1, batch, IntPtr.Zero) != 0) break;
                 IMoniker? moniker = batch[0];
                 if (moniker == null) break;
-                object candidate = null!;
-                try
-                {
-                    rot.GetObject(moniker, out candidate);
-                }
-                catch
-                {
-                    // MK_E_UNAVAILABLE（表内已无效）/未注册/查表失败：跳过该候选（非终局）。
-                    candidate = null!;
-                }
+                // PreserveSig（评审 follow-up 2 更正）：失败形态是 HRESULT 返回值（表内无效→
+                // MK_E_UNAVAILABLE=0x800401E3），**不**抛 COMException——判负即置 null 跳过该候选。
+                // 此形态下 out 形参无定义（未写），不得使用其内容。
+                object? candidate = rot.GetObject(moniker, out object resolved) < 0 ? null : resolved;
                 if (candidate != null && OwnedByPid(candidate, pid)) return candidate;
                 ReleaseQuietly(candidate);
                 ReleaseQuietly(moniker);

@@ -337,6 +337,36 @@ public class EnsureAppTArchPidFilterTests : IDisposable
         Assert.Contains("ROT 附着超时", ex.Message);               // 回退失败一并披露
     }
 
+    // 评审 follow-up 2（守卫）：回退**全局至多一次**——归属不符会再进一轮附着，若闸门每轮重置，
+    // 回退就会在嵌套重试里反复追加（反复持有他方实例）。场景：首轮过滤"命中"（对象属他方，
+    // AttachByPid 如实返回）→ 归属不符 → 重试轮过滤耗尽 → 回退一次（仍是他方实例）→ 归属不符 →
+    // 窗口耗尽 → 响亮拒绝。钉住：回退计数恒 1、轮次有界、绝不 Quit 他方实例。
+    [Fact]
+    public void EnsureAppTArch_OwnershipMismatchAcrossRetry_FallbackAtMostOnce()
+    {
+        AcadRuntime.OwnershipRetryWindowOverride = TimeSpan.FromMilliseconds(120);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadRuntime.PidAttachAttempts = 1;      // 每轮只枚举一次（单测不真轮询 180s）
+        AcadRuntime.PidFallbackAttempts = 1;
+        var foreign = new PidFilterGateApp();
+        int rotCalls = 0;
+        // 首轮"命中"他方实例（AttachByPid 因此如实返回对象，不耗尽、不回退）；其后过滤恒无候选。
+        AcadAttach.RotAttachByPid = (_, _) => { rotCalls++; return rotCalls == 1 ? foreign : null; };
+        int activeCalls = 0;
+        AcadAttach.ActiveObjectResolver = _ => { activeCalls++; return foreign; };
+        AcadRuntime.OwnershipMatches = (_, __) => false;   // 注入：归属恒不符（附到的是他方实例）
+        AcadRuntime.TarchProcessCleanup = _ => true;
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("归属校验失败", ex.Message);   // 归属不符响亮拒绝（不静默放行他方实例）
+        Assert.Equal(1, activeCalls);                  // 回退全程只做一次（嵌套重试不重复回退）
+        Assert.Equal(2, rotCalls);                     // 有限轮次：首轮 + 一轮重试即终局（不追加循环）
+        Assert.Equal(0, foreign.QuitCalls);            // 绝不 Quit 他方实例
+    }
+
     // I2：本方进程已退出（fake Process 的 HasExited 经缝注入）→ 附着首轮即中止，
     // 不空转轮询、不回退 GetActiveObject，失败清理仍只处置本方启动进程。
     [Fact]
