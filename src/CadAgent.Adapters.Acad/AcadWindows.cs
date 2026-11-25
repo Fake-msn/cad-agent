@@ -70,19 +70,28 @@ internal static class AcadWindows
     /// 直接回答"附着实例的窗口是不是本方 /p 进程的窗口"——比比对
     /// <c>Process.MainWindowHandle</c> 更精确（启动期该属性可能指向闪屏等非主框架窗口，
     /// 造成"本方实例被误判为他方"的伪失败）。
+    /// B5（技术债批次B）：窗口/PID 事实的**唯一**生产实现与唯一测试缝都在此处——
+    /// AcadAttach（ROT 归属过滤）与 AcadRuntime（附着归属校验）共用本缝，不再各自复制
+    /// P/Invoke 或注入点。参数为窗口句柄（IntPtr），返回 PID 或 0（不可判定）。
     /// </summary>
-    internal static Func<int, int> WindowProcessId = DefaultWindowProcessId;
+    internal static Func<IntPtr, int> WindowProcessId = hWnd =>
+        TryGetWindowProcessId(hWnd, out uint pid) && pid != 0 ? (int)pid : 0;
 
-    private static int DefaultWindowProcessId(int windowHandle)
+    /// <summary>user32 GetWindowThreadProcessId 的生产包装（唯一实现）：成功且非零→true。</summary>
+    internal static bool TryGetWindowProcessId(IntPtr hWnd, out uint pid)
     {
-        try
-        {
-            return GetWindowThreadProcessId(new IntPtr(windowHandle), out uint pid) == 0
-                ? 0
-                : (int)pid;
-        }
-        catch { return 0; }
+        pid = 0;
+        if (hWnd == IntPtr.Zero) return false;
+        try { return GetWindowThreadProcessId(hWnd, out pid) != 0 && pid != 0; }
+        catch { return false; }   // 会话无桌面/句柄失效：不可判定
     }
+
+    /// <summary>
+    /// 附着实例（COM 对象）→ 主窗口句柄缝（B5 统一）：默认读 <c>HWND</c> 属性；
+    /// 读不出（无该属性面/实例退出中）由调用方 catch 并按"不可判定"处理。
+    /// AcadAttach.OwnedByPid 与 AcadRuntime 默认归属判定共用本缝（原两处重复缝已删除）。
+    /// </summary>
+    internal static Func<object?, int> HwndReader = app => (int)((dynamic)app!).HWND;
 
     /// <summary>
     /// 是否存在安全确认框：枚举顶层窗口，标题含"安全"或"Security"（大小写不敏感）即命中。
@@ -98,7 +107,7 @@ internal static class AcadWindows
                 if (found) return false;
                 if (processId != 0)
                 {
-                    if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid != (uint)processId)
+                    if (!TryGetWindowProcessId(hWnd, out uint pid) || pid != (uint)processId)
                         return true;   // 非目标进程→继续枚举
                 }
                 var sb = new StringBuilder(TitleBufferLength);
@@ -179,7 +188,7 @@ internal static class AcadWindows
         {
             EnumWindows((hWnd, _) =>
             {
-                if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid != (uint)processId)
+                if (!TryGetWindowProcessId(hWnd, out uint pid) || pid != (uint)processId)
                     return true;   // 非目标进程→继续枚举（绝不关他方窗口）
                 var sb = new StringBuilder(TitleBufferLength);
                 int len = GetWindowTextW(hWnd, sb, sb.Capacity);

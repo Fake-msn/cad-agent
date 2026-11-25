@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using CadAgent.Core.Cad;
+using CadAgent.TArchBridge.Protocol;
 
 namespace CadAgent.Adapters.Acad;
 
@@ -28,13 +29,13 @@ public static class AcadAttach
     // ROT 枚举通道（fix/acad-rot-pid-filter）：GetRunningObjectTable 在 ole32。
     // 评审 follow-up 1（I1）：候选对象改由 IRunningObjectTable.GetObject 查表直取——不再 CreateBindCtx
     // + IMoniker.BindToObject（绑定语义在文档 moniker 的服务器已退出时会触发激活副作用）。
+    // B6（技术债批次B）：CreateBindCtx 仍要一次（**每轮枚举一次**，供 IMoniker.GetDisplayName
+    // 读显示名做预过滤）——只读名字，不做任何绑定/激活。
     [DllImport("ole32.dll")]
     private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable rot);
 
-    // 窗口→进程 ID（user32；返回 0=不可判定/窗口已销毁）。与 AcadWindows 内的同名 P/Invoke
-    // 各自独立：AcadAttach 不依赖窗口诊断面（AcadWindows 的缝服务关窗/安全框），此处缝专供 ROT 归属过滤。
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+    [DllImport("ole32.dll")]
+    private static extern int CreateBindCtx(int reserved, out IBindCtx ppbc);
 
     // 缝：测试注入替代真 COM 查询（单元测试不得触真机）；默认=ROT GetActiveObject 包装。
     internal static Func<string, object?> ActiveObjectResolver = progid =>
@@ -46,11 +47,14 @@ public static class AcadAttach
     /// <summary>有界轮询附着：启动窗口内 ROT 尚未注册（/p 启动需数秒加载）→ null 后等 1s 重试。
     /// 天正加载慢于普通启动，默认 180 次（180s）覆盖冷启动；耗尽→响亮拒绝（CLI 降级）。
     /// 仅用于"本方 PID 不可判定"（fake/未启动进程、真机 PID 读取失败）的回退路径——可判定时
-    /// 一律走 <see cref="AttachByPid"/>（PID 过滤，不会命中交接残留的他方实例）。</summary>
-    internal static object AttachOnly(string progId, int maxAttempts = 180)
+    /// 一律走 <see cref="AttachByPid"/>（PID 过滤，不会命中交接残留的他方实例）。
+    /// B8（技术债批次B）：可选 <paramref name="abortIf"/> 与 <see cref="AttachByPid"/> 同口径
+    /// （每轮先问；附着总时限由调用方经该谓词施加，超时以异常从谓词内上抛）。</summary>
+    internal static object AttachOnly(string progId, int maxAttempts = 180, Func<bool>? abortIf = null)
     {
         for (int i = 0; i < maxAttempts; i++)
         {
+            if (abortIf != null && abortIf()) throw new CadRuntimeException(ProcessExitedMessage);
             var app = ActiveObjectResolver(progId);
             if (app != null) return app;
             if (i < maxAttempts - 1) Thread.Sleep(1000);   // 末轮不再睡（耗尽即抛，不白等一节拍）
@@ -70,12 +74,6 @@ public static class AcadAttach
     /// ROT 不可用/枚举中断等 COM 层异常一律吞掉返回 null——附着是轮询式等待，单轮失败不等于终局。</summary>
     internal static Func<string, int, object?> RotAttachByPid = DefaultRotAttachByPid;
 
-    /// <summary>实例窗口句柄读取缝（默认 <c>(int)app.HWND</c>；单测注入，绝不触 COM）。</summary>
-    internal static Func<object, int> HwndReader = app => (int)((dynamic)app).HWND;
-
-    /// <summary>窗口句柄→所属进程 ID 缝（默认 user32 GetWindowThreadProcessId；0=不可判定）。</summary>
-    internal static Func<int, int> WindowProcessId = DefaultWindowProcessId;
-
     /// <summary>进程存活判定缝（默认 Process.GetProcessById + HasExited；单测注入）。
     /// ROT 里可能残留已退出实例的注册——归属匹配不够，还须确认进程真的活着。</summary>
     internal static Func<int, bool> PidAlive = DefaultPidAlive;
@@ -83,7 +81,8 @@ public static class AcadAttach
     /// <summary>按 PID 过滤的有界轮询附着：1s 一次（与 <see cref="AttachOnly"/> 同节拍），
     /// 每轮**先问** <paramref name="abortIf"/>：true=本方进程已退出→立即中止
     /// （<see cref="ProcessExitedMessage"/>，不空转满 180s 上界——进程没了再等也无意义）。
-    /// 耗尽→响亮拒绝（消息含本方 PID 与轮询秒数，真机可据此区分"未启动"与"启动过慢"）。
+    /// 耗尽→响亮拒绝：抛内部终局信号 <see cref="RotFilterExhaustedException"/>（消息含本方 PID 与
+    /// 轮询秒数，真机可据此区分"未启动"与"启动过慢"；B7：按类型而非消息文本供上层判定回退）。
     /// 与 <see cref="AttachOnly"/> 的区别：不会附着到"ROT 里当前活动但非本方"的实例。</summary>
     internal static object AttachByPid(
         string progId, int pid, int maxAttempts = 180, Func<bool>? abortIf = null)
@@ -95,7 +94,7 @@ public static class AcadAttach
             if (app != null) return app;
             if (i < maxAttempts - 1) Thread.Sleep(1000);   // 末轮不再睡（耗尽即抛）
         }
-        throw new CadRuntimeException(
+        throw new RotFilterExhaustedException(
             $"未见本方 AutoCAD 实例注册（PID {pid}，ROT 过滤 {maxAttempts}s 超时）");
     }
 
@@ -106,11 +105,11 @@ public static class AcadAttach
     {
         if (app == null || pid <= 0) return false;
         int hwnd;
-        try { hwnd = HwndReader(app); }
+        try { hwnd = AcadWindows.HwndReader(app); }
         catch { return false; }   // HWND 面不可读（无 IDispatch/实例退出中）：跳过该候选
         if (hwnd == 0) return false;
         int ownerPid;
-        try { ownerPid = WindowProcessId(hwnd); }
+        try { ownerPid = AcadWindows.WindowProcessId(new IntPtr(hwnd)); }
         catch { return false; }
         if (ownerPid != pid) return false;
         try { return PidAlive(pid); }
@@ -118,18 +117,22 @@ public static class AcadAttach
     }
 
     /// <summary>默认过滤器：GetRunningObjectTable→EnumRunning→逐个 moniker
-    /// **<c>IRunningObjectTable.GetObject</c> 查表直取**（无 moniker 绑定语义——文档 moniker 的
+    /// **<c>IRunningObjectTable.GetObject</c> 查表直取**（无 moniker 绑定/激活语义——文档 moniker 的
     /// 服务器已退出时 BindToObject 会触发激活副作用）。
+    /// **B6（技术债批次B）显示名预过滤**：每轮枚举创建**一次** <c>IBindCtx</c>，逐 moniker
+    /// <c>GetDisplayName</c> 只读名字（读失败→null→按"不可判定"继续考虑，<see cref="RotDisplayNamePolicy"/>）；
+    /// 显示名明显不是 DWG 实例（非 .dwg / 非 "!" 前缀）→ 释放 moniker 跳过，不再 GetObject。
+    /// 该过滤是保守的（null/读不出仍进查表），只省掉他方 COM 对象（ProgID/TypeLib 等）的无效查表。
     /// **该接口方法是 PreserveSig**（BCL 签名 <c>int GetObject(IMoniker, out object)</c>，net8.0 实测）：
     /// 表内已无效时以**返回值** MK_E_UNAVAILABLE(0x800401E3) 报告而**不**抛 COMException——故按
     /// HRESULT&lt;0 显式判负，把候选置 null 跳过（此时 out 形参无定义/未写，绝不得当候选用）。
     /// → 读 HWND→窗口 PID→与目标 PID 比对→进程存活→返回**首个命中**者；全不命中→null。
-    /// try/catch 只保留在**确实会抛**的环节（HWND 读取/窗口→PID/存活判定，见 <see cref="OwnedByPid"/>）
-    /// 与 ROT 层整体（GetRunningObjectTable/EnumRunning/Next 异常→本轮 null，交调用方轮询）。
+    /// try/catch 只保留在**确实会抛**的环节（显示名/HWND 读取/窗口→PID/存活判定，见 <see cref="OwnedByPid"/>）
+    /// 与 ROT 层整体（CreateBindCtx/GetRunningObjectTable/EnumRunning/Next 异常→本轮 null，交调用方轮询）。
     /// **释放对称性**（评审 M-8）：moniker 无论接受/拒绝**一律** best-effort 释放——它只是枚举句柄，
     /// 命中后不再需要；**候选对象只在被拒时释放**——接受的候选所有权转交调用方（若同一 RCW 经不同
     /// moniker 再次出现，已返回的那个绝不能被这里二次 Release，否则调用方持到的是被减过的引用）。
-    /// 枚举器/ROT 在 finally 内释放；不接受也不读取 moniker 显示名（DisplayName-free）。</summary>
+    /// 枚举器/ROT/bindCtx 在 finally 内释放。</summary>
     private static object? DefaultRotAttachByPid(string progId, int pid)
     {
         // progId 参与签名以保持缝口径与诊断一致；过滤维度只有 PID（见 RotAttachByPid 注释）。
@@ -137,8 +140,11 @@ public static class AcadAttach
         if (pid <= 0) return null;
         IRunningObjectTable? rot = null;
         IEnumMoniker? enumMoniker = null;
+        IBindCtx? bindCtx = null;
         try
         {
+            // B6：bindCtx 每轮枚举创建一次（GetDisplayName 只需它把显示名解析为字符串）。
+            if (CreateBindCtx(0, out bindCtx) < 0 || bindCtx == null) return null;
             if (GetRunningObjectTable(0, out rot) < 0 || rot == null) return null;
             rot.EnumRunning(out enumMoniker);
             if (enumMoniker == null) return null;
@@ -149,6 +155,15 @@ public static class AcadAttach
                 if (enumMoniker.Next(1, batch, IntPtr.Zero) != 0) break;
                 IMoniker? moniker = batch[0];
                 if (moniker == null) break;
+                // B6：显示名预过滤（读失败→null→考虑；null 是"不可判定"不是"排除"）。
+                string? displayName = null;
+                try { moniker.GetDisplayName(bindCtx, null, out displayName); }
+                catch { displayName = null; }
+                if (!RotDisplayNamePolicy.ShouldConsiderMonikerDisplayName(displayName))
+                {
+                    ReleaseQuietly(moniker);      // 预过滤拒绝：moniker 句柄无用，立即释放
+                    continue;
+                }
                 // PreserveSig（评审 follow-up 2 更正）：失败形态是 HRESULT 返回值（表内无效→
                 // MK_E_UNAVAILABLE=0x800401E3），**不**抛 COMException——判负即置 null 跳过该候选。
                 // 此形态下 out 形参无定义（未写），不得使用其内容。
@@ -171,6 +186,7 @@ public static class AcadAttach
         {
             ReleaseQuietly(enumMoniker);
             ReleaseQuietly(rot);
+            ReleaseQuietly(bindCtx);   // B6：每轮创建的 bindCtx 必释放（释放顺序：枚举器→ROT→bindCtx）
         }
     }
 
@@ -184,16 +200,6 @@ public static class AcadAttach
             if (Marshal.IsComObject(comObject)) Marshal.ReleaseComObject(comObject);
         }
         catch { /* 释放 best-effort */ }
-    }
-
-    private static int DefaultWindowProcessId(int windowHandle)
-    {
-        if (windowHandle == 0) return 0;
-        try
-        {
-            return GetWindowThreadProcessId(new IntPtr(windowHandle), out int pid) == 0 ? 0 : pid;
-        }
-        catch { return 0; }   // 会话无桌面/句柄失效：不可判定
     }
 
     private static bool DefaultPidAlive(int pid)

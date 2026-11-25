@@ -103,6 +103,18 @@ public sealed class AcadRuntime : ICadRuntime
     // 小预算即回退——回退只是"过滤这一路可能漏认"的兜底，不应再叠加一个 180s 窗口。
     internal static int PidFallbackAttempts = 3;
 
+    // B8（技术债批次B）：附着总时限（PID 过滤 + 单次回退共用同一 Stopwatch）——超过即响亮中止，
+    // 不再让"过滤 180s + 回退 3s + 归属重试 10s"叠成无界等待。默认 120s 覆盖天正冷启动
+    // （180 次轮询常量保留为单路径上界，总时限是跨路径的硬上界）。
+    internal static TimeSpan AttachTotalDeadline = TimeSpan.FromSeconds(120);
+
+    // 总时限测试缝（单测压到毫秒级保持确定性；生产恒走 120s 默认值）。
+    internal static TimeSpan? AttachTotalDeadlineOverride;
+
+    /// <summary>B8：附着总时限耗尽文案（前缀逐字钉住；秒数按实际时限格式化）。</summary>
+    internal static string AttachDeadlineExhaustedText(TimeSpan total) =>
+        $"附着总时限（{Math.Max(1, (int)Math.Ceiling(total.TotalSeconds))}s）耗尽：PID 过滤与回退均未完成";
+
     // /p 启动参数构造（纯函数，单测钉住 FileName/Arguments/UseShellExecute，不拉起进程）。
     internal static ProcessStartInfo BuildStartInfo(string profileName, string executable) =>
         new ProcessStartInfo
@@ -380,9 +392,36 @@ public sealed class AcadRuntime : ICadRuntime
             // 关窗节拍须在 ROT 附着之前起：模态框会挡住 COM 调用（Gate1/附着均被拒）。
             processId = ProcessIdReader(proc);
             dismissal = StartInformationalDialogDismissal(processId);
-            _app = AttachWithOwnershipRetry(proc, processId);
+            // B8：附着总时限从这里开始计时（PID 过滤、单次回退、归属重试共用同一 Stopwatch）。
+            TimeSpan attachTotal = AttachTotalDeadlineOverride ?? AttachTotalDeadline;
+            var attachClock = Stopwatch.StartNew();
+            void ThrowIfAttachDeadlineExceeded()
+            {
+                if (attachClock.Elapsed >= attachTotal)
+                    throw new CadRuntimeException(AttachDeadlineExhaustedText(attachTotal));
+            }
+            // PID 路径：进程退出（终局）与总时限（响亮中止）合并为同一 abortIf。
+            Func<bool> attachAbort = () =>
+            {
+                ThrowIfAttachDeadlineExceeded();
+                return ProcessExited(proc);
+            };
+            // PID 不可判定的 AttachOnly 路径：旧语义（无进程退出早退）保持，只叠加总时限。
+            Func<bool> deadlineAbort = () =>
+            {
+                ThrowIfAttachDeadlineExceeded();
+                return false;
+            };
+            _app = AttachWithOwnershipRetry(proc, processId, attachAbort, deadlineAbort);
             WaitTArchGate1();
             return _app;
+        }
+        catch (RotFilterExhaustedException ex)
+        {
+            // B7：内部终局信号在公开边界包装为 CadRuntimeException（调用方契约不变）；清理不掩盖根因。
+            DismissInformationalDialogs(processId);
+            CleanupTArchFailure(proc);
+            throw new CadRuntimeException(ex.Message, ex);
         }
         catch
         {
@@ -407,6 +446,8 @@ public sealed class AcadRuntime : ICadRuntime
     //  · 归属不符只清本方**已缓存的附着引用**（_app/_doc/_bridgeLoaded），绝不 Quit 他方实例；
     //  · 本方启动进程句柄 _launchedProc 保留（这不是失败，不得触发进程清理路径）；
     //  · 窗口耗尽 → 沿用原响亮拒绝（外层 catch 的 CleanupTArchFailure 依既有语义清理本方进程）。
+    // B8（技术债批次B）：整段附着（含本重试循环）受调用方传入的**总时限**约束——两个 abortIf
+    // 都先判总时限（超时抛 CadRuntimeException，不进入回退）；归属重试窗口只是子上界。
     internal static TimeSpan OwnershipRetryWindow = TimeSpan.FromSeconds(10);
 
     // 重试窗口测试缝（单测压到毫秒级保持确定性；生产恒走 10s 默认值）。
@@ -415,7 +456,8 @@ public sealed class AcadRuntime : ICadRuntime
     // 单次等待上界（规格 Thread.Sleep(1000)；剩余窗口不足时只睡剩余量，保证总时长有界）。
     private static readonly TimeSpan OwnershipRetryDelay = TimeSpan.FromSeconds(1);
 
-    private dynamic AttachWithOwnershipRetry(Process proc, int processId)
+    private dynamic AttachWithOwnershipRetry(Process proc, int processId,
+        Func<bool> attachAbort, Func<bool> deadlineAbort)
     {
         TimeSpan window = OwnershipRetryWindowOverride ?? OwnershipRetryWindow;
         var sw = Stopwatch.StartNew();
@@ -425,9 +467,10 @@ public sealed class AcadRuntime : ICadRuntime
             // PID 可判定→按本方 PID 过滤的 ROT 附着（不会被交接残留的他方/已退出实例截胡；
             // 进程退出即中止，过滤耗尽则单次回退 GetActiveObject）；
             // PID 不可判定（fake/未启动进程、真机 PID 读取失败）→ 既有 GetActiveObject 口径。
+            // B8：两条路径都共享调用方传入的总时限 abortIf（deadlineAbort 仅供无 PID 路径）。
             dynamic app = processId != 0
-                ? AttachByPidWithFallback(proc, processId, ref fallbackUsed)
-                : AcadAttach.AttachOnly(Profile.ProgId);
+                ? AttachByPidWithFallback(proc, processId, ref fallbackUsed, attachAbort, deadlineAbort)
+                : AcadAttach.AttachOnly(Profile.ProgId, abortIf: deadlineAbort);
             if (OwnershipMatches(app, proc)) return app;
             // 归属不符：只清本方缓存引用（我方尚未把 app 赋给 _app）；绝不 Quit/触碰他方实例。
             _app = null;
@@ -447,17 +490,20 @@ public sealed class AcadRuntime : ICadRuntime
     // I3：ROT 过滤**耗尽**（非进程退出）→ 只做**一次**既有 AttachOnly 小预算回退
     //     （过滤这一路可能因 COM 面差异漏认）；回退亦失败→保留原根因再拼回退诊断上抛。
     //     回退结果照旧过归属校验（纵深防御不留后门）。
-    private dynamic AttachByPidWithFallback(Process proc, int processId, ref bool fallbackUsed)
+    private dynamic AttachByPidWithFallback(Process proc, int processId, ref bool fallbackUsed,
+        Func<bool> attachAbort, Func<bool> deadlineAbort)
     {
         try
         {
             return AcadAttach.AttachByPid(Profile.ProgId, processId,
-                maxAttempts: PidAttachAttempts, abortIf: () => ProcessExited(proc));
+                maxAttempts: PidAttachAttempts, abortIf: attachAbort);
         }
-        catch (CadRuntimeException ex) when (!fallbackUsed && IsRotFilterExhaustion(ex))
+        catch (RotFilterExhaustedException ex) when (!fallbackUsed)
         {
+            // B7：按**类型**判定"过滤耗尽"（不再匹配消息子串）；进程退出中止仍是 CadRuntimeException，
+            // 不进入回退（"已退出"是终局，不得再回退去拿可能已失效的他方实例）。
             fallbackUsed = true;
-            try { return AcadAttach.AttachOnly(Profile.ProgId, PidFallbackAttempts); }
+            try { return AcadAttach.AttachOnly(Profile.ProgId, PidFallbackAttempts, abortIf: deadlineAbort); }
             catch (CadRuntimeException fb)
             {
                 throw new CadRuntimeException(ex.Message + "；回退 GetActiveObject 亦失败：" + fb.Message, ex);
@@ -471,12 +517,6 @@ public sealed class AcadRuntime : ICadRuntime
         try { return ProcExitedReader(proc); }
         catch { return false; }
     }
-
-    // ROT 过滤**耗尽**判定（I3 的触发条件）：只认"未见本方 AutoCAD 实例注册…ROT 过滤 Ns 超时"，
-    // 不认进程退出中止（"已退出"是终局，不得再回退去拿可能已失效的他方实例）。
-    internal static bool IsRotFilterExhaustion(Exception ex) =>
-        ex.Message.Contains("ROT 过滤", StringComparison.Ordinal)
-        && ex.Message.Contains("超时", StringComparison.Ordinal);
 
     // ---- Fix round 3：本方进程信息性模态框自动关窗 ----
     // 标题针（真机实证文案）：只关"不支持硬件加速"这一条信息性提示，其他对话框（安全确认框、
@@ -545,9 +585,10 @@ public sealed class AcadRuntime : ICadRuntime
     internal static Func<Process, bool> TarchProcessCleanup = DefaultTarchProcessCleanup;
     private static readonly TimeSpan TarchCleanupWait = TimeSpan.FromSeconds(10);
 
-    // 复审 finding 4：ROT 附着归属校验缝。HwndReader=实例主窗口句柄（默认 e.HWND）；
-    // OwnershipMatches=归属判定可注入（单测注入 true/false，fake Process 无法携带真实 HWND）。
-    internal static Func<dynamic, int> HwndReader = e => (int)e.HWND;
+    // 复审 finding 4：ROT 附着归属校验缝。实例 HWND 与窗口→PID 均由 AcadWindows 的**唯一**缝提供
+    // （B5 技术债批次B：删除本类重复的 HwndReader——AcadAttach 与 AcadRuntime 共用
+    // AcadWindows.HwndReader / AcadWindows.WindowProcessId；单测注入一处即两路同源）；
+    // OwnershipMatches=归属判定整体可注入（单测注入 true/false，fake Process 无法携带真实 HWND）。
     internal static Func<dynamic, Process, bool> OwnershipMatches = DefaultOwnershipMatches;
 
     // 默认归属判定：实例窗口须属本方启动进程。**进程 ID 优先**（F3）：窗口→PID 与
@@ -562,12 +603,12 @@ public sealed class AcadRuntime : ICadRuntime
     {
         try
         {
-            int hwnd = HwndReader(app);
+            int hwnd = AcadWindows.HwndReader((object)app);
             if (hwnd == 0) return true;
             proc.Refresh();
             int processId;
             try { processId = proc.Id; } catch { processId = 0; }
-            int ownerPid = AcadWindows.WindowProcessId(hwnd);
+            int ownerPid = AcadWindows.WindowProcessId(new IntPtr(hwnd));
             // 双方 PID 可判定 → 精确判定（任何本方窗口都算归属，不因闪屏/主框架差异误拒）。
             if (ownerPid != 0 && processId != 0) return ownerPid == processId;
             long main = proc.MainWindowHandle.ToInt64();

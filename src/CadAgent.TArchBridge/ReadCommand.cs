@@ -123,7 +123,9 @@ namespace CadAgent.TArchBridge
         /// </summary>
         internal static void CollectBlockDefs(BridgeResult result, Database db, Transaction tr)
         {
-            var rows = new List<(string BlockName, string RxClass, bool IsLayout)>();
+            // B0（技术债批次B）：扫描行用具名记录（协议层 BlockDefScanRow）——元组签名需要
+            // net45 System.ValueTuple（该垫片已随批次B删除）；具名记录两腿同源、零垫片。
+            var rows = new List<BlockDefScanRow>();
 
             var bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
             if (bt == null) return;
@@ -160,7 +162,7 @@ namespace CadAgent.TArchBridge
                     catch { continue; }
                     if (!rx.StartsWith("TDb", StringComparison.Ordinal)) continue;
 
-                    rows.Add((blockName, rx, isLayout));
+                    rows.Add(new BlockDefScanRow(blockName, rx, isLayout));
                 }
             }
 

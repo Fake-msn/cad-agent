@@ -968,6 +968,39 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
     }
 
+    // B10（技术债批次B）：运行时厂商解析非 acad（生产口径：无 RuntimeFactory 注入）导致
+    // 深读退化 → 既有拒绝文案尾部追加"（深读需 CADAGENT_RUNTIME=acad）"；审计 verdict
+    // payload 逐字不变（只改 stderr 文本，不新增/改写审计键）。
+    [Fact]
+    public void NonAcadVendor_DeepReadGateRefusal_AppendsVendorHint_AuditPayloadUnchanged()
+    {
+        WriteOverlay(Wall());
+        string plan = WritePlan(
+            """{"planId":"NL-B10","steps":[{"kind":"move","params":{"handle":"21E00","dx":5,"dy":0}}]}""");
+        var origFactory = CommandRouter.RuntimeFactory;
+        var origSelector = CommandRouter.RuntimeSelector;
+        var origCreate = CommandRouter.CreateRuntimeInstance;
+        try
+        {
+            CommandRouter.RuntimeFactory = null;              // 走生产解析口径
+            CommandRouter.RuntimeSelector = () => "zwcad";    // 非 acad 厂商
+            CommandRouter.CreateRuntimeInstance = _ => _rt;    // 注入 fake，绝不构造真厂商 COM
+            var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+            Assert.Equal(1, code);
+            Assert.Contains("逐实体判据未通过", stderr);
+            Assert.Contains("（深读需 CADAGENT_RUNTIME=acad）", stderr);
+            var refused = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-gate-refused");
+            Assert.DoesNotContain("CADAGENT_RUNTIME", refused.Entry.ParamsJson); // 审计载荷不变
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = origFactory;
+            CommandRouter.RuntimeSelector = origSelector;
+            CommandRouter.CreateRuntimeInstance = origCreate;
+        }
+    }
+
     /// <summary>
     /// Fake 厂商运行时（零 COM）：ReadNativeParams 按形态区分——path≠null=天正自开自关
     /// 副本的只读快照（准入重读事实，独立于执行窗口状态）；null=当前活文档（ops 落状态，

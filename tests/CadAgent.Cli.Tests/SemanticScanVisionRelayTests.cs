@@ -157,6 +157,54 @@ public class SemanticScanVisionRelayTests : IDisposable
         Assert.Contains("--vision", errW.ToString());
     }
 
+    // ---- B9（技术债批次B）：--vision 与 --native/--explode 并存 → 用法拒绝 ----
+
+    [Theory]
+    [InlineData("--native")]
+    [InlineData("--explode")]
+    public void SemanticScan_VisionWithNativeOrExplode_UsageRefused_NoRelay(string conflictingFlag)
+    {
+        // relay 只转发视觉读图参数（View headless 入口无 COM 原生读参/桥深读通道）；
+        // 静默丢弃 --native/--explode=诚实缺口。拒绝须先于 relay 与一切副作用
+        //（镜像 --vision+--skill 先例）：seam 捕获必须为 null，stdout 空。
+        string[]? captured = null;
+        CommandRouter.VisionScanSpawn = a => { captured = a; return 0; };
+
+        var (code, stdout, stderr) = Run(
+            "semantic", "scan", "--vision", conflictingFlag, "--drawing", _drawing);
+
+        Assert.Equal(1, code);
+        Assert.Null(captured);                 // 不得进入 relay
+        Assert.Empty(stdout);                  // 无任何扫描输出（先于副作用）
+        Assert.Contains("用法", stderr);
+        Assert.Contains("--vision", stderr);
+        Assert.Contains(conflictingFlag, stderr);
+    }
+
+    [Fact]
+    public void SemanticScan_NativeAlone_NotUsageRejected()
+    {
+        // B9 对照：无 --vision 时 --native 照常走 legacy 语义扫描（不得被并存闸误伤）。
+        // 厂商解析钉为 zwcad（生产降级路径：不构造厂商运行时、不触 COM）→ exit 0 + 加性三键。
+        var origSelector = CommandRouter.RuntimeSelector;
+        CommandRouter.RuntimeSelector = () => "zwcad";
+        CommandRouter.RuntimeFactory = null;
+        try
+        {
+            var (code, stdout, stderr) = Run("semantic", "scan", "--native", "--drawing", _drawing);
+
+            Assert.Equal(0, code);
+            Assert.DoesNotContain("用法", stderr);
+            Assert.Contains("\"nativeRead\"", stdout);
+            Assert.Contains("--native 需 CADAGENT_RUNTIME=acad", stderr);
+        }
+        finally
+        {
+            CommandRouter.RuntimeSelector = origSelector;
+            CommandRouter.RuntimeFactory = null;
+        }
+    }
+
     [Fact]
     public void SemanticScan_Vision_SessionForwarded()
     {
