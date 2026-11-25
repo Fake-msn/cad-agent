@@ -19,6 +19,10 @@ public sealed class SemanticOverlay
     // JSON 加性：旧 overlay 无此字段→反序列化 null→Load 归一为空 List（消费端免判空）。
     public List<NativeEntityParam> NativeEntities { get; set; } = new();
 
+    // 切片B（spec §3）：深度炸开取证独立表——与 NativeEntities 并列，按句柄一键。
+    // JSON 加性：旧 overlay 无此字段→反序列化 null→Load 归一为空 List（消费端免判空）。
+    public List<ExplodeEvidence> ExplodeEvidence { get; set; } = new();
+
     public int Version { get; set; }
 
     public static SemanticOverlay Load(string path)
@@ -28,6 +32,7 @@ public sealed class SemanticOverlay
             : new SemanticOverlay();
         // JSON 显式 null 亦归一为空表（属性初始化仅覆盖字段缺失场景）。
         overlay.NativeEntities ??= new();
+        overlay.ExplodeEvidence ??= new();
         return overlay;
     }
 
@@ -55,6 +60,13 @@ public sealed class SemanticOverlay
     {
         int i = NativeEntities.FindIndex(x => x.Handle == p.Handle);
         if (i >= 0) NativeEntities[i] = p; else NativeEntities.Add(p);
+    }
+
+    // 切片B：按句柄覆盖（同句柄再取证时整条替换，ReadAt/基元/XData 随之更新）。
+    public void UpsertExplode(ExplodeEvidence e)
+    {
+        int i = ExplodeEvidence.FindIndex(x => x.Handle == e.Handle);
+        if (i >= 0) ExplodeEvidence[i] = e; else ExplodeEvidence.Add(e);
     }
 
     public void ConfirmMapping(LayerMapping m)
