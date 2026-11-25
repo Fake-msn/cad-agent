@@ -316,6 +316,137 @@ public class NativeLiveExplodeTests : IDisposable
         Assert.Equal("StaleMismatch", v.GetProperty("paramsVerdict").GetString());
     }
 
+    /// <summary>R16 返工用例 a：move **仅凭炸开门放行**（参数门重读无 21E00 行、炸开证据
+    /// Fully=true 且 bbox 对齐）→ 执行，并按准入快照炸开证据 bbox 做位移读回（参数面
+    /// before-bbox 缺失时的基准回退，R16 子裁定）→ 交付。准入逐字披露 explodeGateHandles。</summary>
+    [Fact]
+    public void Move_ExplodeGateOnly_NoParamsRow_Executes_ReadbackUsesEvidenceBbox()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0) }, new[] { ExplodeRow() });
+        // 参数门重读无 21E00（StaleMismatch）；执行会话可见 21E00（move 可施加）。
+        _rt.PathReadResults.Add(Wall("21F00", "120", 200));
+        _rt.ReadResults.Add(Wall("21E00", "120", 0));
+        _rt.ExplodeReadResults.Add(ExplodeRow());
+        string plan = WritePlan(
+            """{"planId":"NE-7","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
+
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(0, code);
+        Assert.Contains("move:21E00:10:20", _rt.Calls);
+        Assert.True(File.Exists(OutPath));
+        var records = AuditRecords();
+        var gatePass = Assert.Single(records, r => r.Entry.Kind == "native-gate-pass");
+        using (var p = JsonDocument.Parse(gatePass.Entry.ParamsJson))
+            Assert.Equal(new[] { "21E00" },
+                p.RootElement.GetProperty("explodeGateHandles").EnumerateArray()
+                    .Select(h => h.GetString()).ToArray());
+        // 读回按炸开证据 bbox 基准平移通过（after bbox 可得 → 不落降级 readback 键）。
+        var step = Assert.Single(records, r => r.Entry.Kind == "native-live-step");
+        using (var p = JsonDocument.Parse(step.Entry.ParamsJson))
+        {
+            Assert.Equal("move", p.RootElement.GetProperty("kind").GetString());
+            Assert.Equal("21E00", p.RootElement.GetProperty("handle").GetString());
+            Assert.False(p.RootElement.TryGetProperty("readback", out _));
+        }
+        Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    /// <summary>R16 返工用例 b：change-layer **仅凭炸开门**（参数门重读无该句柄行、炸开证据
+    /// 齐全）→ 合并判据本身 Pass，但层名读回无参数面记录可对账 → 准入 fail-closed 拒绝
+    /// reason="change-layer-requires-params"（R16 子裁定）；verdict 双结论照实披露；无 op、不交付。</summary>
+    [Fact]
+    public void ChangeLayer_ExplodeGateOnly_Refused_RequiresParams()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0) }, new[] { ExplodeRow() });
+        _rt.PathReadResults.Add(Wall("21F00", "120", 200));
+        _rt.ReadResults.Add(Wall("21E00", "120", 0));
+        _rt.ExplodeReadResults.Add(ExplodeRow());
+        string plan = WritePlan(
+            """{"planId":"NE-8","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"L"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("change-layer", stderr);
+        Assert.DoesNotContain(_rt.Calls, c => c.StartsWith("change-layer") || c == "saveas");
+        Assert.False(File.Exists(OutPath));
+        var records = AuditRecords();
+        var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+        {
+            Assert.Equal("change-layer-requires-params", p.RootElement.GetProperty("reason").GetString());
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            // 合并判据 Pass（炸开门满足）；拒绝来自 change-layer 专属政策（参数门未过）。
+            Assert.Equal("Pass", v.GetProperty("verdict").GetString());
+            Assert.Equal("StaleMismatch", v.GetProperty("paramsVerdict").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-gate-pass");
+        Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
+    }
+
+    /// <summary>R16 返工用例 c：delete **仅凭炸开门**（参数门重读无该句柄行）→ 放行并执行；
+    /// 读回只验句柄消失（无需 bbox/层名基准，故不受 change-layer 政策约束）→ 交付。</summary>
+    [Fact]
+    public void Delete_ExplodeGateOnly_Executes_AbsenceReadback()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0) }, new[] { ExplodeRow() });
+        _rt.PathReadResults.Add(Wall("21F00", "120", 200));
+        _rt.ReadResults.Add(Wall("21E00", "120", 0));
+        _rt.ExplodeReadResults.Add(ExplodeRow());
+        string plan = WritePlan(
+            """{"planId":"NE-9","steps":[{"kind":"delete","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, _) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(0, code);
+        Assert.Contains("delete:21E00", _rt.Calls);
+        Assert.Empty(_rt.ReadResults); // 句柄已删除（读回缺失即 Pass）
+        Assert.True(File.Exists(OutPath));
+        var records = AuditRecords();
+        var gatePass = Assert.Single(records, r => r.Entry.Kind == "native-gate-pass");
+        using (var p = JsonDocument.Parse(gatePass.Entry.ParamsJson))
+            Assert.Equal(new[] { "21E00" },
+                p.RootElement.GetProperty("explodeGateHandles").EnumerateArray()
+                    .Select(h => h.GetString()).ToArray());
+        var step = Assert.Single(records, r => r.Entry.Kind == "native-live-step");
+        using (var p = JsonDocument.Parse(step.Entry.ParamsJson))
+            Assert.Equal("delete", p.RootElement.GetProperty("kind").GetString());
+        Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    /// <summary>R16 返工用例 d（补充等价类）：move 仅凭炸开门放行，且炸开证据 bbox 也为 null
+    /// （参数门无行 + 炸开无 bbox）→ 读回无任何可核基准 → native-live-failed
+    /// {readback:"no-bbox-baseline"}，不 SaveAs 不交付（不得退化为"无从比对即通过"）。</summary>
+    [Fact]
+    public void Move_ExplodeGateOnly_NoBboxBaseline_FailsFailClosed()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0) },
+            new[] { ExplodeRow() with { Bbox = null } });
+        _rt.PathReadResults.Add(Wall("21F00", "120", 200));
+        _rt.ReadResults.Add(Wall("21E00", "120", 0));
+        _rt.ExplodeReadResults.Add(ExplodeRow() with { Bbox = null });
+        string plan = WritePlan(
+            """{"planId":"NE-10","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("读回无基准", stderr);
+        Assert.Contains("move:21E00:10:20", _rt.Calls); // op 已执行，失败在读回闸
+        Assert.DoesNotContain("saveas", _rt.Calls);
+        Assert.False(File.Exists(OutPath));
+        var records = AuditRecords();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
+        using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+        {
+            Assert.Equal("no-bbox-baseline", p.RootElement.GetProperty("readback").GetString());
+            Assert.Equal("21E00", p.RootElement.GetProperty("handle").GetString());
+        }
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
     /// <summary>白名单扩宽的守卫（保持切片A 契约）：含 explode-native 但缺 handle 参数 →
     /// 不属句柄寻址准入，回落既有 run-rejected；无任何 native-* 审计、无运行时调用。</summary>
     [Fact]
@@ -344,7 +475,8 @@ public class NativeLiveExplodeTests : IDisposable
     /// 抛 CadRuntimeException（顺序守卫：真实契约要求无打开文档）；ReadNativeParams 按形态区分
     /// path（准入重读事实）/null（活文档读回）；ExplodeReplaceByHandle 记录调用、默认从读回集
     /// 移除原句柄（KeepHandleAfterExplode=true 时保留以覆盖读回失败面）并自报 NewCount=4+
-    /// BboxMatch=true；SaveAs 落合成 .live.dwg 字节（让 liveSha 可计算）。
+    /// BboxMatch=true；MoveByHandle 把位移落到读回 bbox（读回事实镜像执行）；SaveAs 落合成
+    /// .live.dwg 字节（让 liveSha 可计算）。
     /// </summary>
     private sealed class FakeExplodeNativeRuntime : ICadRuntime
     {
@@ -408,7 +540,16 @@ public class NativeLiveExplodeTests : IDisposable
             if (i >= 0) ReadResults[i] = ReadResults[i] with { Layer = layer };
         }
 
-        public void MoveByHandle(string hexHandle, double dx, double dy) => Calls.Add($"move:{hexHandle}:{dx}:{dy}");
+        public void MoveByHandle(string hexHandle, double dx, double dy)
+        {
+            Calls.Add($"move:{hexHandle}:{dx}:{dy}");
+            // 读回事实镜像执行：位移落 bbox（仅凭炸开门放行的 move 以炸开证据 bbox 为基准核对）。
+            int i = ReadResults.FindIndex(n => n.Handle == hexHandle);
+            if (i < 0) return;
+            ReadResults[i] = ReadResults[i].Bbox is { Length: 6 } b
+                ? ReadResults[i] with { Bbox = new[] { b[0] + dx, b[1] + dy, b[2], b[3] + dx, b[4] + dy, b[5] } }
+                : ReadResults[i];
+        }
 
         public void DeleteByHandle(string hexHandle)
         {

@@ -163,7 +163,9 @@ public class NativeLiveAdmissionTests : IDisposable
     public void Yellow_HandleStep_RereadMismatch_Refuses_NoOps()
     {
         WriteOverlay(Wall());
-        // 重读 bbox 与 overlay 不符（实体已漂移）→ StaleMismatch 拒绝。
+        // 重读 bbox 与 overlay 不符（实体已漂移）→ 参数门 StaleMismatch；R16：全部步骤走合并
+        // 判据（参数门 ∨ 炸开门），overlay 无该句柄炸开证据 → 合并判据 ExplodeNotRead（炸开门
+        // 拒因优先，R14）——dual verdict 逐字钉死。
         SeedNative(Wall(bbox: new[] { 0.0, 0.0, 0.0, 200.0, 100.0, 3000.0 }));
         string plan = WritePlan(
             """{"planId":"NL-2","steps":[{"kind":"change-layer","params":{"handle":"21E00","layer":"WALL"}}]}""");
@@ -177,9 +179,13 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.False(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
         var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
-        Assert.Contains("StaleMismatch", VerdictsOf(refused));
         using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
-            Assert.Equal("21E00", p.RootElement.GetProperty("verdicts")[0].GetProperty("handle").GetString());
+        {
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            Assert.Equal("ExplodeNotRead", v.GetProperty("verdict").GetString());
+            Assert.Equal("StaleMismatch", v.GetProperty("paramsVerdict").GetString());
+        }
         Assert.DoesNotContain(records, r => r.Entry.Kind.StartsWith("native-live"));
         Assert.DoesNotContain(records, r => r.Entry.Kind == "run-rejected");
     }
@@ -300,7 +306,8 @@ public class NativeLiveAdmissionTests : IDisposable
     [Fact]
     public void Yellow_RereadHandleAbsent_StaleMismatch_Refused()
     {
-        // 满 overlay 但 live 重读无该句柄（stale overlay）→ StaleMismatch 拒绝。
+        // 满 overlay 但 live 重读无该句柄（stale overlay）→ 参数门 StaleMismatch；R16 合并判据
+        // （参数门 ∨ 炸开门）：无炸开证据 → ExplodeNotRead，dual verdict 逐字钉死。
         WriteOverlay(Wall());
         string plan = WritePlan(
             """{"planId":"NL-9","steps":[{"kind":"move","params":{"handle":"21E00","dx":1,"dy":2}}]}""");
@@ -311,7 +318,13 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.DoesNotContain(_rt.Calls, c => c.StartsWith("move"));
         var records = AuditRecords();
         var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
-        Assert.Equal(new[] { "StaleMismatch" }, VerdictsOf(refused));
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+        {
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            Assert.Equal("ExplodeNotRead", v.GetProperty("verdict").GetString());
+            Assert.Equal("StaleMismatch", v.GetProperty("paramsVerdict").GetString());
+        }
         Assert.False(File.Exists(_drawing + ".live.dwg"));
     }
 
@@ -517,7 +530,8 @@ public class NativeLiveAdmissionTests : IDisposable
     [Fact]
     public void OverlayReadIncomplete_RefusedVerdict_NoHandleOps()
     {
-        // overlay 行 ReadOk=false（读参不完整）→ ReadIncomplete 拒绝（理解侧不完整不得放行）。
+        // overlay 行 ReadOk=false（读参不完整）→ 参数门 ReadIncomplete；R16 合并判据无炸开
+        // 证据 → ExplodeNotRead（炸开门拒因优先），dual verdict 逐字钉死。
         WriteOverlay(Wall() with { ReadOk = false });
         SeedNative(Wall());
         string plan = WritePlan(
@@ -531,7 +545,13 @@ public class NativeLiveAdmissionTests : IDisposable
         Assert.False(File.Exists(_drawing + ".live.dwg"));
         var records = AuditRecords();
         var refused = Assert.Single(records, r => r.Entry.Kind == "native-gate-refused");
-        Assert.Equal(new[] { "ReadIncomplete" }, VerdictsOf(refused));
+        using (var p = JsonDocument.Parse(refused.Entry.ParamsJson))
+        {
+            var v = p.RootElement.GetProperty("verdicts")[0];
+            Assert.Equal("21E00", v.GetProperty("handle").GetString());
+            Assert.Equal("ExplodeNotRead", v.GetProperty("verdict").GetString());
+            Assert.Equal("ReadIncomplete", v.GetProperty("paramsVerdict").GetString());
+        }
     }
 
     [Fact]
