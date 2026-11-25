@@ -690,7 +690,7 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
   - **看门狗与硬超时**：NETLOAD 总上限 **3600s**（人工授权动作，人在场未必及时）+ **20s 无进展无条件打印一次**明文指引（检出安全框时附诊断，仍继续等待）；命令等待 **120s**。**硬超时只终止本方** `/p` 启动的进程（既有 `TarchProcessCleanup` 缝，不触 COM、绝不碰他方实例），阻塞中的 COM 异常随后包装为"NETLOAD 超时（3600s）：已终止本方 AutoCAD 会话"。
 
 - **真机证据与断言强度分级**（`outputs/trx6/bridge6.trx` + `outputs/bridge-live-run8.log`；3 通过/1 设计性跳过，1m36s，收尾 0 acad）：
-  - **T1 Passed（18.0s）**：`evidence=343`（探针基线 343）、`tdb=343`、`fully=284`、`notFully=59`、`elapsed=14.9s`。**断言强度**：计数仅断言 **≥300**（343 为**观测值**，精确相等只记日志——标本/天正版本可变属设计内噪声）。`21E00` TDbWall `wrapper=ImpCurve prims=4 bbox=(127749.996,120300,0,127849.996,130100,3000)`——断言 RxClass 逐字 + bbox 逐分量 **1e-2** 容差（桥以 `0.###` 三位小数输出）。`HYDRANT_RADIUS=28` 命中多个 TDbEquipment（3EB5D/3EB5F/…/3EB7D）——断言**任一行等于 28**（不锁句柄、不锁行数）。
+  - **T1 Passed（18.0s）**：`evidence=343`（探针基线 343）、`tdb=343`、`fully=284`、`notFully=59`、`elapsed=14.9s`。**断言强度**：计数仅断言 **≥300**（343 为**观测值**，精确相等只记日志——标本/天正版本可变属设计内噪声）。`21E00` TDbWall `wrapper=ImpCurve prims=4 bbox=(127749.996,120300,0,127849.996,130100,3000)`——断言 RxClass 逐字 + bbox 逐分量 **1e-2** 容差（桥 bbox 已于技术债批次A 改 `"R"` 全精度回环；PRIM/BLOCK 等披露段仍以 `0.###` 三位小数输出）。`HYDRANT_RADIUS=28` 命中多个 TDbEquipment（3EB5D/3EB5F/…/3EB7D）——断言**任一行等于 28**（不锁句柄、不锁行数）。
   - **A4 Passed（23.3s）**：TDbSymbArrow `rows=4`、`notFully=2`，`FAIL handle=321A/328F`（`prims=0 nested=0 bbox=null`）——断言 **≥1 行 FullyExplodable=false**（行数/句柄只记日志）；标本无样本→Skip（不伪造残留）。
   - **T3 Passed（55.2s）**：`REPLACED handle=21E00 newCount=4 bboxMatch=True tolerance=0.001`；`entityCount 1958→1961`（断言 after == before−1+newCount）；读回 `records=342 containsWall=False`（断言原句柄消失）；`.live.dwg` **3,182,297 B** 落盘（断言**存在且 >0**，字节数为观测值）；源件/副本 SHA 与 **acad.CUIX f355d54f…633f63** 前后逐字一致；收尾 **0 acad 残留**（硬断言）。
   - **T2 NotExecuted by design**（Skip"标本无嵌套 TDb 样本"）——措辞更正见下条。
@@ -768,6 +768,19 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **门禁（修复波2，PR#32）**：桥构建 `dotnet build src/CadAgent.TArchBridge/CadAgent.TArchBridge.csproj`（net45）**0 警告 / 0 错误**（`outputs/boundary-completion/bridge-build-fixwave2.log`）；评审侧全量门禁（含真机）**1685 通过 / 0 失败 / 1 跳过**（该 1685 为**基座 6aed7cc 评审口径，非成品门禁**；成品树终局门禁见本块末行 1688）（T5/T6/T7 实跑 3/3，T2 设计性跳过；`outputs/boundary-completion/gate-final.log`、`acad-t567.log`）；本波非真机全量 `dotnet test CadAgent.sln --filter "Category!=RequiresAutoCAD"` — **1674 通过 / 0 失败 / 0 跳过**（较基座 1671 +3：Data +2 / Cli +1；`outputs/boundary-completion/fixwave2-gate-sln.log`）。本波改动后的 T5/T6/T7/A4 真机复跑留控制器侧（本轮不跑 `RequiresAutoCAD`）。
 - **已知口径（记录，不改行为）**：① 准入门不读 `FailReason`（双 null bbox 视同一致；身份判据=句柄+RxClass+Fully+bbox）；② 桥纯函数（`IsDegenerateExtents` 边界 0.999e-6/1e-6、`CollectBlockDefs` 定序）在仓内不可单测——桥 net45 工程不被 net8 测试引用，建议下一片把纯函数下沉 `TArchBridge.Protocol`；③ `BDEF` 遍历为无条件成本（每次 READ 全块表扫描）；④ overlay 定义段无图纸身份继承残留（定义段只按块名+类计数，不携带实例句柄/幅面身份），跨图复用需上层纪律。
 - **成品树终局门禁（含真机，PR#32）：1688 通过 / 0 失败 / 1 设计内 Skip（gate-final2.log；Data 450 / Cli 346 / Acad 163+1skip；桥构建 0/0）**。
+
+**技术债批次 A/B/C 入册（2026-11-26 记录；fix/session-tech-debt @ 69894f1 为 B 基座，本波 C 修复波；追加式注记，旧文 0 删）**：
+
+- **A2 bbox 全精度（"R"）与 net45 非严格回环**：桥 ENTITY 包围盒六分量由 `0.###` 改 `"R"` 回环（`BridgeResult.RoundTrip`）——`0.###` 会把 0.0005 写成 0.000/0.001，"写→解析"丢精度，bbox 作为证据不再可复算。**已知边界**：.NET Framework net45 的 `double.ToString("R")` 有已知不回环位型（≤1 ULP，4.6 前），故消费侧 T1 仍保留 1e-2 容差；宿主/测试侧（net8）`"R"` 严格回环，round-trip 单测逐位钉住。**跟踪项 G17（可选）**：net45 换 `"G17"` 可关掉该 1ULP 缺口（当前不改，容差已覆盖）。
+- **A3 bdef 按需契约**：块定义段（BDEF 行）只在请求键 `bdef=1` 时扫描/输出（`ReadExplodeEvidence(path, includeBlockDefs: true)` 才下发 `BridgeRequest.IncludeBlockDefs`）；未索取时**不输出**、宿主缓存标记"未取"，`ReadExplodeBlockDefs` 响亮拒绝（"没读"不得冒充"读了 0 行"）。旧桥（批次A 之前）对未知请求键**拒绝**——属响亮失败（拼错/旧桥部署须显式更正，不做静默忽略）。
+- **新签名（宿主面）**：`ICadRuntime.ReadExplodeEvidence(string path, bool includeBlockDefs = false)`；`TarchDerive.Enrich(overlay, evidences, blockDefs = null, drawingHash = null)`——A4：本轮图纸哈希逐行盖章到 `BlockDefTdbEntry.DrawingHash`（同名块跨图纸不混读；入参行旧哈希一律被本轮值覆盖，null 亦然）。**DrawingHash 暂无消费者**（只落盘披露；下游按图过滤/比对留后续切片）。
+- **B5 缝统一**：窗口句柄读取/窗口→PID 收敛到 `AcadWindows` 单一生产实现与同一注入点（`AcadAttach` 与 `AcadRuntime` 共用；测试只保存/还原这一对）。
+- **B6/B7 + C-I2 ROT 显示名预过滤（含安全阀）**：每轮枚举创建**一次** `IBindCtx` 读 moniker 显示名，`RotDisplayNamePolicy` 保守判据（null=不可判定→考虑；含 `.dwg`→考虑；`!` 前缀→考虑；其余跳过）。C 波补安全阀：整轮**零** moniker 通过策略 → 全部按"考虑"重查（`AcadAttach.ResolveDisplayNameConsiderations`）——预过滤只省无效查表，不可能整轮漏认；被拒项逐条发 `RotSkipDiagnostics("skip:{displayName}")`（默认 noop，宿主可接日志）。耗尽改按**类型** `RotFilterExhaustedException`（公开面仍包装 `CadRuntimeException`），不再靠消息子串。
+- **B8 + C-I1 相位预算（105 + 15）**：附着总时限 120s 切两段——相位1 `AttachByPid` 轮询上界 = 总时限 − `AttachFallbackReserve`(15s) = **105 轮**（旧 180 轮 > 120s 时限使回退分支结构性死代码）；相位1 只受"本方进程退出"中止（不逐轮判时限）。耗尽 → 相位2 **单次** `AttachOnly`（`PidFallbackAttempts=3`）吃保留、受同一 Stopwatch 硬约束；回退全局至多一次（归属重试轮次不重复）。I5 文案分路径：PID 路径 `附着总时限（{secs}s）耗尽：PID 过滤 {elapsed}s 已耗，回退{失败|未完成}`；`AttachOnly`（pid=0）路径 `附着总时限（{secs}s）耗尽：GetActiveObject 附着未完成`（无回退措辞）。
+- **B9 CLI 旗标闸**：`semantic scan --vision` 与 `--skill`/`--native`/`--explode` 并存 → 用法拒绝（exit 1，先于 relay 与一切副作用）；relay 不转发即"静默丢弃=诚实缺口"，故响亮拒绝。
+- **B10 非 acad 指引**：native-live 深读因厂商非 acad 退化时追加 `CADAGENT_RUNTIME=acad` 指引（stderr；审计载荷不变）。
+- **C-I3 非有限清洗口径**：桥侧 NaN/∞ 进 overlay JSON 会让 `System.Text.Json` 抛异常（overlay 保存静默失败）——宿主 `MapExplodeEvidence` 在边界清洗：bbox 任一分量非有限 → 整盒置 `null` + 追加 `bbox:nonfinite`（无既有 FAIL 时该原因即首条）；基元 `Points` 含非有限 → 整条丢弃并按句柄追加一次 `prims:nonfinite:{n}`。清洗留痕可复核（证据行原因），`PrimitiveCount` 只计保留基元。
+- **门禁（本波 C）**：`dotnet test CadAgent.sln --filter "Category!=RequiresAutoCAD"` 全绿（见 outputs/tech-debt/）；桥 `dotnet build src/CadAgent.TArchBridge/CadAgent.TArchBridge.csproj`（net45）0 警告 / 0 错误；本波无 RequiresAutoCAD 实跑（真机口径沿用 PR#32 终局门禁）。
 
 
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）

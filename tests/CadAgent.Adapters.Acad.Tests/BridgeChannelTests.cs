@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using CadAgent.Adapters.Acad;
+using CadAgent.Core;
 using CadAgent.Core.Cad;
+using CadAgent.Data.Semantic;
 using CadAgent.TArchBridge.Protocol;
 using Xunit;
 
@@ -373,6 +375,86 @@ public class BridgeChannelTests : IDisposable
         Assert.Equal(new[] { "explode:eInvalidInput" }, s1.FailReasons!);
         Assert.Null(list.Single(e => e.Handle == "OK1").FailReason);   // 无 FAIL 行 → null
         Assert.Null(list.Single(e => e.Handle == "OK1").FailReasons);
+    }
+
+    // ---- C-I3（技术债批次C）：非有限值卫生——NaN/∞ 不得进 overlay（System.Text.Json 会抛）----
+
+    // bbox 任一非有限分量 → 整盒置 null（不得当可用包围盒）+ 追加去因；无既有 FAIL 时该原因即首条。
+    [Fact]
+    public void MapExplodeEvidence_NonFiniteBbox_SanitizedToNullWithReason()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto(
+            "N1", "TDbWall", "ImpCurve", "0dt",
+            new[] { double.NaN, 0.0, 0.0, 1.0, 1.0, 1.0 }, true));
+        r.Prims.Add(new PrimDto("N1", 0, "AcDbLine", new[] { "start=0,0,0", "end=1,0,0" }));
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Null(e.Bbox);                                     // 不可验：不得冒充可用证据
+        Assert.Equal("bbox:nonfinite", e.FailReason);            // 无既有 FAIL → 该原因成为首条
+        Assert.Equal(new[] { "bbox:nonfinite" }, e.FailReasons!);
+        Assert.Equal(1, e.PrimitiveCount);                       // 基元本身有限：保留
+    }
+
+    // 既有 FAIL 存在时不覆盖首条（首条语义保持桥输出序），非有限原因追加到全量列表。
+    [Fact]
+    public void MapExplodeEvidence_NonFiniteBbox_KeepsExistingFirstReason()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("N2", "TDbWall", null, null, new[] { 0.0, double.PositiveInfinity, 0.0, 1.0, 1.0, 1.0 }, false));
+        r.Fails.Add(new FailDto("N2", "extents:Exception"));
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Null(e.Bbox);
+        Assert.Equal("extents:Exception", e.FailReason);
+        Assert.Equal(new[] { "extents:Exception", "bbox:nonfinite" }, e.FailReasons!);
+    }
+
+    // Points 含非有限分量的基元整条丢弃（不得把 NaN 坐标写进 overlay），丢弃数按句柄计一次。
+    [Fact]
+    public void MapExplodeEvidence_NonFinitePrimitivePoints_DroppedAndCountedOnce()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("P1", "TDbWall", null, null, null, true));
+        r.Prims.Add(new PrimDto("P1", 0, "AcDbLine", new[] { "start=0,0,0", "end=10,0,0" }));          // 保留
+        r.Prims.Add(new PrimDto("P1", 0, "AcDbLine", new[] { "start=NaN,0,0", "end=10,0,0" }));        // 丢弃
+        r.Prims.Add(new PrimDto("P1", 0, "AcDbCircle", new[] { "center=0,Infinity,0" }));              // 丢弃
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Equal(1, e.PrimitiveCount);
+        Assert.Single(e.Primitives);
+        Assert.All(e.Primitives[0].Points, v => Assert.True(double.IsFinite(v)));
+        Assert.Equal(new[] { "prims:nonfinite:2" }, e.FailReasons!);   // 按句柄计一次（不是两行）
+    }
+
+    // 端到端卫生：清洗后的证据经 TarchDerive.Enrich 落 overlay → Save(JSON) 必须成功
+    //（JsonSerializer 默认拒绝 NaN/∞——旧实现会在此抛异常，overlay 保存静默失败）。
+    [Fact]
+    public void MapExplodeEvidence_NonFinite_SanitizedBeforeOverlaySave()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto(
+            "N3", "TDbWall", null, null,
+            new[] { double.NaN, 0.0, 0.0, 1.0, 1.0, 1.0 }, true));
+        r.Prims.Add(new PrimDto("N3", 0, "AcDbLine", new[] { "start=0,0,0", "end=NaN,0,0" }));
+        r.Prims.Add(new PrimDto("N3", 0, "AcDbLine", new[] { "start=0,0,0", "end=5,0,0" }));
+
+        var list = AcadRuntime.MapExplodeEvidence(r);
+        var overlay = new SemanticOverlay();
+        TarchDerive.Enrich(overlay, list, null, "hash-n3");
+        string path = Path.Combine(_dir, "semantic.json");
+
+        overlay.Save(path);   // 旧实现：NaN 进 JSON → 抛异常
+
+        string json = File.ReadAllText(path);
+        Assert.DoesNotContain("NaN", json);
+        var loaded = SemanticOverlay.Load(path);
+        var row = Assert.Single(loaded.ExplodeEvidence);
+        Assert.Null(row.Bbox);
+        Assert.All(row.Primitives.SelectMany(p => p.Points), v => Assert.True(double.IsFinite(v)));
     }
 
     [Fact]

@@ -111,9 +111,40 @@ public sealed class AcadRuntime : ICadRuntime
     // 总时限测试缝（单测压到毫秒级保持确定性；生产恒走 120s 默认值）。
     internal static TimeSpan? AttachTotalDeadlineOverride;
 
-    /// <summary>B8：附着总时限耗尽文案（前缀逐字钉住；秒数按实际时限格式化）。</summary>
-    internal static string AttachDeadlineExhaustedText(TimeSpan total) =>
-        $"附着总时限（{Math.Max(1, (int)Math.Ceiling(total.TotalSeconds))}s）耗尽：PID 过滤与回退均未完成";
+    // C-I1（技术债批次C）：回退保留预算——相位预算把总时限切成两段：
+    //  · 相位1（AttachByPid）上界 = 总时限 - 保留（生产 120s - 15s = 105s）；
+    //  · 相位2（单次 AttachOnly 回退）吃掉这 15s 保留（回退预算 3 轮 ≈ 3s，受同一总时限硬约束）。
+    // 修复的是"180 轮 > 120s 时限"造成的结构性死代码：相位1 永远先耗尽总时限，回退分支永不执行。
+    internal static TimeSpan AttachFallbackReserve = TimeSpan.FromSeconds(15);
+
+    // 保留预算测试缝（单测压到秒级以内保持确定性；生产恒走 15s 默认值）。
+    internal static TimeSpan? AttachFallbackReserveOverride;
+
+    /// <summary>C-I1：有效相位1 轮询上界（纯函数，可单测）：总时限减回退保留后取整秒，
+    /// 再夹到 [1, 配置常量]。生产 180/120s/15s → **105**；预算被保留吃掉 → 1（不出现 0/负数轮）。</summary>
+    internal static int ComputeEffectivePidAttachAttempts(int configuredAttempts, TimeSpan total, TimeSpan reserve)
+    {
+        int budgetSeconds = (int)(total - reserve).TotalSeconds;
+        return Math.Max(1, Math.Min(configuredAttempts, budgetSeconds));
+    }
+
+    /// <summary>C-I1：按当前配置/测试缝计算的有效相位1 轮询上界。</summary>
+    internal static int EffectivePidAttachAttempts() => ComputeEffectivePidAttachAttempts(
+        PidAttachAttempts,
+        AttachTotalDeadlineOverride ?? AttachTotalDeadline,
+        AttachFallbackReserveOverride ?? AttachFallbackReserve);
+
+    /// <summary>C-I1/I5：PID 路径的总时限耗尽文案（秒数按实际时限向上取整、最小 1s）。
+    /// <paramref name="pidFilterSeconds"/> = 相位1（PID 过滤）实际耗时；<paramref name="fallbackRan"/> =
+    /// 回退是否已发起（true=回退相位内超时 → "失败"；false=时限先于回退耗尽 → "未完成"）。</summary>
+    internal static string AttachDeadlineExhaustedText(TimeSpan total, double pidFilterSeconds, bool fallbackRan) =>
+        $"附着总时限（{Math.Max(1, (int)Math.Ceiling(total.TotalSeconds))}s）耗尽：" +
+        $"PID 过滤 {(int)pidFilterSeconds}s 已耗，回退{(fallbackRan ? "失败" : "未完成")}";
+
+    /// <summary>C-I1/I5：AttachOnly（PID 不可判定，pid=0）路径的总时限耗尽文案——该路径无回退相位，
+    /// 不得出现"回退"措辞（避免排障时误以为还有回退分支）。</summary>
+    internal static string AttachDeadlineExhaustedNoPidText(TimeSpan total) =>
+        $"附着总时限（{Math.Max(1, (int)Math.Ceiling(total.TotalSeconds))}s）耗尽：GetActiveObject 附着未完成";
 
     // /p 启动参数构造（纯函数，单测钉住 FileName/Arguments/UseShellExecute，不拉起进程）。
     internal static ProcessStartInfo BuildStartInfo(string profileName, string executable) =>
@@ -394,25 +425,18 @@ public sealed class AcadRuntime : ICadRuntime
             dismissal = StartInformationalDialogDismissal(processId);
             // B8：附着总时限从这里开始计时（PID 过滤、单次回退、归属重试共用同一 Stopwatch）。
             TimeSpan attachTotal = AttachTotalDeadlineOverride ?? AttachTotalDeadline;
-            var attachClock = Stopwatch.StartNew();
-            void ThrowIfAttachDeadlineExceeded()
-            {
-                if (attachClock.Elapsed >= attachTotal)
-                    throw new CadRuntimeException(AttachDeadlineExhaustedText(attachTotal));
-            }
-            // PID 路径：进程退出（终局）与总时限（响亮中止）合并为同一 abortIf。
-            Func<bool> attachAbort = () =>
-            {
-                ThrowIfAttachDeadlineExceeded();
-                return ProcessExited(proc);
-            };
+            // C-I1（技术债批次C）相位预算：相位1（PID 过滤）只受"进程退出"中止，其轮询上界由
+            // 总时限减回退保留收敛（生产 105 轮）；回退相位吃保留、受同一总时限硬约束。
+            var budget = new AttachBudget(attachTotal);
+            // 相位1 的 abortIf：只看本方进程退出（deadline 由相位预算保证，不在轮询中途打断）。
+            Func<bool> pidPhaseAbort = () => ProcessExited(proc);
             // PID 不可判定的 AttachOnly 路径：旧语义（无进程退出早退）保持，只叠加总时限。
             Func<bool> deadlineAbort = () =>
             {
-                ThrowIfAttachDeadlineExceeded();
+                budget.ThrowIfNoPidPathExhausted();
                 return false;
             };
-            _app = AttachWithOwnershipRetry(proc, processId, attachAbort, deadlineAbort);
+            _app = AttachWithOwnershipRetry(proc, processId, pidPhaseAbort, deadlineAbort, budget);
             WaitTArchGate1();
             return _app;
         }
@@ -446,8 +470,10 @@ public sealed class AcadRuntime : ICadRuntime
     //  · 归属不符只清本方**已缓存的附着引用**（_app/_doc/_bridgeLoaded），绝不 Quit 他方实例；
     //  · 本方启动进程句柄 _launchedProc 保留（这不是失败，不得触发进程清理路径）；
     //  · 窗口耗尽 → 沿用原响亮拒绝（外层 catch 的 CleanupTArchFailure 依既有语义清理本方进程）。
-    // B8（技术债批次B）：整段附着（含本重试循环）受调用方传入的**总时限**约束——两个 abortIf
-    // 都先判总时限（超时抛 CadRuntimeException，不进入回退）；归属重试窗口只是子上界。
+    // B8（技术债批次B）+ C-I1（技术债批次C）：整段附着（含本重试循环）受调用方传入的**总时限**
+    // 约束，但相位1（PID 过滤）不逐轮判时限（其轮询上界已由相位预算收敛到"总时限 - 回退保留"）；
+    // 时限判定发生在轮次之间与回退相位内（超时抛 CadRuntimeException，不进入/不重复回退）。
+    // 归属重试窗口只是子上界。
     internal static TimeSpan OwnershipRetryWindow = TimeSpan.FromSeconds(10);
 
     // 重试窗口测试缝（单测压到毫秒级保持确定性；生产恒走 10s 默认值）。
@@ -457,19 +483,21 @@ public sealed class AcadRuntime : ICadRuntime
     private static readonly TimeSpan OwnershipRetryDelay = TimeSpan.FromSeconds(1);
 
     private dynamic AttachWithOwnershipRetry(Process proc, int processId,
-        Func<bool> attachAbort, Func<bool> deadlineAbort)
+        Func<bool> pidPhaseAbort, Func<bool> deadlineAbort, AttachBudget budget)
     {
         TimeSpan window = OwnershipRetryWindowOverride ?? OwnershipRetryWindow;
         var sw = Stopwatch.StartNew();
-        bool fallbackUsed = false;   // I3：整个附着过程只允许一次 GetActiveObject 回退
         while (true)
         {
+            // C-I1：跨相位总时限（轮次之间）——归属重试可能再入相位1；时限已耗尽不得再开新一轮。
+            if (processId != 0) budget.ThrowIfPidPathExhausted();
+            else budget.ThrowIfNoPidPathExhausted();
             // PID 可判定→按本方 PID 过滤的 ROT 附着（不会被交接残留的他方/已退出实例截胡；
             // 进程退出即中止，过滤耗尽则单次回退 GetActiveObject）；
             // PID 不可判定（fake/未启动进程、真机 PID 读取失败）→ 既有 GetActiveObject 口径。
-            // B8：两条路径都共享调用方传入的总时限 abortIf（deadlineAbort 仅供无 PID 路径）。
+            // B8/C-I1：两条路径都受共享总时限约束（有 PID 时：相位预算 + 回退相位）。
             dynamic app = processId != 0
-                ? AttachByPidWithFallback(proc, processId, ref fallbackUsed, attachAbort, deadlineAbort)
+                ? AttachByPidWithFallback(proc, processId, pidPhaseAbort, budget)
                 : AcadAttach.AttachOnly(Profile.ProgId, abortIf: deadlineAbort);
             if (OwnershipMatches(app, proc)) return app;
             // 归属不符：只清本方缓存引用（我方尚未把 app 赋给 _app）；绝不 Quit/触碰他方实例。
@@ -483,31 +511,84 @@ public sealed class AcadRuntime : ICadRuntime
         }
     }
 
-    // ---- 评审 follow-up 1：进程退出 fast-fail + 单次回退 ----
-    // I2：附着轮询带上"本方进程是否已退出"谓词——进程没了就立即中止（响亮上抛），
-    //     不再空转满 180s；HasExited 依 proc **句柄**判定，亦挡住 PID 复用（同号新进程
-    //     不会让已退出的本方句柄复活，故不会把"他方新实例"当成本方实例附着）。
-    // I3：ROT 过滤**耗尽**（非进程退出）→ 只做**一次**既有 AttachOnly 小预算回退
-    //     （过滤这一路可能因 COM 面差异漏认）；回退亦失败→保留原根因再拼回退诊断上抛。
-    //     回退结果照旧过归属校验（纵深防御不留后门）。
-    private dynamic AttachByPidWithFallback(Process proc, int processId, ref bool fallbackUsed,
-        Func<bool> attachAbort, Func<bool> deadlineAbort)
+    // ---- 评审 follow-up 1 + C-I1：相位预算（PID 过滤相位 → 单次回退相位）----
+    // I2：相位1 轮询带"本方进程是否已退出"谓词——进程没了立即中止（响亮上抛），不空转满轮询上界；
+    //     HasExited 依 proc **句柄**判定，亦挡住 PID 复用（同号新进程不会让已退出的本方句柄复活）。
+    // C-I1：相位1 无候选轮询上界 = 总时限 - 回退保留（生产 105s），耗尽后**必有一次**回退相位；
+    //     回退受同一总时限约束（共享 <see cref="AttachBudget"/> 的 Stopwatch），全局至多一次。
+    // I3：回退亦失败→保留原根因再拼回退诊断上抛；总时限耗尽→I5 文案原样上抛（不拼前缀，
+    //     避免把"时限"根因埋进"过滤耗尽"文案）。回退结果照旧过归属校验（纵深防御不留后门）。
+    private dynamic AttachByPidWithFallback(Process proc, int processId,
+        Func<bool> pidPhaseAbort, AttachBudget budget)
     {
+        int attempts = EffectivePidAttachAttempts();
+        _ = proc;   // 进程句柄经 pidPhaseAbort 谓词使用（签名保留与既有调用口径一致）
         try
         {
             return AcadAttach.AttachByPid(Profile.ProgId, processId,
-                maxAttempts: PidAttachAttempts, abortIf: attachAbort);
+                maxAttempts: attempts, abortIf: pidPhaseAbort);
         }
-        catch (RotFilterExhaustedException ex) when (!fallbackUsed)
+        catch (RotFilterExhaustedException ex)
         {
-            // B7：按**类型**判定"过滤耗尽"（不再匹配消息子串）；进程退出中止仍是 CadRuntimeException，
-            // 不进入回退（"已退出"是终局，不得再回退去拿可能已失效的他方实例）。
-            fallbackUsed = true;
-            try { return AcadAttach.AttachOnly(Profile.ProgId, PidFallbackAttempts, abortIf: deadlineAbort); }
+            // B7：按**类型**判定"过滤耗尽"（不再匹配消息子串）。相位1 结束：记录 PID 过滤实际耗时。
+            budget.NotePidFilterPhaseEnd();
+            // 相位1 已耗尽总时限（保留预算也没剩）→ 不再发起回退：I5 "回退未完成" 文案响亮中止。
+            budget.ThrowIfPidPathExhausted();
+            if (budget.FallbackRan)
+            {
+                // 回退全局至多一次：嵌套归属重试轮次不重复回退（保留原根因，公开边界统一包装）。
+                throw new CadRuntimeException(ex.Message, ex);
+            }
+            budget.MarkFallbackStarted();
+            try
+            {
+                return AcadAttach.AttachOnly(Profile.ProgId, PidFallbackAttempts,
+                    abortIf: () => { budget.ThrowIfPidPathExhausted(); return false; });
+            }
             catch (CadRuntimeException fb)
             {
+                // 总时限耗尽：I5 文案原样上抛（"回退失败"已在文案中，不再拼回退前缀）。
+                if (budget.IsExhausted) throw;
                 throw new CadRuntimeException(ex.Message + "；回退 GetActiveObject 亦失败：" + fb.Message, ex);
             }
+        }
+    }
+
+    /// <summary>C-I1（技术债批次C）：附着相位预算（相位1 轮询上界 + 回退保留共享同一 Stopwatch）。
+    /// 只承载时限事实与 I5 文案，不含轮询/COM 逻辑（宿主侧状态机，经 EnsureAppTArch 缝注入驱动）。</summary>
+    private sealed class AttachBudget
+    {
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+        internal AttachBudget(TimeSpan total) => Total = total;
+
+        internal TimeSpan Total { get; }
+
+        /// <summary>回退是否已发起（兼作"全局至多一次"闸门）。</summary>
+        internal bool FallbackRan { get; private set; }
+
+        /// <summary>相位1（PID 过滤）实际耗时（相位1 结束时记录；I5 文案用）。</summary>
+        internal TimeSpan PidFilterElapsed { get; private set; }
+
+        internal bool IsExhausted => _clock.Elapsed >= Total;
+
+        internal void NotePidFilterPhaseEnd() => PidFilterElapsed = _clock.Elapsed;
+
+        internal void MarkFallbackStarted() => FallbackRan = true;
+
+        /// <summary>PID 路径：总时限耗尽 → 抛 I5 文案（回退未发起="未完成"，已发起="失败"）。</summary>
+        internal void ThrowIfPidPathExhausted()
+        {
+            if (!IsExhausted) return;
+            throw new CadRuntimeException(AttachDeadlineExhaustedText(
+                Total, PidFilterElapsed.TotalSeconds, FallbackRan));
+        }
+
+        /// <summary>AttachOnly(pid=0) 路径：总时限耗尽 → 抛不含回退措辞的 I5 文案。</summary>
+        internal void ThrowIfNoPidPathExhausted()
+        {
+            if (!IsExhausted) return;
+            throw new CadRuntimeException(AttachDeadlineExhaustedNoPidText(Total));
         }
     }
 
@@ -1578,11 +1659,15 @@ public sealed class AcadRuntime : ICadRuntime
     }
 
     // 桥结果 → Core 证据列表（纯映射：无 COM、无文件 IO，可单测）。
-    // 口径：PrimitiveCount=该句柄 PRIM 行数（PRIM-TRUNCATED 截断标记不计）；
+    // 口径：PrimitiveCount=该句柄 PRIM 行数（PRIM-TRUNCATED 截断标记不计，非有限坐标基元不计）；
     //       NestedTdbCount=该句柄"递归超深/非实体产物"失败行数（桥不输出残留 TDb 行，
     //       这两类失败即"炸不动的残留"上界；其余失败为 extents/xdata/explode 类，不计残留）；
     //       CenterlineJson 由宿主推导（TarchDerive，Task 6）——此处恒 null；
     //       XData：1001 行=天正键名（探针实证 HYDRANT_RADIUS），随后各值行归入该键。
+    // C-I3（技术债批次C）非有限卫生：NaN/∞ 进 overlay JSON 会让 System.Text.Json 抛异常
+    //（overlay 静默保存失败）——故在映射边界清洗：bbox 任一分量非有限 → 整盒置 null 并落
+    // "bbox:nonfinite" 去因（无既有 FAIL 时该原因即首条）；基元 Points 含非有限 → 整条丢弃，
+    // 按句柄追加一次 "prims:nonfinite:{n}"（n=丢弃数）。清洗后可复核（原因留在证据行）。
     internal static IReadOnlyList<ExplodeEvidence> MapExplodeEvidence(BridgeResult result)
     {
         var now = DateTimeOffset.UtcNow;
@@ -1591,24 +1676,49 @@ public sealed class AcadRuntime : ICadRuntime
         foreach (var e in result.Evidence)
         {
             var prims = new List<ExplodePrimitive>();
+            int droppedPrims = 0;
             foreach (var p in result.Prims)
             {
                 if (!HandleEquals(p.Handle, e.Handle)) continue;
                 if (string.Equals(p.RxClass, "PRIM-TRUNCATED", StringComparison.Ordinal)) continue;
-                prims.Add(MapPrimitive(p, blockQueues));
+                var prim = MapPrimitive(p, blockQueues);
+                if (HasNonFinite(prim.Points)) { droppedPrims++; continue; }   // C-I3：NaN/∞ 坐标不得进 overlay
+                prims.Add(prim);
             }
+            double[]? bbox = e.Bbox;
+            bool bboxNonFinite = bbox != null && HasNonFinite(bbox);
+            if (bboxNonFinite) bbox = null;
+            string? firstReason = FirstFailReason(result.Fails, e.Handle);
+            List<string>? allReasons = AllFailReasons(result.Fails, e.Handle) is { } r
+                ? new List<string>(r)
+                : null;
+            if (bboxNonFinite)
+            {
+                (allReasons ??= new List<string>()).Add("bbox:nonfinite");
+                firstReason ??= "bbox:nonfinite";   // 首条语义：无既有 FAIL 时该原因即首条
+            }
+            if (droppedPrims > 0)
+                (allReasons ??= new List<string>()).Add($"prims:nonfinite:{droppedPrims}");
             list.Add(new ExplodeEvidence(
-                e.Handle, e.RxClass, e.WrapperType, e.Layer, e.Bbox, e.FullyExplodable,
+                e.Handle, e.RxClass, e.WrapperType, e.Layer, bbox, e.FullyExplodable,
                 prims.Count, CountResidualTdb(result.Fails, e.Handle),
                 prims, MapXData(result.XData, e.Handle), null, now,
                 // A2（边界补齐）：该句柄**首条** FAIL 原因（extents:degenerate / extents:Exception /
                 // explode:eInvalidInput 等）如实透出；无失败行=null。宿主不做二次推断。
-                FirstFailReason(result.Fails, e.Handle),
+                firstReason,
                 // PR32：该句柄**全部** FAIL 原因（按桥输出序；加性 JSON 尾字段）——首条之外
                 // 的失败同样可复核（如 SymbArrow 首条 extents:Exception + 次条 explode:eInvalidInput）。
-                AllFailReasons(result.Fails, e.Handle)));
+                allReasons));
         }
         return list;
+    }
+
+    /// <summary>C-I3：坐标序列是否含非有限分量（NaN/±∞）。</summary>
+    private static bool HasNonFinite(double[] values)
+    {
+        foreach (double v in values)
+            if (!double.IsFinite(v)) return true;
+        return false;
     }
 
     /// <summary>该句柄首条 FAIL 行原因（出现序=桥输出序；无匹配→null）。</summary>

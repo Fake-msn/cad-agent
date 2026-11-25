@@ -69,10 +69,49 @@ public static class AcadAttach
 
     /// <summary>ROT 候选过滤器（缝，单测注入；默认 <see cref="DefaultRotAttachByPid"/>）：
     /// 返回**属于 <paramref name="pid"/> 且进程仍存活**的实例对象；无匹配→null（调用方轮询）。
-    /// 只按 PID 过滤，不按 ProgID：ROT 显示名是 exe 路径/文档名而非 ProgID，按名过滤会漏掉本方实例。
+    /// 归属判定的唯一维度是 PID：ROT 显示名是 exe 路径/文档名而非 ProgID，不用于归属结论；
+    /// 它只在查表前做**保守预过滤**（B6），且整轮零候选时安全阀全放行
+    /// （C-I2，见 <see cref="ResolveDisplayNameConsiderations"/>）——预过滤不可能把本方实例整轮漏掉。
     /// 查表失败（MK_E_UNAVAILABLE）是 **HRESULT 返回值**而非异常（见 <see cref="DefaultRotAttachByPid"/>）；
     /// ROT 不可用/枚举中断等 COM 层异常一律吞掉返回 null——附着是轮询式等待，单轮失败不等于终局。</summary>
     internal static Func<string, int, object?> RotAttachByPid = DefaultRotAttachByPid;
+
+    /// <summary>C-I2（技术债批次C）：显示名预过滤的**安全阀 + 诊断**纯逻辑（可单测）。
+    /// 返回与入参等长的"是否考虑"标志；<paramref name="displayNames"/> 为空 → 空判定。
+    /// <para>安全阀：整轮**零** moniker 通过 <see cref="RotDisplayNamePolicy.ShouldConsiderMonikerDisplayName"/>
+    /// 时全部按"考虑"处理（不跳过、不发诊断）——策略判据对真实 ROT 布局判断有误（显示名格式变化、
+    /// 文档 moniker 未注册等）时，本方实例仍会被查表考虑，预过滤不可能成为"整轮漏认"的根因。</para>
+    /// <para>正常路径：被策略拒绝的 moniker 逐条经 <see cref="RotSkipDiagnostics"/> 发
+    /// <c>"skip:{displayName}"</c>（displayName 必非 null——null 是"不可判定"按考虑处理）。</para></summary>
+    internal static bool[] ResolveDisplayNameConsiderations(IReadOnlyList<string?> displayNames)
+    {
+        var considered = new bool[displayNames.Count];
+        int passed = 0;
+        for (int i = 0; i < displayNames.Count; i++)
+        {
+            if (!RotDisplayNamePolicy.ShouldConsiderMonikerDisplayName(displayNames[i])) continue;
+            considered[i] = true;
+            passed++;
+        }
+        if (considered.Length == 0) return considered;
+        if (passed == 0)
+        {
+            // 安全阀：整轮零通过 → 全部按"考虑"（策略失灵时不得整轮漏认）。
+            for (int i = 0; i < considered.Length; i++) considered[i] = true;
+            return considered;
+        }
+        for (int i = 0; i < considered.Length; i++)
+        {
+            if (considered[i]) continue;
+            Action<string>? diag = RotSkipDiagnostics;
+            if (diag != null) diag("skip:" + displayNames[i]);
+        }
+        return considered;
+    }
+
+    /// <summary>C-I2（技术债批次C）：预过滤跳过诊断缝（默认 noop）。在 <see cref="ResolveDisplayNameConsiderations"/>
+    /// 的**正常路径**按被拒 moniker 逐条调用，载荷 <c>"skip:{displayName}"</c>；安全阀轮次不调用。</summary>
+    internal static Action<string> RotSkipDiagnostics = _ => { };
 
     /// <summary>进程存活判定缝（默认 Process.GetProcessById + HasExited；单测注入）。
     /// ROT 里可能残留已退出实例的注册——归属匹配不够，还须确认进程真的活着。</summary>
@@ -121,18 +160,20 @@ public static class AcadAttach
     /// 服务器已退出时 BindToObject 会触发激活副作用）。
     /// **B6（技术债批次B）显示名预过滤**：每轮枚举创建**一次** <c>IBindCtx</c>，逐 moniker
     /// <c>GetDisplayName</c> 只读名字（读失败→null→按"不可判定"继续考虑，<see cref="RotDisplayNamePolicy"/>）；
-    /// 显示名明显不是 DWG 实例（非 .dwg / 非 "!" 前缀）→ 释放 moniker 跳过，不再 GetObject。
-    /// 该过滤是保守的（null/读不出仍进查表），只省掉他方 COM 对象（ProgID/TypeLib 等）的无效查表。
+    /// 显示名明显不是 DWG 实例（非 .dwg / 非 "!" 前缀）→ 不查表。
+    /// **C-I2 安全阀**：先收集整轮 (moniker, 显示名) 再统一判定——若整轮**零** moniker 通过策略，
+    /// 则全部按"考虑"处理（<see cref="ResolveDisplayNameConsiderations"/>），预过滤只省无效查表，
+    /// 永不成为"整轮漏认"的根因；被拒项逐条发 <see cref="RotSkipDiagnostics"/> 诊断供宿主留痕。
     /// **该接口方法是 PreserveSig**（BCL 签名 <c>int GetObject(IMoniker, out object)</c>，net8.0 实测）：
     /// 表内已无效时以**返回值** MK_E_UNAVAILABLE(0x800401E3) 报告而**不**抛 COMException——故按
     /// HRESULT&lt;0 显式判负，把候选置 null 跳过（此时 out 形参无定义/未写，绝不得当候选用）。
     /// → 读 HWND→窗口 PID→与目标 PID 比对→进程存活→返回**首个命中**者；全不命中→null。
     /// try/catch 只保留在**确实会抛**的环节（显示名/HWND 读取/窗口→PID/存活判定，见 <see cref="OwnedByPid"/>）
     /// 与 ROT 层整体（CreateBindCtx/GetRunningObjectTable/EnumRunning/Next 异常→本轮 null，交调用方轮询）。
-    /// **释放对称性**（评审 M-8）：moniker 无论接受/拒绝**一律** best-effort 释放——它只是枚举句柄，
-    /// 命中后不再需要；**候选对象只在被拒时释放**——接受的候选所有权转交调用方（若同一 RCW 经不同
+    /// **释放对称性**（评审 M-8）：moniker 无论接受/拒绝**一律**在 finally best-effort 释放——它只是枚举
+    /// 句柄，命中后不再需要；**候选对象只在被拒时释放**——接受的候选所有权转交调用方（若同一 RCW 经不同
     /// moniker 再次出现，已返回的那个绝不能被这里二次 Release，否则调用方持到的是被减过的引用）。
-    /// 枚举器/ROT/bindCtx 在 finally 内释放。</summary>
+    /// 枚举器/ROT/bindCtx 在 finally 内释放（先释放已收集的 moniker，再枚举器/ROT/bindCtx）。</summary>
     private static object? DefaultRotAttachByPid(string progId, int pid)
     {
         // progId 参与签名以保持缝口径与诊断一致；过滤维度只有 PID（见 RotAttachByPid 注释）。
@@ -141,6 +182,9 @@ public static class AcadAttach
         IRunningObjectTable? rot = null;
         IEnumMoniker? enumMoniker = null;
         IBindCtx? bindCtx = null;
+        // C-I2：先收集整轮候选再统一判定（安全阀需要"整轮零通过"这一全局事实；
+        // 边枚举边跳过无法回头补查）。moniker 统一在 finally 释放（含提前 return 的路径）。
+        var collected = new List<(IMoniker Moniker, string? DisplayName)>();
         try
         {
             // B6：bindCtx 每轮枚举创建一次（GetDisplayName 只需它把显示名解析为字符串）。
@@ -155,26 +199,23 @@ public static class AcadAttach
                 if (enumMoniker.Next(1, batch, IntPtr.Zero) != 0) break;
                 IMoniker? moniker = batch[0];
                 if (moniker == null) break;
-                // B6：显示名预过滤（读失败→null→考虑；null 是"不可判定"不是"排除"）。
+                // B6：显示名只读（读失败→null→考虑；null 是"不可判定"不是"排除"）。
                 string? displayName = null;
                 try { moniker.GetDisplayName(bindCtx, null, out displayName); }
                 catch { displayName = null; }
-                if (!RotDisplayNamePolicy.ShouldConsiderMonikerDisplayName(displayName))
-                {
-                    ReleaseQuietly(moniker);      // 预过滤拒绝：moniker 句柄无用，立即释放
-                    continue;
-                }
+                collected.Add((moniker, displayName));
+            }
+            var considered = ResolveDisplayNameConsiderations(collected.Select(c => c.DisplayName).ToArray());
+            for (int i = 0; i < collected.Count; i++)
+            {
+                if (!considered[i]) continue;   // 预过滤拒绝（诊断已由 ResolveDisplayNameConsiderations 发出）
                 // PreserveSig（评审 follow-up 2 更正）：失败形态是 HRESULT 返回值（表内无效→
                 // MK_E_UNAVAILABLE=0x800401E3），**不**抛 COMException——判负即置 null 跳过该候选。
                 // 此形态下 out 形参无定义（未写），不得使用其内容。
-                object? candidate = rot.GetObject(moniker, out object resolved) < 0 ? null : resolved;
+                object? candidate = rot.GetObject(collected[i].Moniker, out object resolved) < 0 ? null : resolved;
                 if (candidate != null && OwnedByPid(candidate, pid))
-                {
-                    ReleaseQuietly(moniker);      // M-8：moniker 不随命中泄漏（候选已取得，句柄无用）
                     return candidate;             // 候选所有权转交调用方——此处**不**释放
-                }
                 ReleaseQuietly(candidate);        // M-8：只有被拒候选才释放（接受的绝不二次 Release）
-                ReleaseQuietly(moniker);
             }
             return null;
         }
@@ -184,9 +225,10 @@ public static class AcadAttach
         }
         finally
         {
+            foreach (var c in collected) ReleaseQuietly(c.Moniker);   // M-8：moniker 一律释放（含命中路径）
             ReleaseQuietly(enumMoniker);
             ReleaseQuietly(rot);
-            ReleaseQuietly(bindCtx);   // B6：每轮创建的 bindCtx 必释放（释放顺序：枚举器→ROT→bindCtx）
+            ReleaseQuietly(bindCtx);   // B6：每轮创建的 bindCtx 必释放（释放顺序：moniker→枚举器→ROT→bindCtx）
         }
     }
 

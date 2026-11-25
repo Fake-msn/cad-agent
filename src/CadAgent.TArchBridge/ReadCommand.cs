@@ -150,6 +150,10 @@ namespace CadAgent.TArchBridge
                     isLayout = true;
                 if (!isLayout && blockName.StartsWith("*Paper_Space", StringComparison.OrdinalIgnoreCase))
                     isLayout = true;
+                // C-I4（技术债批次C）：布局块在**收集侧**即早退——不构建扫描行（不枚举其实体，
+                // 省掉模型/图纸空间的全量遍历）。聚合器内的 IsLayout 跳过保留为双保险
+                //（扫描行也可能来自其它来源/未来调用方）。
+                if (isLayout) continue;
 
                 foreach (ObjectId entId in btr)
                 {

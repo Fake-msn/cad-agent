@@ -187,6 +187,9 @@ public class SemanticScanVisionRelayTests : IDisposable
         // B9 对照：无 --vision 时 --native 照常走 legacy 语义扫描（不得被并存闸误伤）。
         // 厂商解析钉为 zwcad（生产降级路径：不构造厂商运行时、不触 COM）→ exit 0 + 加性三键。
         var origSelector = CommandRouter.RuntimeSelector;
+        // C-I7：保存/还原原工厂（不得硬编码 null 收尾——生产/上层可能已注入自定义工厂，
+        // 硬编码 null 会把后续用例的注入静默抹掉）。
+        var origFactory = CommandRouter.RuntimeFactory;
         CommandRouter.RuntimeSelector = () => "zwcad";
         CommandRouter.RuntimeFactory = null;
         try
@@ -201,7 +204,7 @@ public class SemanticScanVisionRelayTests : IDisposable
         finally
         {
             CommandRouter.RuntimeSelector = origSelector;
-            CommandRouter.RuntimeFactory = null;
+            CommandRouter.RuntimeFactory = origFactory;
         }
     }
 

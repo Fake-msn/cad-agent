@@ -7,6 +7,9 @@ namespace CadAgent.TArchBridge.Tests;
 /// B6（技术债批次B）：ROT moniker 显示名预过滤 <see cref="RotDisplayNamePolicy.ShouldConsiderMonikerDisplayName"/>。
 /// 口径（保守，宁可多查不可漏认）：null（读不出）→ 考虑；含 ".dwg"（OrdinalIgnoreCase）→ 考虑；
 /// 以 "!" 开头（OLE 链接 moniker）→ 考虑；其余（ProgID/TypeLib 等）→ 跳过。
+/// C-I2（技术债批次C）：策略层"跳过 AutoCAD.Application"是**安全**的——宿主过滤器
+///（AcadAttach.DefaultRotAttachByPid）带安全阀：整轮零 moniker 通过策略时全部按"考虑"重试，
+/// 故策略对真实 ROT 布局判断有误也不会把本方实例整轮漏掉。
 /// </summary>
 public class RotDisplayNamePolicyTests
 {
