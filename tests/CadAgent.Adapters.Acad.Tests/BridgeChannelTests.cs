@@ -798,6 +798,25 @@ public class BridgeChannelTests : IDisposable
         Assert.True(AcadRuntime.IsTrustedDirectory("%TEMP%", Path.GetTempPath()));
     }
 
+    /// <summary>
+    /// M5（PR#30 终审）：盘根条目（<c>C:\</c>/<c>C:/</c>）= **整盘信任**（显式判据：目标同盘即命中，
+    /// 不再依赖 "C:" + StartsWith 的隐式归一）；残缺形态 <c>C:</c>（用户手写无分隔符）**不得**
+    /// 被 GetFullPath 解析成"该盘当前目录"后悄悄放行——非法条目 fail-closed；普通目录条目口径不变。
+    /// </summary>
+    [Fact]
+    public void IsTrustedDirectory_DriveRootEntry_WholeDriveTrust_BareDriveRefused()
+    {
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:\", @"C:\x\y"));      // 根条目→同盘任意路径
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:/", @"c:\x"));        // 正斜杠 + 大小写不敏感
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:\", @"C:\"));         // 目标也是盘根
+        Assert.False(AcadRuntime.IsTrustedDirectory(@"C:\", @"D:\x\y"));     // 他盘不受信
+        Assert.False(AcadRuntime.IsTrustedDirectory("C:", @"C:\x\y"));       // 残缺形态：不匹配
+        // 普通目录条目（回归）：精确/子目录命中，同前缀不命中。
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:\a", @"C:\a"));
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:\a", @"C:\a\b"));
+        Assert.False(AcadRuntime.IsTrustedDirectory(@"C:\a", @"C:\ab"));
+    }
+
     /// <summary>I6：桥命令永不写 .done → 命令等待（BridgeChannel.CommandWait 压到 200ms）超时响亮上抛，
     /// 不挂到生产 120s；失败路径仍只读关闭本文档。</summary>
     [Fact]

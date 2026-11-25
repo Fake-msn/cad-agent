@@ -57,7 +57,10 @@ public static class TarchDerive
             if (e is not null) list.Add(e);
 
         // 陈旧行清理（重扫口径）：本轮未读到的句柄整行移除。
-        var live = new HashSet<string>(list.Select(e => e.Handle), StringComparer.Ordinal);
+        // M7（PR#30 终审）：句柄比较与大表 Upsert 同口径 OrdinalIgnoreCase——旧 Ordinal 会把
+        // "同一实体、大小写不同"的存活行当陈旧行删掉（随后 Upsert 再追加，行序/身份漂移）；
+        // 对齐后：本轮读到的实体一律原地刷新，未读到的整行回收。
+        var live = new HashSet<string>(list.Select(e => e.Handle), StringComparer.OrdinalIgnoreCase);
         overlay.ExplodeEvidence.RemoveAll(e => !live.Contains(e.Handle));
 
         var candidates = new List<SymbolCandidate>();

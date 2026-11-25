@@ -93,6 +93,23 @@ public class TarchDeriveTests
         Assert.Empty(o.ExplodeEvidence);
     }
 
+    // ---- M7（PR#30 终审）：陈旧清理与 Upsert 同口径（OrdinalIgnoreCase）----
+
+    /// <summary>同一实体的混合大小写行：本轮读到的存活行原地刷新（不删后追），未读到的照旧回收——
+    /// 两行场景下"21E00 存活 / 21e01 消失"只能剩一行且句柄为本轮实读形态。</summary>
+    [Fact]
+    public void Enrich_Rescan_MixedCaseRow_ReclaimedByIgnoreCase()
+    {
+        var o = new SemanticOverlay();
+        o.UpsertExplode(Wall("21e00", Line(0, 0, 100, 0)));   // 上轮小写形态（同一实体）
+        o.UpsertExplode(Wall("21e01", Line(0, 0, 100, 0)));   // 上轮另一实体（本轮不再读到）
+
+        TarchDerive.Enrich(o, new[] { Wall("21E00", Line(0, 0, 100, 0)) });   // 本轮大写形态
+
+        var row = Assert.Single(o.ExplodeEvidence);
+        Assert.Equal("21E00", row.Handle);   // 存活行按本轮形态刷新；陈旧行回收
+    }
+
     // ---- 复审补充：空/缺基元防御（T4 注）----
 
     [Fact]

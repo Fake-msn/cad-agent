@@ -77,6 +77,9 @@ namespace CadAgent.Cli;
 /// .live.dwg——此后读回/收尾失败文案改为"已产出 .live.dwg 但未通过读回校验，按失败退出；
 /// 原图零写入"，且 native-live-failed 审计加性带 `liveOutExists`；无 REPLACED（准入/op/
 /// malformed）保持"未交付 .live.dwg"旧文案。
+/// **M4 交付判定收紧（PR#30 终审）**：`liveOutExists`/阶段文案不再只看 REPLACED 是否返回——
+/// 桥内 SaveAs 成功但结果丢失时 REPLACED 回不到宿主；改判"文件存在 ∧ mtime ≥ 会话起点"
+/// （sessionStart 在运行时创建/桥 NETLOAD 之前捕获，上一轮残留文件不计）。
 /// **F2 收尾 SaveAs 去重（同轮）**：宿主 epilogue 仅在**末步 kind≠explode-native** 时
 /// rt.SaveAs（末步炸开=终态已由桥交付，跳过重复写出）；混合计划保留单次宿主 SaveAs
 /// （炸开后仍有句柄步改动保存后状态；同路径 SaveAs=AutoCAD SAVE 语义，真机待验）。
@@ -257,6 +260,11 @@ public static partial class CommandRouter
 
         string outPath = drawingPath + ".live.dwg";
 
+        // M4（PR#30 合并前 ISTQB 终审）：liveout「本轮是否已交付」的判定基线——会话起点取在本计划
+        // 任何会话动作**之前**（早于运行时创建、桥 NETLOAD、桥内 db.SaveAs）。上一轮残留的 .live.dwg
+        // mtime 早于该基线，故不得被当作本轮交付证据。
+        DateTime sessionStartUtc = DateTime.UtcNow;
+
         // 最终复审 F1：阶段感知的失败文案——REPLACED 已成功执行=桥已交付 .live.dwg
         // （桥内 db.SaveAs 在替换时即写出），此后读回/收尾失败不得宣称"未产出"。
         // 标志声明在 RunSession 之外：异常 catch 亦须按阶段诚实报文案/审计。
@@ -264,22 +272,32 @@ public static partial class CommandRouter
         // 最终复审 F2：宿主收尾 SaveAs 的跳过判据（末步 kind==explode-native → 桥已交付终态）。
         string? lastExecutedKind = null;
 
-        // 失败文案后缀（F1）：无 REPLACED → 旧文案逐字保留；有 REPLACED → 已产出但未过读回校验。
-        string FailHint() => replacedExecuted
-            ? "（已产出 .live.dwg 但未通过读回校验，按失败退出；原图零写入）"
-            : "（未交付 .live.dwg，原图零写入）";
-
-        // 加性审计键（F1）：本次会话是否由桥真正产出 liveout 文件（旧残留文件不算）。
+        // 加性审计键（F1）：本次会话是否由桥真正产出 liveout 文件。
+        // M4 更正：不能只看 REPLACED 是否返回——桥内 SaveAs 成功但结果文件丢失/解析失败
+        // （WriteResultAtomic/传输丢失）时 REPLACED 不会回到宿主，旧判据会误报"未交付"。
+        // 改按 **文件存在 ∧ mtime ≥ 会话起点** 判定本轮写出（上一轮残留文件 mtime 早于起点→false）。
         bool LiveOutExists()
         {
-            try { return replacedExecuted && File.Exists(outPath); }
+            try
+            {
+                var info = new FileInfo(outPath);
+                return info.Exists && info.LastWriteTimeUtc >= sessionStartUtc;
+            }
             catch { return false; }
         }
+
+        // 失败文案后缀（F1+M4）：无本轮 liveout → 旧文案逐字保留；有（REPLACED 已返回，或桥已写盘但
+        // 结果丢失使 REPLACED 未回）→ 已产出但未过读回校验。
+        string FailHint() => replacedExecuted || LiveOutExists()
+            ? "（已产出 .live.dwg 但未通过读回校验，按失败退出；原图零写入）"
+            : "（未交付 .live.dwg，原图零写入）";
 
         // I1（复审裁定）静态可判的一半：计划含 explode-native 时深读需求在准入分类即已确定
         // （与参数门结论无关）。此处 fail-fast → 运行时**零副作用**（不建实例、不 Open、不
         // NETLOAD）；纯句柄计划不做此检查（不必有桥，切片A 契约保持），其深读需求在
-        // RunSession 内按参数门结论判定并于 NETLOAD 之前同样预检。
+        // RunSession 内按参数门结论判定并于 NETLOAD 之前同样预检——**口径分层（M2，PR#30 终审）**：
+        // 后者拒绝时实例已存在（参数门重读须先拉起 TArch），但仍在 Open/NETLOAD 之前，
+        // 不得声称"零运行时副作用"。
         if (plan.Steps.Any(s => NormalizeKind(s.Kind) == "explode-native"))
         {
             var bridgeStatic = AcadRuntime.CheckBridgeAvailability();

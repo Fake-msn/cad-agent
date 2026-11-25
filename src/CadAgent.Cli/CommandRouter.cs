@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CadAgent.Adapters.Acad;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
 using CadAgent.Data;
@@ -782,47 +783,77 @@ public static partial class CommandRouter
                 stderr.WriteLine($"--explode: 深度读失败（{ex.Message}），理解侧降级");
             }
 
-            ICadRuntime? explodeRuntime = null;
-            if (RuntimeFactory != null)
+            // I1（PR#30 合并前 ISTQB 终审）：桥可用性预检**先于任何运行时构造**（纯只读：DLL 路径解析 +
+            // 空桩字节扫描 + TRUSTEDPATHS 判定；零实例、零 COM）。深读一旦在桥缺失/空桩/不受信时开跑：
+            // 缺失/空桩得到伪失败，不受信目录会让 NETLOAD 安全框阻塞至 3600s。不可用 → 与读证据失败
+            // 同形态降级（审计 explode-read-failed{reason,dllPath,guidance} + stderr 指引 + 计数全 0 +
+            // exit 0），整个深读块跳过；可用 → 照旧构造运行时。
+            // 注：M9——本失败路径**不 Save overlay**：磁盘上仍保留上一轮证据行（不覆盖、不清理）；
+            // 消费侧须以本轮 semantic-scan 的 explodeRead=0 + explode-read-failed 为准，不得把磁盘旧行
+            // 当本轮新证据。
+            var bridge = AcadRuntime.CheckBridgeAvailability();
+            if (!bridge.Available)
             {
-                try { explodeRuntime = RuntimeFactory(); }
-                catch (Exception ex) { ExplodeReadFailed(ex); }
-            }
-            else if (ResolveRuntimeName() != "acad")
-            {
-                stderr.WriteLine("--explode: 该运行时不支持深度读（--explode 需 CADAGENT_RUNTIME=acad），跳过深度读（理解侧降级）");
+                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                    session, "semantic", "explode-read-failed", drawingPath,
+                    JsonSerializer.Serialize(new
+                    {
+                        reason = bridge.Problem,
+                        dllPath = bridge.DllPath,
+                        guidance = bridge.Guidance
+                    }), hash, hash, "", ""));
+                stderr.WriteLine($"--explode: 桥不可用（{bridge.Problem}）——{bridge.Guidance}；跳过深度读（理解侧降级）");
             }
             else
             {
-                try { explodeRuntime = CreateRuntimeInstance("acad"); }
-                catch (Exception ex) { ExplodeReadFailed(ex); }
-            }
-            if (explodeRuntime is not null)
-            {
-                using (explodeRuntime)
+                ICadRuntime? explodeRuntime = null;
+                bool degradeNotified = false;
+                if (RuntimeFactory != null)
                 {
-                    try
+                    try { explodeRuntime = RuntimeFactory(); }
+                    catch (Exception ex) { ExplodeReadFailed(ex); degradeNotified = true; }
+                }
+                else if (ResolveRuntimeName() != "acad")
+                {
+                    stderr.WriteLine("--explode: 该运行时不支持深度读（--explode 需 CADAGENT_RUNTIME=acad），跳过深度读（理解侧降级）");
+                    degradeNotified = true;
+                }
+                else
+                {
+                    try { explodeRuntime = CreateRuntimeInstance("acad"); }
+                    catch (Exception ex) { ExplodeReadFailed(ex); degradeNotified = true; }
+                }
+                // M8（PR#30 终审）：运行时未产出（RuntimeFactory 返回 null）时旧实现静默跳过——计数全 0
+                // 而 stderr 无任何线索；补一行显式降级提示（异常/不支持厂商路径已各自提示过，不重复）。
+                if (explodeRuntime is null && !degradeNotified)
+                    stderr.WriteLine("--explode: 未配置运行时（RuntimeFactory=null），--explode 跳过（理解侧降级）");
+                if (explodeRuntime is not null)
+                {
+                    using (explodeRuntime)
                     {
-                        var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath);
-                        explodeRead = evidences.Count;
-                        explodeFully = evidences.Count(e => e.FullyExplodable);
-                        // 口径（brief 逐字）：未全炸开且仍有产物=部分；零产物=失败（基元表缺失按空）。
-                        explodePartial = evidences.Count(e =>
-                            !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount > 0);
-                        explodeFailed = evidences.Count(e =>
-                            !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount == 0);
-                        var derive = TarchDerive.Enrich(result.Overlay, evidences);
-                        explodeCandidates = derive.SymbolCandidates;
-                        // 恰一次额外 Save（扫描结果已在上方 Save）：证据行/标注须持久化，否则下次
-                        // scan Load 深度表为空。无 --explode 路径仍恰一次 Save，旧行为逐字不变。
-                        result.Overlay.Save(overlayPath);
-                    }
-                    catch (Exception ex)
-                    {
-                        // 异常前已赋值的计数一律归 0（读证据整体失败=无可用深度事实，诚实口径）。
-                        explodeRead = explodeFully = explodePartial = explodeFailed = 0;
-                        explodeCandidates = Array.Empty<SymbolCandidate>();
-                        ExplodeReadFailed(ex);
+                        try
+                        {
+                            var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath);
+                            explodeRead = evidences.Count;
+                            explodeFully = evidences.Count(e => e.FullyExplodable);
+                            // 口径（brief 逐字）：未全炸开且仍有产物=部分；零产物=失败（基元表缺失按空）。
+                            explodePartial = evidences.Count(e =>
+                                !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount > 0);
+                            explodeFailed = evidences.Count(e =>
+                                !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount == 0);
+                            var derive = TarchDerive.Enrich(result.Overlay, evidences);
+                            explodeCandidates = derive.SymbolCandidates;
+                            // 恰一次额外 Save（扫描结果已在上方 Save）：证据行/标注须持久化，否则下次
+                            // scan Load 深度表为空。无 --explode 路径仍恰一次 Save，旧行为逐字不变。
+                            result.Overlay.Save(overlayPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            // 异常前已赋值的计数一律归 0（读证据整体失败=无可用深度事实，诚实口径）。
+                            explodeRead = explodeFully = explodePartial = explodeFailed = 0;
+                            explodeCandidates = Array.Empty<SymbolCandidate>();
+                            ExplodeReadFailed(ex);
+                        }
                     }
                 }
             }

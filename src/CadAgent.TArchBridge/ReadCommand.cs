@@ -110,7 +110,10 @@ namespace CadAgent.TArchBridge
             {
                 exploded = new DBObjectCollection();
                 ent.Explode(exploded);
-                if (exploded.Count == 0) return false;
+                // M10（PR#30 终审）：零产物也算一次失败事实——否则该行只有 FullyExplodable=false
+                // 而 FAIL 列表为空（复核侧看不出"为何不全炸开"）。文案不落 递归超深/非实体产物
+                // 前缀，故不改变 NestedTdbCount（残留）口径。
+                if (exploded.Count == 0) { result.Fails.Add(new FailDto(handle, "炸开产物为空")); return false; }
                 bool fully = true;
                 foreach (DBObject o in exploded)
                 {

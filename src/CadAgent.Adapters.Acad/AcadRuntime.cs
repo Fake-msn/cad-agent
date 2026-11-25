@@ -1160,12 +1160,18 @@ public sealed class AcadRuntime : ICadRuntime
         return Has(StubMarker);
     }
 
-    /// <summary>TRUSTEDPATHS 只读现值（注册表优先、零实例零 COM；无值→null）。I4：信息性证据。</summary>
+    /// <summary>TRUSTEDPATHS 只读现值（注册表优先、零实例零 COM；无值→null）。
+    /// 用途：① <see cref="CheckBridgeAvailability"/> 的**硬门**判据（深读前拒绝面）；② CLI 深读会话的
+    /// 信任位置快照（加性审计，I4）。两用途同源同值（M1 口径更正：不是"仅信息性"）。</summary>
     public static string? CurrentTrustedPaths() => TrustedPathsSource(TArchProfileName);
 
     /// <summary>
-    /// 信任目录判定（纯函数，无 IO 之外副作用）：TRUSTEDPATHS 分号分隔、条目可带引号/环境变量；
+    /// 信任目录判定（纯函数，仅路径/目录只读探测）：TRUSTEDPATHS 分号分隔、条目可带引号/环境变量；
     /// 条目本身或其**子目录**受信（AutoCAD 信任位置含子目录），比较 OrdinalIgnoreCase + 全路径归一。
+    /// M5（PR#30 终审）：盘根条目（<c>C:\</c>/<c>C:/</c>）= **整盘信任**——这是列盘根的自然语义，
+    /// 改为显式判据（目标首字符为同一盘符即命中），不再依赖 <c>"C:" + StartsWith("C:\\")</c> 的
+    /// 隐式归一匹配；同时**残缺形态 <c>C:</c>（无分隔符，用户手写）不再被 <c>GetFullPath</c> 解析成
+    /// "该盘当前目录"后悄悄放行**——此类条目按非法处理，不匹配任何路径（fail-closed）。
     /// </summary>
     public static bool IsTrustedDirectory(string? trustedPaths, string directory)
     {
@@ -1176,6 +1182,16 @@ public sealed class AcadRuntime : ICadRuntime
             string entry = raw.Trim().Trim('"');
             if (entry.Length == 0) continue;
             try { entry = Environment.ExpandEnvironmentVariables(entry); } catch { /* 保留原串 */ }
+            entry = entry.Trim();
+            if (entry.Length == 0) continue;
+            // 盘根条目（"C:\"/"C:/"）：整盘信任（显式判据，见上）。
+            if (IsDriveRootEntry(entry, out char drive))
+            {
+                if (MatchesDrive(target, drive)) return true;
+                continue;
+            }
+            // 残缺盘符条目（"C:"）：非法，不匹配（绝不退化为"该盘当前目录"）。
+            if (IsBareDriveEntry(entry)) continue;
             string trusted = NormalizeTrustedPath(entry);
             if (trusted.Length == 0) continue;
             if (string.Equals(target, trusted, StringComparison.OrdinalIgnoreCase)) return true;
@@ -1183,6 +1199,25 @@ public sealed class AcadRuntime : ICadRuntime
         }
         return false;
     }
+
+    // 盘根条目判定：恰好 "<盘符>:\" 或 "<盘符>:/"（3 字符，无尾部路径分量）。
+    private static bool IsDriveRootEntry(string entry, out char drive)
+    {
+        drive = default;
+        if (entry.Length != 3 || entry[1] != ':') return false;
+        if (entry[2] != '\\' && entry[2] != '/') return false;
+        if (!char.IsAsciiLetter(entry[0])) return false;
+        drive = char.ToUpperInvariant(entry[0]);
+        return true;
+    }
+
+    // 残缺盘符条目判定：恰好 "<盘符>:"（用户手写无分隔符）——非法，不参与匹配。
+    private static bool IsBareDriveEntry(string entry) =>
+        entry.Length == 2 && entry[1] == ':' && char.IsAsciiLetter(entry[0]);
+
+    // 目标是否在指定盘上（盘根信任的命中判据）：归一后形如 "<盘符>:\..." 或 "<盘符>:"。
+    private static bool MatchesDrive(string target, char drive) =>
+        target.Length >= 2 && target[1] == ':' && char.ToUpperInvariant(target[0]) == drive;
 
     private static string NormalizeTrustedPath(string path)
     {
@@ -1247,9 +1282,12 @@ public sealed class AcadRuntime : ICadRuntime
     /// <summary>
     /// 注册表面读 TRUSTEDPATHS（**只读**，无 COM、不启动进程）：
     /// <c>HKCU\Software\Autodesk\AutoCAD\R19.1\ACAD-*\Profiles\&lt;profileName&gt;\Variables</c>
-    /// 的值 TRUSTEDPATHS（REG_SZ）；枚举 ACAD-* 子键，返回首个非 null 值（空串=「已配置但为空」，
-    /// 与「无此值」语义不同，交调用方如实披露）；全无/不可读→null。
+    /// 的值 TRUSTEDPATHS（REG_SZ）；枚举 ACAD-* 子键，选择候选见
+    /// <see cref="SelectTrustedPathsCandidate"/>（PROFILE 命中优先，其次首个非 null 值）；
+    /// 全无/不可读→null。空串=「已配置但为空」，与「无此值」语义不同，交调用方如实披露。
     /// 只读访问：绝不写注册表、不改任何 AutoCAD 设置。
+    /// M6（PR#30 终审）：多产品子键（同机多 ACAD-* 安装/语言包）不再"首个非 null 即返回"，
+    /// 而是优先取**确实含目标 profile** 的子键（避免拿到无关产品的同名 Variables 值）。
     /// </summary>
     internal static string? ReadTrustedPathsFromRegistry(string profileName)
     {
@@ -1260,13 +1298,19 @@ public sealed class AcadRuntime : ICadRuntime
         {
             using RegistryKey? root = Registry.CurrentUser.OpenSubKey(RegistryProductRoot);
             if (root == null) return null;
-            foreach (string product in root.GetSubKeyNames())
+            // 候选定序（Ordinal）：枚举顺序不承诺稳定，候选选择须确定（回退"首个"亦确定）。
+            var products = root.GetSubKeyNames()
+                .Where(n => n.StartsWith("ACAD-", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToList();
+            if (products.Count == 0) return null;
+            return SelectTrustedPathsCandidate(products, product =>
             {
-                if (!product.StartsWith("ACAD-", StringComparison.OrdinalIgnoreCase)) continue;
-                using RegistryKey? variables = root.OpenSubKey(
-                    product + @"\Profiles\" + profileName + @"\Variables");
-                if (variables?.GetValue(TrustedPathsVariableName) is string value) return value;
-            }
+                using RegistryKey? profile = root.OpenSubKey(product + @"\Profiles\" + profileName);
+                if (profile == null) return (false, null);
+                using RegistryKey? variables = profile.OpenSubKey("Variables");
+                return (true, variables?.GetValue(TrustedPathsVariableName) as string);
+            });
         }
         catch (Exception ex) when (ex is System.Security.SecurityException
                                    or UnauthorizedAccessException or System.IO.IOException)
@@ -1274,7 +1318,30 @@ public sealed class AcadRuntime : ICadRuntime
             return null;   // 只读探测失败按「无该值」处理：回退 COM 兜底 / 守卫如实 Skip，绝不抛
         }
 #pragma warning restore CA1416
-        return null;
+    }
+
+    /// <summary>
+    /// 多产品子键候选选择（纯函数，M6）：按给定顺序逐个探测——
+    /// ① 子键含目标 profile 且值为非 null（含空串=已配置但为空）→ 立即返回该值（PROFILE 命中优先）；
+    /// ② 不含目标 profile 的子键不参与"命中"，但其非 null 值记作回退候选；
+    /// ③ 无任何 PROFILE 命中 → 返回首个非 null 回退值（旧"首个非 null 即返回"行为，仅作兜底）；全无→null。
+    /// </summary>
+    internal static string? SelectTrustedPathsCandidate(
+        IReadOnlyList<string> acadSubkeys,
+        Func<string, (bool HasProfile, string? Value)> probe)
+    {
+        string? fallback = null;
+        foreach (string key in acadSubkeys)
+        {
+            var (hasProfile, value) = probe(key);
+            if (!hasProfile)
+            {
+                fallback ??= value;
+                continue;
+            }
+            if (value != null) return value;
+        }
+        return fallback;
     }
 
     // 注册表读取缝（R17）：默认=ReadTrustedPathsFromRegistry；单测注入以钉住
@@ -1282,9 +1349,11 @@ public sealed class AcadRuntime : ICadRuntime
     internal static Func<string, string?> TrustedPathsSource = ReadTrustedPathsFromRegistry;
 
     /// <summary>
-    /// TRUSTEDPATHS 现值（TRUSTEDPATHS 预检=信息性；真机测试据此决定 Skip/运行）。
-    /// R17：**注册表优先**——不启动实例；仅当注册表无该 profile/值时才回退 COM 实读
-    /// （回退须 /p 拉起实例：启动初始化期 Quit 被忽略会留孤儿，故只作兜底而非主路）。
+    /// TRUSTEDPATHS 现值（<see cref="CheckBridgeAvailability"/> 的硬门判据 + 深读会话快照；真机测试
+    /// 据此决定 Skip/运行）。R17：**注册表优先**——不启动实例；仅当注册表无该 profile/值时才回退 COM
+    /// 实读（回退须 /p 拉起实例：启动初始化期 Quit 被忽略会留孤儿，故只作兜底而非主路）。
+    /// M1 口径更正：预检已从"信息性、不阻断"收紧为**硬门**（native-live 不受信→exit 1；
+    /// `semantic scan --explode`→跳过深读并留痕），见设计 §7.1(f)。
     /// </summary>
     internal string GetTrustedPaths()
     {

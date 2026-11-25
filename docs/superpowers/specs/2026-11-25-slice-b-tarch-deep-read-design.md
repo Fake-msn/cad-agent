@@ -21,7 +21,7 @@
 |---|---|---|
 | `CadAgent.TArchBridge.Protocol` | 新建，**netstandard2.0** | 请求/结果 **TSV** DTO 与解析/序列化（手写，零依赖）；net45 桥与 net8 宿主共用、可直测 |
 | `CadAgent.TArchBridge` | 新建，**net45**（AcMgd/AcDbMgd 19.1 HintPath，`CADAGENT_ACMG_DIR`；引用缺失→编译空桩保持 soln 绿） | 两个**无参命令** `CADAGENT_TARCH_READ` / `CADAGENT_TARCH_EXPLODE_REPLACE`：从 `%CADAGENT_TARCH_CHANNEL%` 读请求、写结果+`.done`；递归 Explode、XData、extents、事务替换、SaveAs |
-| `AcadRuntime` 扩展 | Adapters.Acad，net8 | 桥通道：TRUSTEDPATHS 预检（信息性）→ 启动注入 channel 环境变量 → NETLOAD（看门狗：3600s 总上限/20s 无进展检安全框一次指引/误拒归因 `native-load-denied`）→ SendCommand 命令 → 有界轮询 `.done`（命令 120s）→ 解析 |
+| `AcadRuntime` 扩展 | Adapters.Acad，net8 | 桥通道：TRUSTEDPATHS 预检（**硬门**，见 §7.1(f)；原「信息性」措辞作废）→ 启动注入 channel 环境变量 → NETLOAD（看门狗：3600s 总上限/20s 无进展检安全框一次指引/误拒归因 `native-load-denied`）→ SendCommand 命令 → 有界轮询 `.done`（命令 120s）→ 解析 |
 | `TarchDerive` | Data.Semantic，net8 | 直墙中心线（平行面线对+TotalWidth 匹配→中线；弧墙证据不足→null）、符号块前缀候选披露、XData 并入既有 NativeEntities、NativeExplode 标注种子 |
 | overlay 扩展 | Core | 新表 `ExplodeEvidence`（JSON 加性 null 归一）+ `Provenance.NativeExplode`（0.9） |
 | CLI | Cli | `semantic scan --explode`（可与 `--native` 并用）；stdout/审计加性键 |
@@ -84,7 +84,7 @@ public sealed record ExplodeEvidence(
 CLI semantic scan --explode [--native]
   → ICadRuntime.ReadExplodeEvidence(string drawingPath)（接口默认空实现，Zwcad 不改）
       ├─ EnsureAppTArch(/p)（复用切片 A 启动+忙窗）
-      ├─ TRUSTEDPATHS 预检（GetSystemVariable，信息性记录 trusted 状态）
+      ├─ TRUSTEDPATHS 预检（**硬门**；更正见 §7.1(f)——原「GetSystemVariable，信息性记录」措辞作废：注册表优先只读判定，不受信即跳过深读）
       ├─ Open(path, ReadOnly=true) → 建 channel → 写 req → NETLOAD（看门狗）→ 命令 → 轮询 .done
       ├─ 解析 TSV → ExplodeEvidence 列表（FAIL 行→Partial 标记）
       └─ Close/清理 channel
@@ -116,7 +116,7 @@ run --live（Yellow）步骤 kind=explode-native params{handle}
 ## 5. 错误处理与诚实边界（§5 认可，含两次用户修订）
 
 **信任与弹窗面**
-- TRUSTEDPATHS 预检=信息性（记录 trusted 状态供诊断），**不阻断**尝试
+- TRUSTEDPATHS 预检=**硬门**（更正见 §7.1(f)：原「信息性（记录 trusted 状态供诊断），**不阻断**尝试」措辞已作废——native-live 深读/`semantic scan --explode` 两路径不受信即拒绝或跳过，绝不进 3600s 安全框）
 - NETLOAD 在 STA 工作线程执行（SendCommand 同步阻塞不可避免），主逻辑并行看门狗：
   - 轮询 ① channel `.done`（500ms）；② acad 进程窗口枚举（节流 5s，匹配安全确认框作诊断增强）——任一进展刷新计时
   - **20s 无进展 → 无条件打印一次**明文指引（窗口检出与否均打印；检出时附"已检测到安全框"诊断）："若 AutoCAD 弹出安全确认框，请点击【加载】；如需永久免弹窗，将桥目录加入 TRUSTEDPATHS"——**继续等待**
@@ -183,4 +183,5 @@ run --live（Yellow）步骤 kind=explode-native params{handle}
 - **(c) T2 递归措辞不可表达 → 收窄为条件样本披露**（更正 §6「T2 递归：TDbSpace NestedTdb>0 且 depth>0 产物记录」）：Core 模型内不可表达——`ExplodeEvidence.NestedTdbCount` 只统计**递归失败残留**（桥内"递归超深/非实体产物"的失败叶，成功路径恒 0），`ExplodePrimitive` 无 depth 字段。落地：证据中存在任一 NestedTdbCount>0 的行→断言其 >0 且 `FullyExplodable=false`（自洽），标本无此类行→Skip（如实，不伪造残留）；"嵌套全量炸开"改由**桥侧递归证据**承担（`PrimDto` 带 depth 入 TSV；真机 T1 fully=284/343 即递归到底成功计数），T2 仅保留样本条件披露，不单独作递归充分性证据。
 - **(d) TRUSTEDPATHS 读取＝注册表优先，非先建 COM 实例**（更正 §5「TRUSTEDPATHS 预检」与 §4.1 步骤）：原 `GetSystemVariable`/COM 实读须 `/p` 拉起整实例，而启动初始化期 `Quit` 被忽略 → 孤儿 acad.exe（真机实证）。落地：`AcadRuntime.ReadTrustedPathsFromRegistry`（HKCU `…\R19.1\ACAD-*\Profiles\TElec20V5\Variables` 的 REG_SZ，只读、零实例、零 COM）优先；注册表无该值才回退 COM **文档面** `GetVariable("TRUSTEDPATHS")`（活动文档取用同走忙重试）。SECURELOAD 仍保持默认 1（不降级）。
 - **(e) "不支持硬件加速"信息框关窗＝环境新增事实，非对 §5 弹窗面的收敛**（§5 弹窗面原文保持有效）：该框是本机核显指令集限制的启动层**信息性**提示（非 AutoCAD 缺陷通用现象），**用户已永久关闭**弹出；`AcadWindows.DismissDialogs`（本方 PID + 标题子串「不支持硬件加速」+ 仅 `PostMessage(WM_CLOSE)`，绝不按键/点击/结束进程）保留为机器特定纵深防御。残留风险（复审在案）：标题子串若用户**主框架**标题恰含该短语可能被命中（缓解：仅本方 PID、仅 WM_CLOSE、窗口类校验延后）。
+- **(f) TRUSTEDPATHS 预检＝硬门，非"信息性、不阻断"**（更正 §4.1 流程步骤、§5「信任与弹窗面」首条、§1 组件表）：R17 起预检已改注册表优先只读（§7.1(d)），本更正只涉**语义强度**——`AcadRuntime.CheckBridgeAvailability`（DLL 路径解析 + 空桩字节扫描 + 信任位置判定；纯只读、**零实例、零 COM**）已是**硬门**，两处消费：① native-live 深读需求确定后不可用 → `native-bridge-unavailable{reason,dllPath,guidance}` + stderr 指引 + **exit 1**；② `semantic scan --explode` 不可用 → **整块跳过深读** + 审计 `explode-read-failed{reason,dllPath,guidance}` + stderr 指引 + **exit 0**（理解侧降级，计数全 0）。理由：不受信目录的 NETLOAD 安全框可阻塞至 3600s，而"允许尝试 + 看门狗"只对**人在场点【加载】**成立；无人值守/批处理路径宁可拒绝。§0 用户修订①「不设'绝不尝试 NETLOAD'」仍对 native-live 的**已受信**会话有效（尝试 + 看门狗 + 误拒明文指引逐字不变）。`--explode` 预检发生在**任何运行时构造之前**（`RuntimeFactory` 注入亦不例外），故不受信时连实例都不建。
 - **附注：SendCommand 语义补充**（§2「时序」）：桥**全部**发送点（NETLOAD／注册探针／正式命令）经同一缝走忙重试（`RPC_E_CALL_REJECTED` 0x80010001，TArch 启动窗真机实证；被拒＝命令未执行故重试无副作用，与既有 30s 预算共享）；"是否已注册"改用**探针握手**判定（写 `op=read`/`dwg="__probe__"` 请求→桥因图纸名不符必然回 `status fail`+done；10s 内无 done→`native-load-denied`），不依赖 SendCommand 回显（ActiveX 口径返回 void）。

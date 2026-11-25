@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json;
+using CadAgent.Adapters.Acad;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
 using CadAgent.Data.Tests;
@@ -26,6 +28,10 @@ public class SemanticScanExplodeTests : IDisposable
     private readonly Func<ICadRuntime?>? _originalFactory = CommandRouter.RuntimeFactory;
     private readonly Func<string?> _originalSelector = CommandRouter.RuntimeSelector;
     private readonly string? _originalEnv = Environment.GetEnvironmentVariable("CADAGENT_RUNTIME");
+    // I1（PR#30 终审）：桥缝——默认"可用"（真桥命令标记 + 信任位置=其目录），三态不可用面由用例覆写。
+    private readonly string? _originalBridgeDll = AcadRuntime.BridgeDllOverride;
+    private readonly Func<string, string?> _originalTrustedSource = AcadRuntime.TrustedPathsSource;
+    private readonly string _bridgeDir;
 
     public SemanticScanExplodeTests()
     {
@@ -40,6 +46,13 @@ public class SemanticScanExplodeTests : IDisposable
                 Layer = doc.Layers.First(l => l.Name == "W-EXPLODETEST")
             });
         });
+        // I1：预检先于运行时构造——夹具默认"桥可用"（占位产物含真桥命令标记；信任位置=其目录）。
+        _bridgeDir = Path.Combine(_project, "bridge");
+        Directory.CreateDirectory(_bridgeDir);
+        string bridgeDll = Path.Combine(_bridgeDir, AcadRuntime.BridgeDllName);
+        File.WriteAllBytes(bridgeDll, Encoding.ASCII.GetBytes("CADAGENT_TARCH_READ"));
+        AcadRuntime.BridgeDllOverride = bridgeDll;
+        AcadRuntime.TrustedPathsSource = _ => _bridgeDir;
     }
 
     public void Dispose()
@@ -48,6 +61,8 @@ public class SemanticScanExplodeTests : IDisposable
         CommandRouter.RuntimeFactory = _originalFactory;
         CommandRouter.RuntimeSelector = _originalSelector;
         Environment.SetEnvironmentVariable("CADAGENT_RUNTIME", _originalEnv);
+        AcadRuntime.BridgeDllOverride = _originalBridgeDll;
+        AcadRuntime.TrustedPathsSource = _originalTrustedSource;
         Directory.Delete(_project, true);
         File.Delete(_drawing);
     }
@@ -394,6 +409,87 @@ public class SemanticScanExplodeTests : IDisposable
             Assert.Equal((0, 0, 0, 0), ExplodeCounts(stdout));
             using var doc = JsonDocument.Parse(stdout);
             Assert.Equal(0, doc.RootElement.GetProperty("explodeSymbolCandidates").GetArrayLength());
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    // ---- I1（PR#30 合并前 ISTQB 终审）：--explode 桥可用性预检 ----
+
+    /// <summary>
+    /// I1：`semantic scan --explode` 的桥可用性预检**先于任何运行时构造**（纯只读、零实例、零 COM）。
+    /// 三态（dll-missing / stub / untrusted）等价类均：不创建运行时、审计
+    /// `explode-read-failed{reason,dllPath,guidance}`、stderr 指引、四计数 0、exit 0（理解侧诚实降级）。
+    /// 修复前该路径会照旧构造运行时并深读——缺失/空桩得到伪失败，不受信目录让 NETLOAD 安全框阻塞至 3600s。
+    /// </summary>
+    [Theory]
+    [InlineData("dll-missing")]
+    [InlineData("stub")]
+    [InlineData("untrusted")]
+    public void ScanExplode_BridgeUnavailable_DegradesBeforeRuntime(string state)
+    {
+        bool created = false;
+        CommandRouter.RuntimeFactory = () => { created = true; return new FakeExplodeRuntime(); };
+        try
+        {
+            string dllPath;
+            switch (state)
+            {
+                case "dll-missing":
+                    dllPath = Path.Combine(_project, "missing", AcadRuntime.BridgeDllName);
+                    AcadRuntime.BridgeDllOverride = dllPath;
+                    break;
+                case "stub":
+                    dllPath = Path.Combine(_bridgeDir, "stub-" + AcadRuntime.BridgeDllName);
+                    File.WriteAllBytes(dllPath, Encoding.ASCII.GetBytes("NoAcadRefsStub"));
+                    AcadRuntime.BridgeDllOverride = dllPath;
+                    break;
+                default: // untrusted：桥存在且非空桩，但目录不在 TRUSTEDPATHS。
+                    dllPath = Path.Combine(_bridgeDir, AcadRuntime.BridgeDllName);
+                    AcadRuntime.TrustedPathsSource = _ => @"C:\not-trusted";
+                    break;
+            }
+
+            var (code, stdout, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--explode");
+
+            Assert.Equal(0, code);                 // 理解侧降级：扫描照常完成
+            Assert.False(created);                 // 零运行时构造
+            Assert.Contains("桥不可用", stderr);
+            Assert.Contains(state, stderr);
+            Assert.Equal((0, 0, 0, 0), ExplodeCounts(stdout));
+            Assert.Empty(SemanticOverlay.Load(OverlayPath).ExplodeEvidence);
+            var rec = SingleExplodeReadFailed();
+            Assert.NotNull(rec);
+            using var p = JsonDocument.Parse(rec!.Entry.ParamsJson);
+            Assert.Equal(state, p.RootElement.GetProperty("reason").GetString());
+            Assert.Equal(Path.GetFullPath(dllPath), p.RootElement.GetProperty("dllPath").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(p.RootElement.GetProperty("guidance").GetString()));
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    /// <summary>
+    /// M8（PR#30 终审）：RuntimeFactory 返回 null（未配置运行时）时不得静默跳过——stderr 显式降级
+    /// 提示，四计数 0、exit 0，且不记失败审计（属既定降级路径，不是读证据失败）。
+    /// </summary>
+    [Fact]
+    public void ScanExplode_RuntimeFactoryReturnsNull_DegradesWithExplicitStderr()
+    {
+        CommandRouter.RuntimeFactory = () => null;
+        try
+        {
+            var (code, stdout, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--explode");
+
+            Assert.Equal(0, code);
+            Assert.Contains("未配置运行时（RuntimeFactory=null），--explode 跳过", stderr);
+            Assert.Equal((0, 0, 0, 0), ExplodeCounts(stdout));
+            Assert.Empty(SemanticOverlay.Load(OverlayPath).ExplodeEvidence);
+            Assert.Null(SingleExplodeReadFailed());
         }
         finally
         {

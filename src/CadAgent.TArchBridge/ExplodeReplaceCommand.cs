@@ -105,29 +105,14 @@ namespace CadAgent.TArchBridge
         /// <summary>
         /// liveout 前置守卫（R11）：非空；全路径不得等于当前文档路径或请求 dwg 路径（OrdinalIgnoreCase）；
         /// 父目录必须存在。任一不满足即抛中文消息——在开事务前拦下，绝不碰图。
+        /// M3（PR#30 终审修复波）：纯路径逻辑上移到协议层 <see cref="LiveOutGuard.Check"/>（net45 桥
+        /// 工程无法被 net8 测试引用，固守桥内则守卫不可测）；此处只做"错误→异常"桥内形态转换，
+        /// 判据与中文文案逐字不变。
         /// </summary>
         internal static void GuardLiveOut(string liveOut, string docPath, string sourceDwg)
         {
-            if (string.IsNullOrEmpty(liveOut)) throw new InvalidOperationException("liveout 为空");
-            string live;
-            try { live = Path.GetFullPath(liveOut); }
-            catch (System.Exception ex) { throw new InvalidOperationException("liveout 路径非法: " + ex.GetType().Name + ": " + ex.Message); }
-
-            string docFull = null;
-            if (!string.IsNullOrEmpty(docPath)) { try { docFull = Path.GetFullPath(docPath); } catch { docFull = null; } }
-            if (docFull != null && string.Equals(live, docFull, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("liveout 不得等于当前文档路径: " + live);
-
-            string srcFull = null;
-            if (!string.IsNullOrEmpty(sourceDwg)) { try { srcFull = Path.GetFullPath(sourceDwg); } catch { srcFull = null; } }
-            if (srcFull != null && string.Equals(live, srcFull, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("liveout 不得等于源图路径: " + live);
-
-            string dir;
-            try { dir = Path.GetDirectoryName(live); }
-            catch (System.Exception ex) { throw new InvalidOperationException("liveout 父目录无法解析: " + ex.GetType().Name); }
-            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
-                throw new InvalidOperationException("liveout 父目录不存在: " + (string.IsNullOrEmpty(dir) ? "（无目录部分）" : dir));
+            string error = LiveOutGuard.Check(liveOut, docPath, sourceDwg);
+            if (error != null) throw new InvalidOperationException(error);
         }
 
         /// <summary>
@@ -226,6 +211,10 @@ namespace CadAgent.TArchBridge
         /// <summary>
         /// 处理某一层产物：非 TDb → 入模型空间并计数；仍为 TDb → 继续下钻（自身不入空间）。
         /// <paramref name="depth"/> 为该产物自身的层深（与 <see cref="TryExplodeDeep"/> 的 PrimDto.Depth 同口径）。
+        /// M11（PR#30 终审）：<c>AppendEntity</c> 与 <c>AddNewlyCreatedDBObject</c> 是两次调用——
+        /// 旧实现在 AppendEntity 后立即从 owned 摘除，若 AddNewlyCreatedDBObject 抛错，该产物既在
+        /// 模型空间又无人释放（事务 Abort 时可能残留）。收紧为：入 owned → 两次调用**皆成功**才摘除；
+        /// 中途失败对象仍在 owned → 调用方 finally 统一 Dispose。
         /// </summary>
         private static void AppendLeafOrRecurse(Entity e, int depth, int maxDepth, Transaction tr, BlockTableRecord ms, ref int count, List<DBObject> owned)
         {
@@ -239,8 +228,8 @@ namespace CadAgent.TArchBridge
             }
             owned.Add(e);
             ms.AppendEntity(e);
-            owned.Remove(e);   // 已入空间：所有权归空间/事务，此后不得 Dispose
             tr.AddNewlyCreatedDBObject(e, true);
+            owned.Remove(e);   // 两次调用皆成功：所有权归空间/事务，此后不得 Dispose
             count++;
         }
 

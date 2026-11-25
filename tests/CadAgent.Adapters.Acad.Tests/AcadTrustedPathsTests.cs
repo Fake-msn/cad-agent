@@ -135,6 +135,36 @@ public class AcadTrustedPathsTests : IDisposable
         Assert.Equal("TRUSTEDPATHS", doc.LastVariableName);
     }
 
+    /// <summary>
+    /// M6（PR#30 终审）：多产品子键候选选择（纯函数）——PROFILE 命中优先：第一个子键虽含 profile
+    /// 但无值、第二个含 profile 且有值 → 选第二个；无任一子键含 profile → 回退首个非 null；
+    /// 全无 → null。注册表读取本身不可单测，故把选择策略抽成纯函数钉住。
+    /// </summary>
+    [Fact]
+    public void SelectTrustedPathsCandidate_PrefersProfileHit_ThenFirstNonNullFallback()
+    {
+        var keys = new[] { "ACAD-D001:804", "ACAD-D001:409", "ACAD-D002:804" };
+
+        // PROFILE 命中在第二个键（第一个含 profile 但值缺失，第三个无 profile 只有值）。
+        var probes = new Dictionary<string, (bool HasProfile, string? Value)>
+        {
+            ["ACAD-D001:804"] = (true, null),
+            ["ACAD-D001:409"] = (true, "HIT"),
+            ["ACAD-D002:804"] = (false, "FALLBACK"),
+        };
+        Assert.Equal("HIT", AcadRuntime.SelectTrustedPathsCandidate(keys, k => probes[k]));
+
+        // 无任一键含目标 profile → 首个非 null 值（旧"首个命中"口径兜底）。
+        Assert.Equal("FB-2", AcadRuntime.SelectTrustedPathsCandidate(keys,
+            k => (false, k == "ACAD-D001:804" ? null : k == "ACAD-D001:409" ? "FB-2" : "FB-3")));
+
+        // 全部无值 → null。
+        Assert.Null(AcadRuntime.SelectTrustedPathsCandidate(keys, _ => (true, null)));
+
+        // 空串=「已配置但为空」属有效值（不是缺失）：命中即返回空串。
+        Assert.Equal("", AcadRuntime.SelectTrustedPathsCandidate(keys, k => (true, k == "ACAD-D001:409" ? "" : null)));
+    }
+
     /// <summary>假 app：Gate1 所需 Version/Documents.Count、ActiveDocument 与退出 Quit。</summary>
     public sealed class FakeGate1App
     {

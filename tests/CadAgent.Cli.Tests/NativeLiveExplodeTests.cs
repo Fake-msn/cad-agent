@@ -348,6 +348,55 @@ public class NativeLiveExplodeTests : IDisposable
         Assert.True(p.RootElement.GetProperty("liveOutExists").GetBoolean());
     }
 
+    /// <summary>M4（PR#30 终审）：桥内 db.SaveAs 成功但结果丢失（EXPLODE_REPLACE 返回前异常，
+    /// 镜像 WriteResultAtomic/传输失败面）→ REPLACED 回不到宿主，但本轮确实写出了 .live.dwg：
+    /// 审计 liveOutExists=true 且文案属"已产出"阶段——不得误报"未交付"。</summary>
+    [Fact]
+    public void ReplaceWroteLiveOutThenResultLost_ReportsDeliveredHonestly()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0) }, new[] { ExplodeRow() });
+        SeedStandardLive();
+        _rt.ThrowAfterReplaceWrite = true;   // 写盘成功→结果丢失（桥异常上抛）
+        string plan = WritePlan(
+            """{"planId":"NE-16","steps":[{"kind":"explode-native","params":{"handle":"21E00"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("桥结果丢失", stderr);
+        Assert.Contains("已产出 .live.dwg 但未通过读回校验", stderr);
+        Assert.DoesNotContain("未交付 .live.dwg", stderr);
+        Assert.True(File.Exists(OutPath));   // 桥已写盘
+        var failed = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-live-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.True(p.RootElement.GetProperty("liveOutExists").GetBoolean());
+    }
+
+    /// <summary>M4（PR#30 终审）：上一轮残留的 .live.dwg（mtime 早于会话起点）**不算**本轮交付——
+    /// 本轮无桥写盘时 liveOutExists=false 且文案回"未交付"（旧文件不得当证据）。</summary>
+    [Fact]
+    public void StaleLiveOutFromEarlierRun_NotCountedAsDelivered()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0) }, new[] { ExplodeRow() with { Bbox = null } });
+        _rt.PathReadResults.Add(Wall("21F00", "120", 200));
+        _rt.ReadResults.Add(Wall("21E00", "120", 0));
+        _rt.ExplodeReadResults.Add(ExplodeRow() with { Bbox = null });
+        // 残留交付件：物理存在但 mtime 早于本轮会话起点。
+        File.WriteAllBytes(OutPath, LiveBytes);
+        File.SetLastWriteTimeUtc(OutPath, DateTime.UtcNow.AddHours(-1));
+        string plan = WritePlan(
+            """{"planId":"NE-17","steps":[{"kind":"move","params":{"handle":"21E00","dx":10,"dy":20}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("读回无基准", stderr);
+        Assert.Contains("未交付 .live.dwg，原图零写入", stderr);
+        var failed = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-live-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.False(p.RootElement.GetProperty("liveOutExists").GetBoolean());
+    }
+
     /// <summary>用例 5（补充等价类）：目标句柄既无 live 参数行、也无炸开证据行 →
     /// 合并判据 ExplodeNotRead（炸开门拒因优先于参数门 StaleMismatch），payload 双 verdict 齐全。</summary>
     [Fact]
@@ -650,6 +699,8 @@ public class NativeLiveExplodeTests : IDisposable
         public bool ReplaceBboxMatch { get; set; } = true;
         /// <summary>I4：ReadExplodeEvidence 抛该消息（NETLOAD 误拒/硬超时的桥通道归因面）。</summary>
         public string? ThrowOnExplodeRead { get; set; }
+        /// <summary>M4：桥替换写盘成功后抛（镜像"SaveAs 已交付但结果丢失"面）。</summary>
+        public bool ThrowAfterReplaceWrite { get; set; }
         private string? _openedPath;
 
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
@@ -698,6 +749,8 @@ public class NativeLiveExplodeTests : IDisposable
             // F1 镜像桥：EXPLODE_REPLACE 事务内 db.SaveAs(liveout) 已在替换时交付文件
             // （宿主 epilogue 的 SaveAs 因此可跳过；文件存在性/可读性与真机同形）。
             File.WriteAllBytes(liveOutPath, LiveBytes);
+            if (ThrowAfterReplaceWrite)
+                throw new CadRuntimeException("桥结果丢失（liveout 已写盘，EXPLODE_REPLACE 结果未返回）");
             return new ExplodeReplaceResult(hexHandle, ReplaceNewCount, liveOutPath, ReplaceBboxMatch, 1e-3);
         }
 
