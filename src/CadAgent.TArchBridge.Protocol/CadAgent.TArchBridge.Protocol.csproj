@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- 本工程为纯协议层：net45 桥与 net8 宿主共用，零外部依赖。
+       netstandard2.0 引用程序集不含 SupportedOSPlatformAttribute，
+       故移除根 Directory.Build.props 注入的平台标注，避免编译失败。 -->
+  <ItemGroup>
+    <AssemblyAttribute Remove="System.Runtime.Versioning.SupportedOSPlatformAttribute" />
+  </ItemGroup>
+
+</Project>
