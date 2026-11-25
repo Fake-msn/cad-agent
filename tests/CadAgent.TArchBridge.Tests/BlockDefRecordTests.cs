@@ -54,5 +54,7 @@ public class BlockDefRecordTests
     public void BlockDef_NegativeOrNonNumericCount_Throws()
     {
         Assert.Throws<FormatException>(() => BridgeResult.Parse("status\tok\nBDEF\t块A\tTDbECabletry\tx\n"));
+        // PR32：定义内实体计数语义上不可能为负——负值一律按协议非法拒绝（不静默接受）。
+        Assert.Throws<FormatException>(() => BridgeResult.Parse("status\tok\nBDEF\t块A\tTDbECabletry\t-1\n"));
     }
 }

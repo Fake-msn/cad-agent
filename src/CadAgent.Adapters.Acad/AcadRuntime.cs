@@ -1555,9 +1555,12 @@ public sealed class AcadRuntime : ICadRuntime
                 e.Handle, e.RxClass, e.WrapperType, e.Layer, e.Bbox, e.FullyExplodable,
                 prims.Count, CountResidualTdb(result.Fails, e.Handle),
                 prims, MapXData(result.XData, e.Handle), null, now,
-                // A2（边界补齐）：该句柄**首条** FAIL 原因（extents:degenerate / no-geometry:eInvalidInput
-                // 等）如实透出；无失败行=null。宿主不做二次推断。
-                FirstFailReason(result.Fails, e.Handle)));
+                // A2（边界补齐）：该句柄**首条** FAIL 原因（extents:degenerate / extents:Exception /
+                // explode:eInvalidInput 等）如实透出；无失败行=null。宿主不做二次推断。
+                FirstFailReason(result.Fails, e.Handle),
+                // PR32：该句柄**全部** FAIL 原因（按桥输出序；加性 JSON 尾字段）——首条之外
+                // 的失败同样可复核（如 SymbArrow 首条 extents:Exception + 次条 explode:eInvalidInput）。
+                AllFailReasons(result.Fails, e.Handle)));
         }
         return list;
     }
@@ -1568,6 +1571,15 @@ public sealed class AcadRuntime : ICadRuntime
         foreach (var f in fails)
             if (HandleEquals(f.Handle, handle)) return f.Reason;
         return null;
+    }
+
+    /// <summary>该句柄全部 FAIL 行原因（桥输出序保序；无匹配→null，与旧 overlay 反序列化口径一致）。</summary>
+    internal static IReadOnlyList<string>? AllFailReasons(IReadOnlyList<FailDto> fails, string handle)
+    {
+        List<string>? list = null;
+        foreach (var f in fails)
+            if (HandleEquals(f.Handle, handle)) (list ??= new List<string>()).Add(f.Reason);
+        return list;
     }
 
     /// <summary>B1：BDEF 记录 → Core 块定义段（纯映射；块定义计数 ≠ 模型空间实例数）。</summary>

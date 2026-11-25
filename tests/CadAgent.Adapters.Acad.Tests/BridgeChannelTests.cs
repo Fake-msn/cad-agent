@@ -347,8 +347,9 @@ public class BridgeChannelTests : IDisposable
         Assert.Null(prim.BlockName);
     }
 
-    // A2（边界补齐）：FailReason 取该句柄**首条** FAIL 行原因——桥内 explodes 失败的分类
-    //（extents:degenerate / no-geometry:eInvalidInput）由此如实透出，宿主不做二次推断。
+    // A2（边界补齐）/ PR32：FailReason 取该句柄**首条** FAIL 行原因，FailReasons 携带该句柄
+    // **全部** FAIL（按桥输出序）——桥内 explodes 失败的分类（extents:degenerate / extents:Exception /
+    // explode:eInvalidInput）由此如实透出，宿主不做二次推断。
     [Fact]
     public void MapExplodeEvidence_FailReason_FirstFailRowPerHandle()
     {
@@ -357,14 +358,21 @@ public class BridgeChannelTests : IDisposable
         r.Evidence.Add(new EvidenceDto("S1", "TDbSymbArrow", null, null, null, false));
         r.Evidence.Add(new EvidenceDto("OK1", "TDbWall", null, null, null, true));
         r.Fails.Add(new FailDto("D1", "extents:degenerate"));
-        r.Fails.Add(new FailDto("D1", "explode:Exception"));       // 后续 FAIL 不覆盖首条
-        r.Fails.Add(new FailDto("S1", "no-geometry:eInvalidInput"));
+        r.Fails.Add(new FailDto("D1", "explode:Exception"));       // 后续 FAIL 不覆盖首条，但须入 FailReasons
+        r.Fails.Add(new FailDto("S1", "explode:eInvalidInput"));
 
         var list = AcadRuntime.MapExplodeEvidence(r);
 
-        Assert.Equal("extents:degenerate", list.Single(e => e.Handle == "D1").FailReason);
-        Assert.Equal("no-geometry:eInvalidInput", list.Single(e => e.Handle == "S1").FailReason);
+        var d1 = list.Single(e => e.Handle == "D1");
+        Assert.Equal("extents:degenerate", d1.FailReason);
+        Assert.NotNull(d1.FailReasons);
+        Assert.Equal(new[] { "extents:degenerate", "explode:Exception" }, d1.FailReasons!);
+        var s1 = list.Single(e => e.Handle == "S1");
+        Assert.Equal("explode:eInvalidInput", s1.FailReason);
+        Assert.NotNull(s1.FailReasons);
+        Assert.Equal(new[] { "explode:eInvalidInput" }, s1.FailReasons!);
         Assert.Null(list.Single(e => e.Handle == "OK1").FailReason);   // 无 FAIL 行 → null
+        Assert.Null(list.Single(e => e.Handle == "OK1").FailReasons);
     }
 
     [Fact]

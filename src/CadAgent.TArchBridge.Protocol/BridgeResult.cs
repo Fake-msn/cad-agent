@@ -185,7 +185,10 @@ public sealed class BridgeResult
 
                 case "BDEF":
                     Expect(f, 4);
-                    result.BlockDefs.Add(new BlockDefDto(f[1], f[2], ParseInt(f[3], "blockDefCount")));
+                    // PR32：定义内实体计数 >=0 为协议不变量——负值无可解释语义，响亮拒绝。
+                    int bdefCount = ParseInt(f[3], "blockDefCount");
+                    if (bdefCount < 0) throw new FormatException($"blockDefCount 非法（不得为负）: {f[3]}");
+                    result.BlockDefs.Add(new BlockDefDto(f[1], f[2], bdefCount));
                     break;
 
                 case "FAIL":

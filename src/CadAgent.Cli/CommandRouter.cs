@@ -844,10 +844,31 @@ public static partial class CommandRouter
                             explodeFailed = evidences.Count(e =>
                                 !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount == 0);
                             // B1：块定义段与证据同一次桥会话（AcadRuntime 缓存命中，不二次开图）。
-                            var blockDefs = explodeRuntime.ReadExplodeBlockDefs(drawingPath);
+                            // PR32：块定义读数**独立** try/catch——该段失败不得把证据四计数归 0、
+                            // 不得跳过 overlay Save、不得记 explode-read-failed；只降级该段
+                            //（审计加性 explode-blockdef-failed{error} + stderr 提示）。
+                            IReadOnlyList<BlockDefTdbEntry>? blockDefs = null;
+                            try { blockDefs = explodeRuntime.ReadExplodeBlockDefs(drawingPath); }
+                            catch (Exception ex)
+                            {
+                                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                                    session, "semantic", "explode-blockdef-failed", drawingPath,
+                                    JsonSerializer.Serialize(new { error = ex.Message }), hash, hash, "", ""));
+                                stderr.WriteLine($"--explode: 块定义段读取失败（{ex.Message}），证据段照常落盘");
+                            }
+                            // 块定义失败时 Enrich 收到 null（本轮无可用定义事实）：先快照上轮定义段，
+                            // Enrich 后回填——失败不覆盖磁盘旧事实（与 M9 证据失败保留同口径）。
+                            List<BlockDefTdbEntry>? retained = blockDefs is null
+                                ? result.Overlay.BlockDefTdb.ToList()
+                                : null;
                             var derive = TarchDerive.Enrich(result.Overlay, evidences, blockDefs);
+                            if (retained is not null)
+                            {
+                                result.Overlay.BlockDefTdb.Clear();
+                                result.Overlay.BlockDefTdb.AddRange(retained);
+                            }
                             explodeCandidates = derive.SymbolCandidates;
-                            blockDefTdb = blockDefs;
+                            blockDefTdb = blockDefs ?? Array.Empty<BlockDefTdbEntry>();
                             // 恰一次额外 Save（扫描结果已在上方 Save）：证据行/标注/块定义段须持久化，
                             // 否则下次 scan Load 深度表为空。无 --explode 路径仍恰一次 Save，旧行为逐字不变。
                             result.Overlay.Save(overlayPath);

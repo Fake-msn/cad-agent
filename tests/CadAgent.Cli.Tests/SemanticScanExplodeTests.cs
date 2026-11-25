@@ -197,8 +197,32 @@ public class SemanticScanExplodeTests : IDisposable
         public void Dispose() { }
     }
 
-    private static (int read, int fully, int partial, int failed) ExplodeCounts(string stdout)
+    /// <summary>PR32：块定义读数失败 fake——证据段正常（1 行全炸开直墙），
+    /// <see cref="ReadExplodeBlockDefs"/> 抛错，用于钉住"块定义失败不得拖垮证据段"。</summary>
+    private sealed class FakeBlockDefFailureRuntime : ICadRuntime
     {
+        public RuntimeInfo GetInfo() => new("Fake", "1", true);
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        {
+            new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
+                new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 0, 0,
+                Array.Empty<ExplodePrimitive>(),
+                new Dictionary<string, string>(), null, DateTimeOffset.UtcNow),
+        };
+        public IReadOnlyList<BlockDefTdbEntry> ReadExplodeBlockDefs(string drawingPath)
+            => throw new CadRuntimeException("块定义读数失败（fake）");
+        public void Open(string p) { } public void SaveAs(string p) { }
+        public void Close(bool s) { } public void Restart() { }
+        public void AddLine(double a, double b, double c, double d, string? l = null) { }
+        public void AddText(double x, double y, string t, double h, string? l = null) { }
+        public void AddCircle(double x, double y, double r, string? l = null) { }
+        public void AddInsert(string n, double x, double y, double s = 1, double r = 0, string? l = null) { }
+        public void EnsureBlock(string n, IReadOnlyList<BlockPrimitive> p) { }
+        public int EntityCount() => 0;
+        public void Dispose() { }
+    }
+
+    private static (int read, int fully, int partial, int failed) ExplodeCounts(string stdout)    {
         using var doc = JsonDocument.Parse(stdout);
         var root = doc.RootElement;
         return (root.GetProperty("explodeRead").GetInt32(),
@@ -650,6 +674,59 @@ public class SemanticScanExplodeTests : IDisposable
             Assert.Equal("$equip$00002832", entry.BlockName);
             Assert.Equal("TDbECabletry", entry.RxClass);
             Assert.Equal(1364, entry.Count);
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    /// <summary>
+    /// PR32：块定义读数在**自己的 try/catch** 内——失败只降级该段（审计
+    /// <c>explode-blockdef-failed{error}</c> + stderr 提示），**不得**把证据四计数归 0、
+    /// 不得跳过 overlay Save、不得记 explode-read-failed。本轮 stdout/审计 blockDefTdbCount=0，
+    /// 磁盘上轮定义段保留（失败=本轮无可用定义事实，不覆盖旧事实）。
+    /// </summary>
+    [Fact]
+    public void ScanExplode_BlockDefReadFails_EvidencePathUnaffected()
+    {
+        // 预置上轮定义段：本轮失败不得清空磁盘事实。
+        var seeded = new SemanticOverlay();
+        seeded.BlockDefTdb.Add(new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364));
+        seeded.Save(OverlayPath);
+
+        CommandRouter.RuntimeFactory = () => new FakeBlockDefFailureRuntime();
+        try
+        {
+            var (code, stdout, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--explode");
+
+            Assert.Equal(0, code);
+            // 证据段不受牵连：1 行证据全炸开 → 1/1/0/0 且已落盘。
+            Assert.Equal((1, 1, 0, 0), ExplodeCounts(stdout));
+            Assert.Contains("块定义段读取失败", stderr);
+            Assert.DoesNotContain("explode-read-failed", stderr);
+
+            using (var doc = JsonDocument.Parse(stdout))
+                Assert.Equal(0, doc.RootElement.GetProperty("blockDefTdb").GetArrayLength());
+
+            var overlay = SemanticOverlay.Load(OverlayPath);
+            Assert.Single(overlay.ExplodeEvidence);          // 证据已 Save（未被跳过）
+            var kept = Assert.Single(overlay.BlockDefTdb);   // 上轮定义段保留
+            Assert.Equal("$equip$00002832", kept.BlockName);
+            Assert.Equal(1364, kept.Count);
+
+            using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+            var all = audit.ReadAll();
+            var failed = all.Single(r => r.Entry.Kind == "explode-blockdef-failed");
+            Assert.Equal("semantic", failed.Entry.Source);
+            Assert.Equal(_drawing, failed.Entry.Target);
+            using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
+                Assert.Contains("块定义读数失败", p.RootElement.GetProperty("error").GetString()!);
+            var scan = all.Single(r => r.Entry.Kind == "semantic-scan");
+            using (var p = JsonDocument.Parse(scan.Entry.ParamsJson))
+                Assert.Equal(0, p.RootElement.GetProperty("blockDefTdbCount").GetInt32());
+            Assert.DoesNotContain(all, r => r.Entry.Kind == "explode-read-failed");
+            Assert.True(audit.VerifyChain(out _));
         }
         finally
         {

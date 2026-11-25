@@ -73,23 +73,31 @@ public class ExplodeEvidenceModelTests
         Assert.False(row.FullyExplodable);
     }
 
-    // A2（边界补齐）：FailReason 是可选尾部参数——旧构造/旧 JSON 一律 null，不破坏既有形状。
+    // A2（边界补齐）：FailReason/FailReasons 是可选尾部参数——旧构造/旧 JSON 一律 null，
+    // 不破坏既有形状（PR32：FailReasons=全部失败原因，JSON 加性尾字段）。
     [Fact]
     public void ExplodeEvidence_FailReason_DefaultNull_AndRoundTrip()
     {
-        Assert.Null(E("21E00").FailReason);   // 旧构造（13 参）→ null
+        Assert.Null(E("21E00").FailReason);    // 旧构造（13 参）→ null
+        Assert.Null(E("21E00").FailReasons);   // PR32：旧构造（14 参）→ null
 
         var dir = Directory.CreateTempSubdirectory("explodefail").FullName;
         try
         {
             string path = Path.Combine(dir, "semantic.json");
             var o = new SemanticOverlay();
-            o.UpsertExplode(E("321A") with { FailReason = "no-geometry:eInvalidInput" });
+            o.UpsertExplode(E("321A") with
+            {
+                FailReason = "extents:Exception",
+                FailReasons = new[] { "extents:Exception", "explode:eInvalidInput" },
+            });
             o.Save(path);
 
             var loaded = SemanticOverlay.Load(path);
             var row = Assert.Single(loaded.ExplodeEvidence);
-            Assert.Equal("no-geometry:eInvalidInput", row.FailReason);
+            Assert.Equal("extents:Exception", row.FailReason);                       // 首条口径保持
+            Assert.NotNull(row.FailReasons);
+            Assert.Equal(new[] { "extents:Exception", "explode:eInvalidInput" }, row.FailReasons!);   // 全量加性
         }
         finally { Directory.Delete(dir, true); }
     }

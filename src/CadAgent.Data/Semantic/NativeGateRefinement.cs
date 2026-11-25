@@ -65,6 +65,9 @@ public static class NativeGateRefinement
         (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b));
 
     // 炸开 bbox 近等：双 null 相等，单 null 即不符（裁定：不视同通配）；长度/维度不符即不符。
+    // 已知口径（advisory）：双 null 视同一致（身份仅句柄+类；Fully 为前置，bbox 可得时才作几何
+    // 一致项）；**准入门不读 FailReason**（Fully=true 行仍可携带 FailReason，如 bbox 之外的单通道
+    // 失败），行为保持不改。
     // R15 非有限守卫（fail-closed）：NaN/Inf 分量按不符处理——`Math.Abs(diff) > tol` 对 NaN
     // 恒为 false，旧写法会把非有限漂移当"容差内一致"放行（安全关键比较器 fail-open 面）。
     private static bool BboxNearEq(double[]? a, double[]? b)

@@ -84,18 +84,21 @@ public class TarchDeriveTests
         Assert.Empty(o.Annotations);
     }
 
-    // I-2（修复波1）：退化 extents 的证据行 bbox=null —— 旧实现跳过 bbox 比对后静默落 0.9，
-    // 等于把"包围盒不可验"当"已验证一致"。保守口径：退化行不种子（行本身保留可复核）。
+    // I-2（修复波1）/ I-2b（修复波2）：bbox 不可验（null）的证据行——旧实现跳过 bbox 比对后
+    // 静默落 0.9，等于把"包围盒不可验"当"已验证一致"。保守口径：**bbox=null 一律不种子**
+    //（不只 extents:degenerate 前缀；extents:Exception 等其它不可验原因同口径），行本身保留可复核。
     [Theory]
     [InlineData("extents:degenerate")]
     [InlineData("extents:degenerate:roundtrip")]   // 前缀口径：后续细分原因亦不种子
-    public void Enrich_DegenerateExtents_FullyAndClassKnown_NoAnnotation_ButRowKept(string failReason)
+    [InlineData("extents:Exception")]              // I-2b：非退化前缀但 bbox 同样不可验
+    public void Enrich_UnverifiableBbox_FullyAndClassKnown_NoAnnotation_ButRowKept(string failReason)
     {
         var o = new SemanticOverlay();
-        TarchDerive.Enrich(o, new[] { Wall("D1") with { FailReason = failReason } });
+        TarchDerive.Enrich(o, new[] { Wall("D1") with { Bbox = null, FailReason = failReason } });
 
         var row = Assert.Single(o.ExplodeEvidence);
         Assert.Equal(failReason, row.FailReason);   // 证据行保留（撤行=丢事实）
+        Assert.Null(row.Bbox);
         Assert.Empty(o.Annotations);                // 但不得落 NativeExplode 0.9
     }
 

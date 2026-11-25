@@ -222,13 +222,15 @@ namespace CadAgent.TArchBridge
             }
             catch (System.Exception ex)
             {
-                // A2（边界补齐）：几何双通道 eInvalidInput（实证 TDbSymbArrow）= 无几何可炸，
-                // 落独立原因 no-geometry:eInvalidInput（宿主据此如实披露"无几何"而非泛化异常）；
-                // 其余异常文案逐字不变。注：.NET 枚举元素名为 InvalidInput
-                //（ObjectARX 同名值写作 eInvalidInput；2014 反射核实无 e 前缀成员）。
+                // A2（边界补齐 / PR32 更正）：几何双通道 eInvalidInput（实证 TDbSymbArrow）= 炸开请求
+                // 被宿主以"输入无效"拒绝。**不得**再记作 no-geometry：reviewer 实证 TDbRectStair 有几何
+                // 却因嵌套炸开同样落 eInvalidInput——"无几何"是过度断言，故原因改为
+                // explode:eInvalidInput（爆炸阶段+状态码，可复核且不猜几何有无）。
+                // 注：.NET 枚举元素名为 InvalidInput（ObjectARX 同名值写作 eInvalidInput；
+                // 2014 反射核实无 e 前缀成员）。其余异常文案逐字不变。
                 var acadEx = ex as Autodesk.AutoCAD.Runtime.Exception;
                 if (acadEx != null && acadEx.ErrorStatus == ErrorStatus.InvalidInput)
-                    result.Fails.Add(new FailDto(handle, "no-geometry:eInvalidInput"));
+                    result.Fails.Add(new FailDto(handle, "explode:eInvalidInput"));
                 else
                     result.Fails.Add(new FailDto(handle, "explode:" + ex.GetType().Name));
                 return false;
