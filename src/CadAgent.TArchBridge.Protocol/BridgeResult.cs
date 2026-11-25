@@ -157,7 +157,8 @@ public sealed class BridgeResult
                     Expect(f, 5);
                     result.Prims.Add(new PrimDto(
                         f[1], ParseInt(f[2], "depth"), f[3],
-                        f[4].Length == 0 ? Array.Empty<string>() : f[4].Split('\t')));
+                        // net45 无 Array.Empty<T>（.NET 4.6 引入），故用等价的空数组字面量。
+                        f[4].Length == 0 ? new string[0] : f[4].Split('\t')));
                     break;
 
                 case "XData":
