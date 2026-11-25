@@ -32,6 +32,8 @@ public static class TarchSymbolPrefixes
 /// NativeExplode 标注种子 + 符号块候选 + 陈旧证据行清理。纯数据层（零 COM/零 IO）。
 /// 幂等：按句柄 Upsert，重扫刷新 CenterlineJson；重扫先删本轮未读到的证据行（镜像
 /// NativeParamSeeder "当前原生数据"语义）。空/缺基元、null XData 一律按空处理（不 NRE）。
+/// 种子口径：Fully && 类已知 && 非退化 extents（<c>FailReason</c> 以 <c>extents:degenerate</c>
+/// 起头 = bbox 不可验，保守不落 0.9；证据行保留供复核）。
 /// 标注同口径：本轮未成功种子的 NativeExplode 标注一律回收（证据消失/存疑→不得残留授权）。</summary>
 public static class TarchDerive
 {
@@ -49,7 +51,9 @@ public static class TarchDerive
     /// 顺序：先按入参算 live 句柄集 → 删陈旧证据行 → 逐条 upsert（本轮行不会被误删）
     /// → 回收本轮未成功种子的 NativeExplode 标注。
     /// B1（边界补齐）：<paramref name="blockDefs"/> 为同一次桥会话的**块定义段**（块名+类计数，
-    /// 定义 ≠ 实例）——每轮**整表替换**（重扫刷新、空/缺省清空），只披露不造标注、不进证据表。</summary>
+    /// 定义 ≠ 实例）——**每轮 --explode 整表替换**（重扫刷新、空/缺省清空）；非 --explode 扫描
+    /// 不调用本方法，磁盘上的定义段原样保留（与 ExplodeEvidence 表同语义）。
+    /// 只披露不造标注、不进证据表。</summary>
     public static TarchDeriveResult Enrich(SemanticOverlay overlay, IReadOnlyList<ExplodeEvidence> evidences,
         IReadOnlyList<BlockDefTdbEntry>? blockDefs = null)
     {
@@ -90,13 +94,18 @@ public static class TarchDerive
         return new TarchDeriveResult(candidates);
     }
 
-    // ---- 种子：Fully && 类已知 && bbox 口径一致（参数面缺失即不比）----
+    // ---- 种子：Fully && 类已知 && 非退化 extents && bbox 口径一致（参数面缺失即不比）----
 
     /// <summary>返回是否本轮成功种子（供标注回收判定）。</summary>
     private static bool SeedNativeExplode(SemanticOverlay overlay, ExplodeEvidence ev)
     {
         var cls = TDbClassMap.ClassFor(ev.RxClass);
         if (!ev.FullyExplodable || cls == SemanticClass.Unknown) return false;
+
+        // I-2（修复波1）：退化 extents 行 bbox=null——旧实现让 bbox 比对整体跳过而静默落 0.9，
+        // 等于把"包围盒不可验"当"已验证一致"。保守口径：不种子（首条 FAIL 原因即桥侧事实，
+        // 含前缀变体 extents:degenerate:*；证据行本身保留，人工仍可复核）。
+        if (IsDegenerateExtents(ev)) return false;
 
         var p = overlay.NativeEntities.FirstOrDefault(n => n.Handle == ev.Handle);
         if (p?.Bbox is not null && ev.Bbox is not null && !BboxClose(p.Bbox, ev.Bbox, BboxTol))
@@ -108,6 +117,12 @@ public static class TarchDerive
             $"NETLOAD 炸开证据: {ev.RxClass}"));
         return true;
     }
+
+    /// <summary>退化 extents 证据判据：桥侧首条 FAIL 原因以 <c>extents:degenerate</c> 起头
+    ///（A1 生产者字面；前缀口径吸收后续细分原因）。空/null 原因=非退化。</summary>
+    private static bool IsDegenerateExtents(ExplodeEvidence ev) =>
+        ev.FailReason is string reason
+        && reason.StartsWith("extents:degenerate", StringComparison.Ordinal);
 
     /// <summary>bbox 逐分量容差比较（仅共同分量；生产者两侧均为 X/Y/Z 六分量）。</summary>
     internal static bool BboxClose(double[] a, double[] b, double tol)

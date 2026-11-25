@@ -368,7 +368,8 @@ public class BridgeChannelTests : IDisposable
     }
 
     [Fact]
-    public void PrimitiveKind_FamiliesCollapse()    {
+    public void PrimitiveKind_FamiliesCollapse()
+    {
         Assert.Equal("line", AcadRuntime.PrimitiveKind("AcDbLine"));
         Assert.Equal("arc", AcadRuntime.PrimitiveKind("AcDbArc"));
         Assert.Equal("circle", AcadRuntime.PrimitiveKind("AcDbCircle"));
@@ -476,6 +477,52 @@ public class BridgeChannelTests : IDisposable
         using var rt = new AcadRuntime();
         var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
         Assert.Contains("ReadExplodeEvidence", ex.Message);
+    }
+
+    // M-3(a)（修复波1）：Dispose 清空块定义缓存——实例销毁后不得再返回上一会话的块定义表
+    //（缓存生命周期 = 桥会话生命周期；残留缓存会让已销毁实例"复活"旧读数）。
+    [Fact]
+    public void ReadExplodeBlockDefs_AfterDispose_Throws()
+    {
+        PrepareBridge();
+        var doc = new FakeBridgeDoc(new List<string>());
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        var rt = new AcadRuntime();
+        try
+        {
+            rt.ReadExplodeEvidence("16#1116.dwg");
+            Assert.NotEmpty(rt.ReadExplodeBlockDefs("16#1116.dwg"));   // 销毁前命中
+        }
+        finally
+        {
+            rt.Dispose();
+        }
+
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("块定义缓存缺失", ex.Message);
+    }
+
+    // M-3(b)（修复波1）：读证据成功但 Close 失败 → 整体按失败上抛，块定义缓存**不得**
+    // 被本轮读数填充（缓存写入须在 Close 成功之后；否则后续 ReadExplodeBlockDefs 会把
+    // 一次失败会话的块定义当有效读数返回）。
+    [Fact]
+    public void ReadExplodeEvidence_CloseFailure_LeavesBlockDefCacheInvalid()
+    {
+        PrepareBridge();
+        var doc = new FakeBridgeDoc(new List<string>()) { FailClose = true };
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        using var rt = new AcadRuntime();
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg"));
+        Assert.Contains("Close 失败", ex.Message);
+
+        var cacheEx = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("块定义缓存缺失", cacheEx.Message);
     }
 
     // 复审 F1(i)：/p 启动瞬间（CreateProcess 前）环境变量必须已指向本实例通道目录——
@@ -989,6 +1036,8 @@ public class BridgeChannelTests : IDisposable
         public bool TimeoutRealRead { get; set; }
         /// <summary>EXPLODE_REPLACE 只回 status ok，不写 REPLACED/VERIFY（I6：缺替换记录分支）。</summary>
         public bool OmitReplaceRecord { get; set; }
+        /// <summary>M-3(b)（修复波1）：Close 失败注入——读证据收尾需失败上抛且缓存不得被填充。</summary>
+        public bool FailClose { get; set; }
         public string Name => "16#1116.dwg";
         public string LastRequest { get; private set; } = "";
         /// <summary>最近一次文档面系统变量读取（GetVariable）的变量名（TRUSTEDPATHS 口径观测）。</summary>
@@ -998,7 +1047,11 @@ public class BridgeChannelTests : IDisposable
             LastVariableName = name;
             return "C:\\trusted;C:\\other";
         }
-        public void Close(bool save) => Calls.Add("Close(" + save + ")");
+        public void Close(bool save)
+        {
+            Calls.Add("Close(" + save + ")");
+            if (FailClose) throw new InvalidOperationException("fake close failure");
+        }
 
         public void SendCommand(string command)
         {

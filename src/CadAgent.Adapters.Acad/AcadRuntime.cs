@@ -53,9 +53,11 @@ public sealed class AcadRuntime : ICadRuntime
 
     // 边界补齐 B1：块定义段（BDEF）伴生读数缓存——与 ReadExplodeEvidence 同一次桥会话的读数，
     // 避免为取块定义再开一次图（两次 Open = 双倍耗时且多一个忙窗面）。语义：
-    //  · ReadExplodeEvidence(path) 成功 → 记录归一化路径与本次块定义表（失败即失效缓存）；
+    //  · ReadExplodeEvidence(path) **Close 成功之后**才记录归一化路径与本次块定义表
+    //    （读失败/Close 失败→缓存保持失效，失败会话的读数不得被当有效事实）；
     //  · ReadExplodeBlockDefs(path) 仅在路径与上次成功读数相等（OrdinalIgnoreCase）时返回缓存，
-    //    否则响亮拒绝（绝不隐式二次开图）；每次成功读覆盖缓存（陈旧读数不残留）。
+    //    否则响亮拒绝（绝不隐式二次开图）；每次成功读覆盖缓存（陈旧读数不残留）；
+    //  · Dispose 清空缓存（缓存生命周期=实例/桥会话生命周期）。
     private string? _lastExplodePath;
     private IReadOnlyList<BlockDefTdbEntry> _lastBlockDefs = Array.Empty<BlockDefTdbEntry>();
 
@@ -1766,11 +1768,13 @@ public sealed class AcadRuntime : ICadRuntime
                 if (!string.Equals(result.Status, "ok", StringComparison.Ordinal))
                     throw new CadRuntimeException("桥失败: " + (result.Error ?? result.Status));
                 var list = MapExplodeEvidence(result);
-                // B1：块定义段与证据同源同会话——此处一并缓存，ReadExplodeBlockDefs(path) 直接取用
-                // （缓存命中不二次开图；路径按归一化形态记录）。
-                _lastExplodePath = NormalizeDrawingPath(drawingPath);
-                _lastBlockDefs = MapBlockDefs(result);
+                var blockDefs = MapBlockDefs(result);
                 CloseTArchDoc();                         // 读完即关（失败响亮上抛）
+                // M-3(b)（修复波1）：缓存写入必须在 Close 成功**之后**——Close 失败时本读取整体
+                // 上抛，块定义缓存保持失效（否则一次失败会话的块定义会被 ReadExplodeBlockDefs
+                // 当有效读数返回）。B1：块定义段与证据同源同会话，路径按归一化形态记录。
+                _lastExplodePath = NormalizeDrawingPath(drawingPath);
+                _lastBlockDefs = blockDefs;
                 return list;
             }
             catch (Exception ex) when (ex is not CadRuntimeException)
@@ -1790,10 +1794,11 @@ public sealed class AcadRuntime : ICadRuntime
     /// <summary>
     /// 块定义内 TDb 聚合（边界补齐 B1）：与 <see cref="ReadExplodeEvidence"/> **同一次桥会话**的
     /// 伴生读数，由实例缓存直接返回（不二次开图、不发命令）。缓存语义：
-    /// ① <c>ReadExplodeEvidence(path)</c> 成功后缓存归一化路径与本次块定义表；
-    /// ② 读取失败/再次读取即失效（失败路径不残留旧表）；
+    /// ① <c>ReadExplodeEvidence(path)</c> 读成功且 <c>Close</c> 成功后缓存归一化路径与本次块定义表；
+    /// ② 读取失败/Close 失败/再次读取即失效（失败会话不残留旧表）；
     /// ③ 本方法仅在路径与上次成功读数相等（OrdinalIgnoreCase）时返回缓存，否则**响亮拒绝**——
-    ///    绝不隐式二次开图（两次 Open = 双倍耗时且多一个忙窗面，与"一次会话一份事实"相悖）。
+    ///    绝不隐式二次开图（两次 Open = 双倍耗时且多一个忙窗面，与"一次会话一份事实"相悖）；
+    /// ④ <c>Dispose</c> 清空缓存（实例销毁后不得返回上一会话读数）。
     /// 调用约定：CLI `semantic scan --explode` 在 `ReadExplodeEvidence(drawingPath)` 之后以
     /// 同一 path 调用本方法（必然缓存命中）。native-live 不取块定义段（无 Enrich 消费面）。
     /// </summary>
@@ -1859,6 +1864,9 @@ public sealed class AcadRuntime : ICadRuntime
     {
         if (_disposed) return;
         _disposed = true;
+        // M-3(a)（修复波1）：实例销毁=桥会话结束——块定义缓存随会话清空，
+        // 已销毁实例不得再返回上一会话的读数（缓存生命周期与通道目录/桥加载标记同界）。
+        InvalidateBlockDefCache();
         try
         {
             Run(() =>

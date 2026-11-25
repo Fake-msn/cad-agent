@@ -121,8 +121,10 @@ namespace CadAgent.TArchBridge
         }
 
         /// <summary>
-        /// B1：块定义 TDb 聚合。遍历 BlockTable 记录（跳过 *Model_Space 与布局块 *Paper_Space*），
-        /// 对每个块定义内的 TDb 实体按 (块名, 类) 计数；嵌套块只统计**直接**实体（不递归展开）。
+        /// B1：块定义 TDb 聚合。遍历 BlockTable 记录，跳过模型空间/图纸空间**布局块**
+        /// （主判据 <c>BlockTableRecord.IsLayout</c>：不依赖块名约定；*Model_Space/*Paper_Space*
+        /// 名称前缀保留为兜底），对每个块定义内的 TDb 实体按 (块名, 类) 计数；
+        /// 嵌套块只统计**直接**实体（不递归展开）。
         /// 输出按 (块名, 类) Ordinal 定序，保证同一图纸多次读取行序稳定。
         /// </summary>
         internal static void CollectBlockDefs(BridgeResult result, Database db, Transaction tr)
@@ -144,6 +146,13 @@ namespace CadAgent.TArchBridge
                 try { blockName = btr.Name; }
                 catch { continue; }
                 if (string.IsNullOrEmpty(blockName)) continue;
+                // M-1（修复波1）：布局块判定以 BTR.IsLayout 为主判据（模型/图纸空间布局在任何
+                // 块名约定下都不会被当块定义计数）；名称前缀保留为兜底（IsLayout 读取异常时
+                // 仍能挡住 *Model_Space/*Paper_Space*）。
+                bool isLayout = false;
+                try { isLayout = btr.IsLayout; }
+                catch { /* 取不到按非布局，交由名称兜底 */ }
+                if (isLayout) continue;
                 if (string.Equals(blockName, "*Model_Space", StringComparison.OrdinalIgnoreCase)) continue;
                 if (blockName.StartsWith("*Paper_Space", StringComparison.OrdinalIgnoreCase)) continue;
 

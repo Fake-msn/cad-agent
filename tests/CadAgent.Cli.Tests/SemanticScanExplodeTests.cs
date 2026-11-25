@@ -197,7 +197,8 @@ public class SemanticScanExplodeTests : IDisposable
         public void Dispose() { }
     }
 
-    private static (int read, int fully, int partial, int failed) ExplodeCounts(string stdout)    {
+    private static (int read, int fully, int partial, int failed) ExplodeCounts(string stdout)
+    {
         using var doc = JsonDocument.Parse(stdout);
         var root = doc.RootElement;
         return (root.GetProperty("explodeRead").GetInt32(),
@@ -564,10 +565,14 @@ public class SemanticScanExplodeTests : IDisposable
             // ④ 旧口径不变：1 行证据全炸开 → 1/1/0/0。
             Assert.Equal((1, 1, 0, 0), ExplodeCounts(stdout));
 
-            // ③ overlay 独立表落盘。
+            // ③ overlay 独立表落盘；块定义不造标注/不碰原生参数表（标注只来自证据种子）。
             var overlay = SemanticOverlay.Load(OverlayPath);
             Assert.Equal(2, overlay.BlockDefTdb.Count);
             Assert.Single(overlay.ExplodeEvidence);
+            Assert.Empty(overlay.NativeEntities);
+            var annotation = Assert.Single(overlay.Annotations);
+            Assert.Equal("21E00", annotation.TargetHandle);   // 证据种子，不是块名行
+            Assert.Equal(Provenance.NativeExplode, annotation.Provenance);
 
             // ② 审计加性键。
             using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
@@ -584,7 +589,9 @@ public class SemanticScanExplodeTests : IDisposable
     }
 
     /// <summary>B1 加性恒在：无 --explode（或运行时未提供块定义读数）时 <c>blockDefTdb</c> 为空数组、
-    /// 审计 <c>blockDefTdbCount</c>=0；overlay.BlockDefTdb 亦为空表（不复用上轮磁盘值）。</summary>
+    /// 审计 <c>blockDefTdbCount</c>=0。注意 stdout/审计是**本轮**读数（0）；磁盘 overlay 的定义段
+    /// 与 ExplodeEvidence 表同语义——非 --explode 扫描不删除上轮定义段（本用例无上轮定义段，
+    /// 故仍为空；保留语义由 <see cref="ScanWithoutExplode_RetainsPreviousBlockDefTdb"/> 钉住）。</summary>
     [Fact]
     public void ScanWithoutExplode_BlockDefTdb_Empty()
     {
@@ -601,6 +608,48 @@ public class SemanticScanExplodeTests : IDisposable
             using var p = JsonDocument.Parse(scan.Entry.ParamsJson);
             Assert.Equal(0, p.RootElement.GetProperty("blockDefTdbCount").GetInt32());
             Assert.Empty(SemanticOverlay.Load(OverlayPath).BlockDefTdb);
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    /// <summary>
+    /// M-4（修复波1）：plain <c>semantic scan</c>（无 --explode）**保留**上轮 BlockDefTdb 定义段——
+    /// 镜像 ExplodeEvidence 表语义（只有 --explode 路径经 Enrich 整表替换；非深读扫描不得凭
+    /// "本轮没读块定义"清空磁盘事实）。stdout/审计仍只反映本轮读数（0 行）。
+    /// </summary>
+    [Fact]
+    public void ScanWithoutExplode_RetainsPreviousBlockDefTdb()
+    {
+        // 预置上轮定义段（模拟上一轮 --explode 落盘结果）。
+        var seeded = new SemanticOverlay();
+        seeded.BlockDefTdb.Add(new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364));
+        seeded.Save(OverlayPath);
+
+        CommandRouter.RuntimeFactory = () => throw new InvalidOperationException("不带 --explode 不得创建运行时");
+        try
+        {
+            var (code, stdout, _) = Run("semantic", "scan", "--drawing", _drawing);
+            Assert.Equal(0, code);
+
+            // 本轮口径：无 --explode → stdout 空数组 / 审计 0（加性键恒在）。
+            using (var doc = JsonDocument.Parse(stdout))
+                Assert.Equal(0, doc.RootElement.GetProperty("blockDefTdb").GetArrayLength());
+            using (var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db")))
+            {
+                var scan = audit.ReadAll().Single(r => r.Entry.Kind == "semantic-scan");
+                using var p = JsonDocument.Parse(scan.Entry.ParamsJson);
+                Assert.Equal(0, p.RootElement.GetProperty("blockDefTdbCount").GetInt32());
+            }
+
+            // 磁盘事实：上轮定义段原样保留（不被非 --explode 扫描清空）。
+            var overlay = SemanticOverlay.Load(OverlayPath);
+            var entry = Assert.Single(overlay.BlockDefTdb);
+            Assert.Equal("$equip$00002832", entry.BlockName);
+            Assert.Equal("TDbECabletry", entry.RxClass);
+            Assert.Equal(1364, entry.Count);
         }
         finally
         {

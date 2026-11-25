@@ -284,7 +284,8 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     [SkippableFact]
     public void T5_ElecTdbeClasses_Read()
     {
-        RequireLiveEnvironment();
+        // M-6：电类标本自证存在性（CreateElecCopy 内 Skip），不依赖 16#1116 夹具。
+        RequireLiveEnvironment(needsWallSpecimen: false);
         string copy = CreateElecCopy("elec-tdbe-01.dwg");
         try
         {
@@ -306,7 +307,7 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
             LogClassRows("T5", ElecFittingRx, fitting);
 
             AssertCuixCanary("elec-tdbe-read");
-            _fx.AssertCanaries("elec-tdbe-read");
+            AssertElecCanaries("elec-tdbe-read");
             Assert.Equal(shaBefore, AcadNativeLiveFixture.Sha256File(copy));
 
             Skip.If(cabletry.Count == 0,
@@ -324,11 +325,16 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     ///（同一次桥会话的伴生读数，缓存命中不二次开图）。断言块定义表非空且含电气类之一；
     /// 块定义行（按块名）**不得**混入模型空间证据句柄集（定义 ≠ 实例，不得双计）；
     /// (blockName,rxClass) 唯一；金丝雀同上。
+    /// M-6 覆盖面说明：本真机骨架只证"真桥/真标本"一段；语义边界由 fake 测试钉住——
+    /// Data <c>Enrich_BlockDefs_DisclosureOnly_DoesNotTouchAnnotationsOrNativeEntities</c>
+    ///（不改标注/原生表、只入独立表）与 Cli <c>ScanExplode_BlockDefTdb_SeparateSection_AdditiveKeys</c>
+    ///（stdout 与本轮输入逐字一致、explode 四计数不变）。
     /// </summary>
     [SkippableFact]
     public void T6_BlockDefTdb_SeparateSection()
     {
-        RequireLiveEnvironment();
+        // M-6：电类标本自证存在性（CreateElecCopy 内 Skip），不依赖 16#1116 夹具。
+        RequireLiveEnvironment(needsWallSpecimen: false);
         string copy = CreateElecCopy("elec-tdbe-02.dwg");
         try
         {
@@ -343,7 +349,7 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
                 _out.WriteLine($"[T6] BDEF block={d.BlockName} rx={d.RxClass} count={d.Count}");
 
             AssertCuixCanary("elec-tdbe-blockdef");
-            _fx.AssertCanaries("elec-tdbe-blockdef");
+            AssertElecCanaries("elec-tdbe-blockdef");
             Assert.Equal(shaBefore, AcadNativeLiveFixture.Sha256File(copy));
 
             Skip.If(blockDefs.Count == 0,
@@ -439,15 +445,21 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
 
     // ---- guards ----
 
-    private void RequireLiveEnvironment()
+    private void RequireLiveEnvironment(bool needsWallSpecimen = true)
     {
-        Skip.If(!_fx.SpecimenReady, _fx.SpecimenSkipReason ?? "真实电气标本不可用，跳过真机测试");
+        // M-6（修复波1）：16#1116 标本闸只对依赖它的 T1-T4/T7 生效。T5/T6 用电气标本
+        // （elec-tdbe-01/02），其存在性由 CreateElecCopy 各自 Skip——不得因 16#1116 缺失
+        // 而把电类用例误 Skip 成"标本不可用"（反之亦然）。
+        if (needsWallSpecimen)
+            Skip.If(!_fx.SpecimenReady, _fx.SpecimenSkipReason ?? "真实电气标本不可用，跳过真机测试");
 
         // 前置进程纪律（与 <see cref="AcadProbe"/> 第四态同口径）：起始就有 acad 进程 → **Skip**
         // （并发激活= CUIX 竞态，且残留实例必被前次启动期模态框滞留）；残留非本测试缺陷，
         // 硬失败会掩盖真因。收尾金丝雀（AssertCanaries）仍**硬断言** Dispose 后 0 残留。
-        Skip.If(_fx.AcadProcessCountBefore > 0,
-            $"起始已有 acad 进程 {_fx.AcadProcessCountBefore} 个（不并发激活/CUIX 竞态守卫）——"
+        // 计数独立实算：夹具仅在 16#1116 存在时赋值 AcadProcessCountBefore，本闸对电类用例同样适用。
+        int acadBefore = AcadNativeLiveFixture.AcadProcessTokens().Count;
+        Skip.If(acadBefore > 0,
+            $"起始已有 acad 进程 {acadBefore} 个（不并发激活/CUIX 竞态守卫）——"
             + "已运行的实例可能仍挂着启动期模态框，须人工关闭后重跑"
             + BridgeLiveGuard.LeftoverNote("测试启动时"));
 
@@ -489,6 +501,17 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         Assert.Equal(_cuixBefore.Count, after.Count);
         Assert.Equal(AcadNativeLiveFixture.CuixFingerprint(_cuixBefore),
             AcadNativeLiveFixture.CuixFingerprint(after));
+    }
+
+    /// <summary>电类标本收尾金丝雀（T5/T6 专用）：CUIX 指纹 + acad 零残留。
+    /// 不复用 <see cref="AcadNativeLiveFixture.AssertCanaries"/>——后者硬断言 16#1116 标本可用/字节不变，
+    /// 而 T5/T6 的标本是 elec-tdbe-01/02（副本 SHA 由用例内联断言）。</summary>
+    private void AssertElecCanaries(string stage)
+    {
+        AssertCuixCanary(stage);
+        var acad = AcadNativeLiveFixture.AcadProcessTokens();
+        Assert.True(acad.Count == 0,
+            $"[{stage}] 残留 acad.exe 进程: {string.Join(",", acad)}（自家实例 Dispose 后须零残留）");
     }
 
     /// <summary>CUIX 指纹摘要（路径排序；"文件名=sha256"，多文件逗号分隔）。</summary>

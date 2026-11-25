@@ -84,6 +84,21 @@ public class TarchDeriveTests
         Assert.Empty(o.Annotations);
     }
 
+    // I-2（修复波1）：退化 extents 的证据行 bbox=null —— 旧实现跳过 bbox 比对后静默落 0.9，
+    // 等于把"包围盒不可验"当"已验证一致"。保守口径：退化行不种子（行本身保留可复核）。
+    [Theory]
+    [InlineData("extents:degenerate")]
+    [InlineData("extents:degenerate:roundtrip")]   // 前缀口径：后续细分原因亦不种子
+    public void Enrich_DegenerateExtents_FullyAndClassKnown_NoAnnotation_ButRowKept(string failReason)
+    {
+        var o = new SemanticOverlay();
+        TarchDerive.Enrich(o, new[] { Wall("D1") with { FailReason = failReason } });
+
+        var row = Assert.Single(o.ExplodeEvidence);
+        Assert.Equal(failReason, row.FailReason);   // 证据行保留（撤行=丢事实）
+        Assert.Empty(o.Annotations);                // 但不得落 NativeExplode 0.9
+    }
+
     [Fact]
     public void Enrich_Rescan_RemovesStaleRows()
     {
@@ -283,12 +298,24 @@ public class TarchDeriveTests
         Assert.Empty(o.BlockDefTdb);
     }
 
+    /// <summary>
+    /// M-6（修复波1）：块定义段**只披露**——不改写既有标注/原生参数表。
+    /// 旧用例把证据类设为 Unknown（"天然不种子"），断言近乎同义反复；本用例改用**类已知**证据
+    /// （FullyExplodable=false 使其本条不种子）并预置既有标注 + 原生参数行：块定义进入独立表时，
+    /// 这两张表必须逐字不变（不得回收非 NativeExplode 标注、不得改原生参数）。
+    /// </summary>
     [Fact]
-    public void Enrich_BlockDefs_DisclosureOnly_NoAnnotationsAndEvidenceUnchanged()
+    public void Enrich_BlockDefs_DisclosureOnly_DoesNotTouchAnnotationsOrNativeEntities()
     {
         var o = new SemanticOverlay();
-        // 证据类不在语义类映射内（Unknown → 本身不种子）；块定义更不得造标注。
-        var ev = Wall("21E00") with { RxClass = "TDbUnmapped" };
+        o.UpsertNative(new NativeEntityParam("21E00", "TDbWall", SemanticClass.Wall,
+            new Dictionary<string, string> { ["TotalWidth"] = "100" },
+            null, DateTimeOffset.UtcNow, true, "0dt"));
+        o.UpsertAnnotation(new SemanticAnnotation(
+            "21E00", SemanticClass.Wall, Provenance.LayerInference, 0.8, "图层推断"));
+
+        // 类已知（TDbWall）但未全炸开 → 本条证据本身不种子；块定义更不得造标注。
+        var ev = Wall("21E00") with { FullyExplodable = false };
         TarchDerive.Enrich(o, new[] { ev }, new[]
         {
             new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364),
@@ -296,8 +323,11 @@ public class TarchDeriveTests
 
         var row = Assert.Single(o.ExplodeEvidence);
         Assert.Equal("21E00", row.Handle);   // 块定义（按块名）不混入实例证据表
-        // 块定义只披露：不得产生任何标注（尤其不得冒充 NativeExplode 语义种子）。
-        Assert.Empty(o.Annotations);
+        var native = Assert.Single(o.NativeEntities);
+        Assert.Equal("100", native.Params!["TotalWidth"]);
+        var annotation = Assert.Single(o.Annotations);
+        Assert.Equal(Provenance.LayerInference, annotation.Provenance);   // 既有标注原样保留
+        Assert.Equal(0.8, annotation.Confidence);
         Assert.Single(o.BlockDefTdb);
     }
 }
