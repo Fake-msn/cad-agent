@@ -462,7 +462,8 @@ public class BridgeChannelTests : IDisposable
         AcadAttach.ActiveObjectResolver = _ => app;
 
         using var rt = new AcadRuntime();
-        rt.ReadExplodeEvidence("16#1116.dwg");
+        // A3：块定义段按需读取——缓存测试须显式请求（includeBlockDefs: true）。
+        rt.ReadExplodeEvidence("16#1116.dwg", includeBlockDefs: true);
         int afterRead = calls.Count;
 
         var defs = rt.ReadExplodeBlockDefs("16#1116.dwg");
@@ -487,6 +488,29 @@ public class BridgeChannelTests : IDisposable
         Assert.Contains("ReadExplodeEvidence", ex.Message);
     }
 
+    // A3（技术债批次A）：块定义段按需读取——本次读取**未请求**（includeBlockDefs=false，缺省）
+    // 时缓存不写入：ReadExplodeBlockDefs 必响亮拒绝（绝不凭空返回空表，也不隐式二次开图；
+    // "读到了 0 个块定义"与"本轮没读块定义"是不同事实）。
+    [Fact]
+    public void ReadExplodeBlockDefs_WithoutIncludeBlockDefs_Throws()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls);
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        using var rt = new AcadRuntime();
+        var evidences = rt.ReadExplodeEvidence("16#1116.dwg");   // 缺省 false
+        Assert.NotEmpty(evidences);
+        int afterRead = calls.Count;
+
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("includeBlockDefs", ex.Message);
+        Assert.Equal(afterRead, calls.Count);   // 拒绝也不得二次开图
+    }
+
     // M-3(a)（修复波1）：Dispose 清空块定义缓存——实例销毁后不得再返回上一会话的块定义表
     //（缓存生命周期 = 桥会话生命周期；残留缓存会让已销毁实例"复活"旧读数）。
     [Fact]
@@ -501,7 +525,7 @@ public class BridgeChannelTests : IDisposable
         var rt = new AcadRuntime();
         try
         {
-            rt.ReadExplodeEvidence("16#1116.dwg");
+            rt.ReadExplodeEvidence("16#1116.dwg", includeBlockDefs: true);
             Assert.NotEmpty(rt.ReadExplodeBlockDefs("16#1116.dwg"));   // 销毁前命中
         }
         finally
@@ -526,7 +550,7 @@ public class BridgeChannelTests : IDisposable
         AcadAttach.ActiveObjectResolver = _ => app;
 
         using var rt = new AcadRuntime();
-        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg"));
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg", includeBlockDefs: true));
         Assert.Contains("Close 失败", ex.Message);
 
         var cacheEx = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));

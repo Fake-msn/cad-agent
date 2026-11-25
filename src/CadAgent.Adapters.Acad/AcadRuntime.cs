@@ -57,9 +57,14 @@ public sealed class AcadRuntime : ICadRuntime
     //    （读失败/Close 失败→缓存保持失效，失败会话的读数不得被当有效事实）；
     //  · ReadExplodeBlockDefs(path) 仅在路径与上次成功读数相等（OrdinalIgnoreCase）时返回缓存，
     //    否则响亮拒绝（绝不隐式二次开图）；每次成功读覆盖缓存（陈旧读数不残留）；
+    //  · A3（技术债批次A）：块定义段**按需读取**——只有请求时（includeBlockDefs:true）才缓存；
+    //    未请求时缓存标记为"未取"，ReadExplodeBlockDefs 响亮拒绝（"没读"不得冒充"读了 0 行"）；
     //  · Dispose 清空缓存（缓存生命周期=实例/桥会话生命周期）。
     private string? _lastExplodePath;
     private IReadOnlyList<BlockDefTdbEntry> _lastBlockDefs = Array.Empty<BlockDefTdbEntry>();
+
+    // A3：上次成功读数是否**索取了**块定义段（false=缓存里的空表只是占位，不是事实）。
+    private bool _lastBlockDefsRequested;
 
     internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
@@ -1750,8 +1755,11 @@ public sealed class AcadRuntime : ICadRuntime
     /// 通道目录为**实例级**（<see cref="EnsureChannelDir"/>，复审 F1）：自本实例首次启动前注入
     /// 环境变量 <see cref="BridgeChannelEnvVar"/> 起全程复用——AutoCAD 子进程只在 CreateProcess
     /// 时快照该变量，故目录不能每次调用重建（重建=桥看不到新目录）；删除与还原只在 Dispose。
+    /// A3（技术债批次A）：<paramref name="includeBlockDefs"/> 随请求下发（协议键 <c>bdef</c>）——
+    /// true 才让桥扫描块定义段并在 Close 成功后缓存（见 <see cref="ReadExplodeBlockDefs"/>）；
+    /// false（native-live 等不消费定义段的调用面）不付该成本、也不产生可命中的定义段缓存。
     /// </summary>
-    public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) =>
+    public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false) =>
         Run<IReadOnlyList<ExplodeEvidence>>(() =>
         {
             if (drawingPath == null) throw new CadRuntimeException("无打开的图纸参数");
@@ -1770,7 +1778,10 @@ public sealed class AcadRuntime : ICadRuntime
                 InstallBridgeSeams();
                 EnsureBridgeLoaded(channel);
                 string id = BridgeChannel.WriteRequest(channel,
-                    new BridgeRequest("read", Path.GetFileName(drawingPath), null, BridgeReadMaxDepth, null).Write());
+                    new BridgeRequest("read", Path.GetFileName(drawingPath), null, BridgeReadMaxDepth, null)
+                    {
+                        IncludeBlockDefs = includeBlockDefs
+                    }.Write());
                 BridgeChannel.SendCommand(BridgeChannel.ReadCommand, "cmd");
                 string? text = BridgeChannel.WaitDone(channel, id, BridgeChannel.CommandWait);
                 if (text == null)
@@ -1780,13 +1791,15 @@ public sealed class AcadRuntime : ICadRuntime
                 if (!string.Equals(result.Status, "ok", StringComparison.Ordinal))
                     throw new CadRuntimeException("桥失败: " + (result.Error ?? result.Status));
                 var list = MapExplodeEvidence(result);
-                var blockDefs = MapBlockDefs(result);
+                // A3：未索取定义段时桥不输出 BDEF 行（也不缓存）——空表只是占位，由 _lastBlockDefsRequested 区分。
+                var blockDefs = includeBlockDefs ? MapBlockDefs(result) : Array.Empty<BlockDefTdbEntry>();
                 CloseTArchDoc();                         // 读完即关（失败响亮上抛）
                 // M-3(b)（修复波1）：缓存写入必须在 Close 成功**之后**——Close 失败时本读取整体
                 // 上抛，块定义缓存保持失效（否则一次失败会话的块定义会被 ReadExplodeBlockDefs
                 // 当有效读数返回）。B1：块定义段与证据同源同会话，路径按归一化形态记录。
                 _lastExplodePath = NormalizeDrawingPath(drawingPath);
                 _lastBlockDefs = blockDefs;
+                _lastBlockDefsRequested = includeBlockDefs;
                 return list;
             }
             catch (Exception ex) when (ex is not CadRuntimeException)
@@ -1810,9 +1823,11 @@ public sealed class AcadRuntime : ICadRuntime
     /// ② 读取失败/Close 失败/再次读取即失效（失败会话不残留旧表）；
     /// ③ 本方法仅在路径与上次成功读数相等（OrdinalIgnoreCase）时返回缓存，否则**响亮拒绝**——
     ///    绝不隐式二次开图（两次 Open = 双倍耗时且多一个忙窗面，与"一次会话一份事实"相悖）；
+    /// ⑤ A3（技术债批次A）：上次读数**未索取**块定义段（<c>includeBlockDefs=false</c>）时同样响亮拒绝
+    ///    （"本轮没读块定义"与"读了但零定义"是不同事实，不得用空表冒充）；
     /// ④ <c>Dispose</c> 清空缓存（实例销毁后不得返回上一会话读数）。
-    /// 调用约定：CLI `semantic scan --explode` 在 `ReadExplodeEvidence(drawingPath)` 之后以
-    /// 同一 path 调用本方法（必然缓存命中）。native-live 不取块定义段（无 Enrich 消费面）。
+    /// 调用约定：CLI `semantic scan --explode` 在 `ReadExplodeEvidence(drawingPath, includeBlockDefs: true)`
+    /// 之后以同一 path 调用本方法（必然缓存命中）。native-live 不取块定义段（无 Enrich 消费面）。
     /// </summary>
     public IReadOnlyList<BlockDefTdbEntry> ReadExplodeBlockDefs(string drawingPath)
     {
@@ -1820,7 +1835,12 @@ public sealed class AcadRuntime : ICadRuntime
         string path = NormalizeDrawingPath(drawingPath);
         if (_lastExplodePath != null
             && string.Equals(path, _lastExplodePath, StringComparison.OrdinalIgnoreCase))
-            return _lastBlockDefs;
+        {
+            if (_lastBlockDefsRequested) return _lastBlockDefs;
+            throw new CadRuntimeException(
+                "块定义缓存缺失：上次 ReadExplodeEvidence 未请求块定义段（includeBlockDefs=false）"
+                + "——须以 includeBlockDefs:true 重读（不隐式二次开图）");
+        }
         throw new CadRuntimeException(
             "块定义缓存缺失：ReadExplodeBlockDefs(path) 须紧接同 path 的 ReadExplodeEvidence(path) 之后调用"
             + "（不隐式二次开图）");
@@ -1830,6 +1850,7 @@ public sealed class AcadRuntime : ICadRuntime
     {
         _lastExplodePath = null;
         _lastBlockDefs = Array.Empty<BlockDefTdbEntry>();
+        _lastBlockDefsRequested = false;
     }
 
     /// <summary>路径归一化（缓存键）：可行时取全路径，异常（非法字符等）按原样——比较两侧同法归一。</summary>

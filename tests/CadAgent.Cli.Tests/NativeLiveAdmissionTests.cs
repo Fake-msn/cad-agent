@@ -996,7 +996,7 @@ public class NativeLiveAdmissionTests : IDisposable
         private string? _openedPath;
 
         // I5：接口默认实现会静默返回空表，掩盖"生产是否真的深读"——fake 必须如实记录该调用。
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath)
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false)
         {
             Calls.Add("read-explode");
             if (ThrowOnExplodeRead)

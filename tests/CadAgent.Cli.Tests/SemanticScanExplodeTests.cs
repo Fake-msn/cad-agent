@@ -81,7 +81,7 @@ public class SemanticScanExplodeTests : IDisposable
     private sealed class FakeExplodeRuntime : ICadRuntime
     {
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false) => new[]
         {
             new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
                 new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 2, 0,
@@ -117,7 +117,7 @@ public class SemanticScanExplodeTests : IDisposable
                 new Dictionary<string, string> { ["LeftWidth"] = "100" },
                 null, DateTimeOffset.UtcNow, true, "0dt")
         };
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false) => new[]
         {
             new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
                 new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 2, 0,
@@ -147,7 +147,7 @@ public class SemanticScanExplodeTests : IDisposable
     private sealed class FakeSymbolCandidateRuntime : ICadRuntime
     {
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false) => new[]
         {
             new ExplodeEvidence("30B01", "TDbDoor", "ImpEntity", "C门窗",
                 null, true, 1, 0,
@@ -173,14 +173,21 @@ public class SemanticScanExplodeTests : IDisposable
     /// 且**不改变**既有 explode 四计数口径（证据列表未加行）。</summary>
     private sealed class FakeBlockDefRuntime : ICadRuntime
     {
+        /// <summary>A3：本轮 ReadExplodeEvidence 收到的 includeBlockDefs 实参（--explode 必须为 true）。</summary>
+        public List<bool> IncludeBlockDefsCalls { get; } = new();
+
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false)
         {
-            new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
-                new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 0, 0,
-                Array.Empty<ExplodePrimitive>(),
-                new Dictionary<string, string>(), null, DateTimeOffset.UtcNow),
-        };
+            IncludeBlockDefsCalls.Add(includeBlockDefs);
+            return new[]
+            {
+                new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
+                    new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 0, 0,
+                    Array.Empty<ExplodePrimitive>(),
+                    new Dictionary<string, string>(), null, DateTimeOffset.UtcNow),
+            };
+        }
         public IReadOnlyList<BlockDefTdbEntry> ReadExplodeBlockDefs(string drawingPath) => new[]
         {
             new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364),
@@ -202,7 +209,7 @@ public class SemanticScanExplodeTests : IDisposable
     private sealed class FakeBlockDefFailureRuntime : ICadRuntime
     {
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false) => new[]
         {
             new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
                 new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 0, 0,
@@ -597,6 +604,9 @@ public class SemanticScanExplodeTests : IDisposable
             var annotation = Assert.Single(overlay.Annotations);
             Assert.Equal("21E00", annotation.TargetHandle);   // 证据种子，不是块名行
             Assert.Equal(Provenance.NativeExplode, annotation.Provenance);
+            // A4：块定义行带本轮图纸哈希（来源可追溯；同名块跨图纸不混读）。两行同哈希。
+            Assert.All(overlay.BlockDefTdb, d => Assert.False(string.IsNullOrWhiteSpace(d.DrawingHash)));
+            Assert.Single(overlay.BlockDefTdb.Select(d => d.DrawingHash).Distinct());
 
             // ② 审计加性键。
             using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
@@ -605,6 +615,30 @@ public class SemanticScanExplodeTests : IDisposable
             Assert.Equal(2, p.RootElement.GetProperty("blockDefTdbCount").GetInt32());
             Assert.Equal(1, p.RootElement.GetProperty("explodeRead").GetInt32());
             Assert.True(audit.VerifyChain(out _));
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    /// <summary>
+    /// A3（技术债批次A）：`--explode` 以 <c>includeBlockDefs: true</c> 调 ReadExplodeEvidence
+    ///（块定义段按需读取：不走桥的 native-live 路径缺省 false，故深读是唯一索取点）。
+    /// 断言实参逐次为 true（恰一次读取——Enrich 全量口径）。
+    /// </summary>
+    [Fact]
+    public void ScanExplode_PassesIncludeBlockDefsTrue()
+    {
+        var runtime = new FakeBlockDefRuntime();
+        CommandRouter.RuntimeFactory = () => runtime;
+        try
+        {
+            var (code, _, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--explode");
+
+            Assert.Equal(0, code);
+            Assert.DoesNotContain("explode-read-failed", stderr);
+            Assert.Equal(new[] { true }, runtime.IncludeBlockDefsCalls);
         }
         finally
         {

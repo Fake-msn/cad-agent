@@ -835,7 +835,9 @@ public static partial class CommandRouter
                     {
                         try
                         {
-                            var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath);
+                            // A3（技术债批次A）：--explode 是块定义段的**唯一**消费者——显式索取
+                            //（includeBlockDefs:true；native-live 等不消费定义段的路径保持缺省 false）。
+                            var evidences = explodeRuntime.ReadExplodeEvidence(drawingPath, includeBlockDefs: true);
                             explodeRead = evidences.Count;
                             explodeFully = evidences.Count(e => e.FullyExplodable);
                             // 口径（brief 逐字）：未全炸开且仍有产物=部分；零产物=失败（基元表缺失按空）。
@@ -861,7 +863,8 @@ public static partial class CommandRouter
                             List<BlockDefTdbEntry>? retained = blockDefs is null
                                 ? result.Overlay.BlockDefTdb.ToList()
                                 : null;
-                            var derive = TarchDerive.Enrich(result.Overlay, evidences, blockDefs);
+                            // A4（技术债批次A）：块定义行逐行盖章本轮图纸哈希（来源可追溯：同名块跨图纸不混读）。
+                            var derive = TarchDerive.Enrich(result.Overlay, evidences, blockDefs, hash);
                             if (retained is not null)
                             {
                                 result.Overlay.BlockDefTdb.Clear();

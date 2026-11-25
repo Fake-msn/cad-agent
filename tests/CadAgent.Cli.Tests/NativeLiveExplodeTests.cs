@@ -727,7 +727,7 @@ public class NativeLiveExplodeTests : IDisposable
         public void EnsureBlock(string blockName, IReadOnlyList<BlockPrimitive> primitives) => Calls.Add("ensure-block");
         public int EntityCount() => ReadResults.Count;
 
-        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath)
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath, bool includeBlockDefs = false)
         {
             Calls.Add("read-explode");
             if (_openedPath != null)

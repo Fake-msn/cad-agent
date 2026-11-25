@@ -35,8 +35,10 @@ public sealed record ExplodeEvidence(
 
 /// <summary>块定义内 TDb 实体聚合（边界补齐 B1）：**定义段**按 (块名, 类) 计数——
 /// 与<see cref="ExplodeEvidence"/>（模型空间实例按句柄）是两条互不混同的事实线：
-/// 块定义计数不是实例数（同一块可零实例可多实例），嵌套块只统计定义内的直接实体（不递归展开）。</summary>
-public sealed record BlockDefTdbEntry(string BlockName, string RxClass, int Count);
+/// 块定义计数不是实例数（同一块可零实例可多实例），嵌套块只统计定义内的直接实体（不递归展开）。
+/// DrawingHash（A4 加性末位）=产生该行的图纸哈希：同名块在不同图纸下的计数不得混读
+///（旧 overlay 无此字段→null，语义同"来源未记录"，不猜）。</summary>
+public sealed record BlockDefTdbEntry(string BlockName, string RxClass, int Count, string? DrawingHash = null);
 
 /// <summary>句柄级炸开替换结果（spec 切片B §4）：BboxMatch=替换前后包围盒（仅 X/Y）容差内一致。</summary>
 public sealed record ExplodeReplaceResult(
