@@ -15,6 +15,7 @@ namespace CadAgent.View.Controls;
 /// →T9 工具拦截（ToolClickHandler，MainWindow 按 ActiveTool 路由）→未消费则
 /// HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮（文本黄色加粗）。
 /// T9 绘制预览：PendingPoint 十字标记 + 到光标的橡皮筋线（Line 工具第一击）。
+/// 天读证据：CanvasViewModel.ShowCenterlines 开时叠加青色虚线中心线（只读，不参与命中）。
 /// 尺寸变化→Fit（重置 zoom/pan，T10 可升级为保持视图）。线宽恒定设备像素（CAD 习惯）。
 /// 文本按水平渲染（RotationDeg 暂不参与，与 VM 文本命中盒一致）；插入点视为基线左端。
 /// </summary>
@@ -34,6 +35,13 @@ public sealed class DrawingCanvas : Control
     private static readonly Pen DiffBeforePen = new(new SolidColorBrush(Color.FromRgb(0x80, 0x80, 0x80)), 1);
     private static readonly Pen DiffAddedPen = new(new SolidColorBrush(Color.FromRgb(0x00, 0xC8, 0x53)), 2);
     private static readonly Pen DiffRemovedPen = new(new SolidColorBrush(Color.FromRgb(0xE5, 0x39, 0x35)), 1);
+
+    // 天读证据：中心线只读叠加（青色虚线）。DashStyle 图案按笔宽倍数（Avalonia 口径），
+    // 恒定设备像素——中心线数据无宽度语义，不随缩放换算。
+    private static readonly Pen CenterlinePen = new(new SolidColorBrush(Color.FromRgb(0x00, 0xE5, 0xFF)), 2)
+    {
+        DashStyle = new DashStyle(new double[] { 4, 2 }, 0)
+    };
 
     private readonly Dictionary<uint, Pen> _penCache = new();
     private readonly Dictionary<uint, IBrush> _brushCache = new();
@@ -107,6 +115,12 @@ public sealed class DrawingCanvas : Control
             Pen pen = added ? DiffAddedPen : highlight ? SelectionPen : GetPen(item.ColorRgb);
             DrawItem(context, item, pen);
         }
+
+        // 天读证据：中心线叠加（ShowCenterlines 开时绘制；只读，不参与命中/选择）。
+        if (ViewModel.ShowCenterlines)
+            foreach (CenterlineSeg seg in ViewModel.Centerlines)
+                context.DrawLine(CenterlinePen,
+                    ScreenPoint((seg.X1, seg.Y1)), ScreenPoint((seg.X2, seg.Y2)));
 
         // T9 绘制预览：待定锚点十字标记 + 到当前光标的橡皮筋线（只读叠加，不参与命中）。
         if (ViewModel.PendingPoint is (double px, double py))

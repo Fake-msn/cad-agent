@@ -81,6 +81,11 @@ namespace CadAgent.View;
 /// → 填充意图勾选项优先（"{RuleId} [{Force}]: {Suggestion}"）+ 零勾选 mandatory
 /// 兜底（旧格式保持）+ recommended 采纳审计 rule-adopted（Source=rule，经既有
 /// writeAudit/signoffIdentity 同源实例，无旁路）；忽略=未勾选正常决策不留痕。
+/// 天读证据（只读）：左栏第五 tab——DeepReadViewModel 从 .cadagent/semantic.json
+/// 重建五区（原生参数/炸开证据/符号候选/块定义/证据状态）+ 中心线叠加开关
+/// （Canvas.ShowCenterlines，有中心线才可勾选）；a/b/e 区行点击 → Canvas.SelectByHandle
+/// 定位。刷新=初始 / 语义扫描·映射完成（SemanticChanged）/ 编辑后 RefreshAfterEdit；
+/// 面板只读（不写审计、不落盘），overlay 损坏 → 行内错误 + 五区清空。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -98,6 +103,13 @@ public sealed class MainWindow : Window
     private string _baseStatus = "";
     private string _diffSummary = "";
     private TextBlock? _semanticHeader;
+
+    /// <summary>天读证据五区小节名（与 <see cref="_deepReadSectionHeaders"/> 同序）。</summary>
+    private static readonly string[] DeepReadSectionNames =
+        { "原生参数", "炸开证据", "符号候选", "块定义", "证据状态" };
+
+    /// <summary>天读证据五区小节标题（含计数；随 Reload 刷新；与 DeepReadSectionNames 同序）。</summary>
+    private readonly TextBlock[] _deepReadSectionHeaders = new TextBlock[5];
 
     /// <summary>T10：--skill 目录（MainViewModel 承载）——Issues/Adjudication/Semantic 共用。</summary>
     private readonly IReadOnlyList<string> _skillDirs;
@@ -593,6 +605,8 @@ public sealed class MainWindow : Window
             sessionGate: sessionGate);
         Semantic = semantic;
         semantic.SemanticChanged += UpdateSemanticPanel;
+        // 天读证据：扫描/映射落盘后重读 overlay（DeepRead 在下方构造——事件首触发前已就绪）。
+        semantic.SemanticChanged += ReloadDeepRead;
 
         var semanticHeader = new TextBlock
         {
@@ -837,14 +851,112 @@ public sealed class MainWindow : Window
             Audit?.Rebuild();
         });
 
+        // 天读证据 tab（只读）：从 .cadagent/semantic.json 重建五区（原生参数/炸开证据/
+        // 符号候选/块定义/证据状态）+ 中心线叠加开关。不写审计、不落盘；刷新时机=
+        // 初始加载 / 语义扫描·映射完成（SemanticChanged 追加订阅）/ 编辑后 RefreshAfterEdit。
+        var deepRead = new DeepReadViewModel(
+            Path.Combine(vm.ProjectDir, ".cadagent"), () => SafeDrawingHash(vm));
+        DeepRead = deepRead;
+
+        var deepReadHeader = new TextBlock
+        {
+            Text = "天读证据",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4),
+            TextWrapping = TextWrapping.Wrap
+        };
+        DeepReadHeader = deepReadHeader;
+
+        var showCenterlines = new CheckBox
+        {
+            Content = "显示中心线",
+            IsChecked = false,
+            Margin = new Thickness(4, 2)
+        };
+        showCenterlines.IsCheckedChanged += (_, _) =>
+        {
+            if (Canvas is not null) Canvas.ShowCenterlines = showCenterlines.IsChecked == true;
+        };
+        DeepReadShowCenterlines = showCenterlines;
+
+        var deepReadError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        DeepReadError = deepReadError;
+
+        ListBox nativeList = DeepReadSection<NativeParamRow>(deepRead.NativeRows, r =>
+            $"{r.Handle} · {r.ObjectName} · {r.Class} · {r.Layer} · {(r.ReadOk ? "可读" : "读参失败")}"
+            + $"{Environment.NewLine}{r.ParamsSummary}"
+            + (r.FailReason is null ? "" : $" · 原因：{r.FailReason}"));
+        ListBox explodeList = DeepReadSection<ExplodeRow>(deepRead.ExplodeRows, r =>
+            $"{r.Handle} · {r.RxClass} · {(r.FullyExplodable ? "全炸" : "未全炸")}"
+            + $" · 基元 {r.PrimitiveCount} · 残 TDb {r.NestedTdbCount}{(r.Degenerate ? " · 退化" : "")}"
+            + (r.FailReasonsSummary is null ? "" : $"{Environment.NewLine}{r.FailReasonsSummary}"));
+        ListBox symbolList = DeepReadSection<SymbolCandidateRow>(deepRead.SymbolRows, r =>
+            $"{r.Handle} · {r.BlockName} · {r.Kind} · {r.ClassHint}");
+        ListBox blockDefList = DeepReadSection<BlockDefRow>(deepRead.BlockDefRows, r =>
+            $"{r.BlockName} · {r.RxClass} · {r.Count}"
+            + $" · {r.IsCurrentDrawing switch { true => "本图", false => "异图", null => "—" }}"
+            + (r.DrawingHash is null ? "" : $" · {r.DrawingHash}"));
+        ListBox evidenceList = DeepReadSection<EvidenceStateRow>(deepRead.EvidenceRows, r =>
+            $"{r.Handle} · 参数 {r.ParamsState} · 炸开 {r.ExplodeState}{Environment.NewLine}{r.Advisory}");
+        DeepReadNativeList = nativeList;
+        DeepReadExplodeList = explodeList;
+        DeepReadSymbolList = symbolList;
+        DeepReadBlockDefList = blockDefList;
+        DeepReadEvidenceList = evidenceList;
+
+        // 行点击 → 画布按句柄定位（a/b/e 区有句柄；块定义区无句柄不接）。
+        nativeList.SelectionChanged += (_, _) =>
+        {
+            if (nativeList.SelectedItem is NativeParamRow row) Canvas?.SelectByHandle(row.Handle);
+        };
+        explodeList.SelectionChanged += (_, _) =>
+        {
+            if (explodeList.SelectedItem is ExplodeRow row) Canvas?.SelectByHandle(row.Handle);
+        };
+        evidenceList.SelectionChanged += (_, _) =>
+        {
+            if (evidenceList.SelectedItem is EvidenceStateRow row) Canvas?.SelectByHandle(row.Handle);
+        };
+
+        _deepReadSectionHeaders[0] = DeepReadSectionHeader("原生参数");
+        _deepReadSectionHeaders[1] = DeepReadSectionHeader("炸开证据");
+        _deepReadSectionHeaders[2] = DeepReadSectionHeader("符号候选");
+        _deepReadSectionHeaders[3] = DeepReadSectionHeader("块定义");
+        _deepReadSectionHeaders[4] = DeepReadSectionHeader("证据状态");
+
+        var deepReadSections = new StackPanel { Spacing = 2 };
+        ListBox[] deepReadLists = { nativeList, explodeList, symbolList, blockDefList, evidenceList };
+        for (int i = 0; i < deepReadLists.Length; i++)
+        {
+            deepReadSections.Children.Add(_deepReadSectionHeaders[i]);
+            deepReadSections.Children.Add(deepReadLists[i]);
+        }
+
+        var deepReadPanel = new DockPanel();
+        DockPanel.SetDock(deepReadHeader, Dock.Top);
+        deepReadPanel.Children.Add(deepReadHeader);
+        DockPanel.SetDock(showCenterlines, Dock.Top);
+        deepReadPanel.Children.Add(showCenterlines);
+        DockPanel.SetDock(deepReadError, Dock.Top);
+        deepReadPanel.Children.Add(deepReadError);
+        deepReadPanel.Children.Add(new ScrollViewer { Content = deepReadSections }); // LastChildFill
+
         // T8：左栏三 tab（图层默认选中，T4 行为不变；未选中 tab 内容不进入视觉树）。
         // 视图闭环 T10：计划面板加入既有 TabControl（第四 tab）——不动主 DockPanel
         // 子序（LastChildFill 教训：画布必须保持最后一个子控件）。
+        // 天读证据：只读 overlay 深读面板追加为第五 tab。
         var tabs = new TabControl { Width = 220 };
         tabs.Items.Add(new TabItem { Header = "图层", Content = panel });
         tabs.Items.Add(new TabItem { Header = "纠偏", Content = semanticPanel });
         tabs.Items.Add(new TabItem { Header = "裁定", Content = adjudicationPanel });
         tabs.Items.Add(new TabItem { Header = "计划", Content = planPanel });
+        tabs.Items.Add(new TabItem { Header = "天读证据", Content = deepReadPanel });
         LeftTabs = tabs;
 
         var dock = new DockPanel();
@@ -887,6 +999,7 @@ public sealed class MainWindow : Window
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
         UpdatePlanPanel();
+        UpdateDeepReadPanel(); // 天读证据：初始加载已在 VM 构造完成，此处发布行/计数/开关态
         if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
     }
 
@@ -960,7 +1073,7 @@ public sealed class MainWindow : Window
     /// <summary>签认错误文本（角色拒绝/自审拒绝/未选事务等，可见时非空）。</summary>
     public TextBlock? SignoffError { get; }
 
-    /// <summary>左栏三 tab 容器（T8：图层/纠偏/裁定；加载成功时非 null）。</summary>
+    /// <summary>左栏 tab 容器（T8：图层/纠偏/裁定；T10 计划；天读证据=第五 tab；加载成功时非 null）。</summary>
     public TabControl? LeftTabs { get; }
 
     /// <summary>语义纠偏视图模型（T8，加载成功时非 null）。</summary>
@@ -1001,6 +1114,33 @@ public sealed class MainWindow : Window
 
     /// <summary>当前裁定列表（T8，同 RuleId 最新裁定生效）。</summary>
     public ListBox? AdjudicationList { get; }
+
+    /// <summary>天读证据视图模型（只读 overlay 五区；加载成功时非 null）。</summary>
+    public DeepReadViewModel? DeepRead { get; }
+
+    /// <summary>天读证据头部（五区计数 + 非放行依据注记）。</summary>
+    public TextBlock? DeepReadHeader { get; }
+
+    /// <summary>原生参数区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadNativeList { get; }
+
+    /// <summary>炸开证据区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadExplodeList { get; }
+
+    /// <summary>符号候选区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadSymbolList { get; }
+
+    /// <summary>块定义区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadBlockDefList { get; }
+
+    /// <summary>证据状态区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadEvidenceList { get; }
+
+    /// <summary>中心线叠加开关（有中心线才可勾选；headless 测试入口）。</summary>
+    public CheckBox? DeepReadShowCenterlines { get; }
+
+    /// <summary>天读证据错误文本（overlay 损坏/IO 失败时可见）。</summary>
+    public TextBlock? DeepReadError { get; }
 
     /// <summary>手动编辑视图模型（T9，加载成功时非 null；所有编辑经 StepEngine）。</summary>
     public EditViewModel? Edit { get; }
@@ -1519,6 +1659,75 @@ public sealed class MainWindow : Window
         SemanticError.IsVisible = message is not null;
     }
 
+    /// <summary>天读证据：重读 overlay + 发布面板（语义扫描/映射完成、编辑后调用）。</summary>
+    private void ReloadDeepRead()
+    {
+        DeepRead?.Reload();
+        UpdateDeepReadPanel();
+    }
+
+    /// <summary>天读证据：五区列表源/计数标题/中心线开关态/错误展示刷新。</summary>
+    private void UpdateDeepReadPanel()
+    {
+        if (DeepRead is null) return;
+        Canvas?.SetCenterlines(DeepRead.Centerlines);
+        if (DeepReadShowCenterlines is not null)
+        {
+            DeepReadShowCenterlines.IsEnabled = DeepRead.HasCenterlines; // 无中心线不可开
+            if (!DeepRead.HasCenterlines && DeepReadShowCenterlines.IsChecked == true)
+                DeepReadShowCenterlines.IsChecked = false; // 数据消失 → 叠加关闭（开关事件同步画布）
+        }
+        if (DeepReadHeader is not null)
+            DeepReadHeader.Text =
+                $"天读证据 — {DeepRead.CountsSummary}（只读预览，非放行依据）"
+                + (DeepRead.SkewedCenterlines > 0 ? $"；畸形中心线 {DeepRead.SkewedCenterlines}" : "");
+        int[] counts =
+        {
+            DeepRead.NativeRows.Count, DeepRead.ExplodeRows.Count, DeepRead.SymbolRows.Count,
+            DeepRead.BlockDefRows.Count, DeepRead.EvidenceRows.Count
+        };
+        for (int i = 0; i < _deepReadSectionHeaders.Length; i++)
+            _deepReadSectionHeaders[i].Text = $"{DeepReadSectionNames[i]} ({counts[i]})";
+        SetDeepReadError(DeepRead.ErrorMessage);
+    }
+
+    private void SetDeepReadError(string? message)
+    {
+        if (DeepReadError is null) return;
+        DeepReadError.Text = message ?? "";
+        DeepReadError.IsVisible = message is not null;
+    }
+
+    /// <summary>天读证据：当前图纸哈希（块定义来源比对）；不可得 → null（不猜来源）。</summary>
+    private static string? SafeDrawingHash(MainViewModel vm)
+    {
+        try { return vm.Session.ComputeHash(); }
+        catch (Exception) { return null; } // 只读面板：哈希不可得不阻断面板
+    }
+
+    /// <summary>天读证据区列表：ItemsSource=区集合，行模板=单 TextBlock（换行自适应）。</summary>
+    private static ListBox DeepReadSection<T>(System.Collections.IEnumerable rows, Func<T, string> text)
+        where T : class => new()
+    {
+        ItemsSource = rows,
+        Height = 110,
+        ItemTemplate = new FuncDataTemplate<T>((row, _) => row is null ? new Control() : new TextBlock
+        {
+            Text = text(row),
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(4, 2)
+        })
+    };
+
+    /// <summary>天读证据小节标题（计数由 UpdateDeepReadPanel 刷新）。</summary>
+    private static TextBlock DeepReadSectionHeader(string text) => new()
+    {
+        Text = text,
+        FontWeight = FontWeight.SemiBold,
+        Margin = new Thickness(6, 4, 6, 0)
+    };
+
     /// <summary>
     /// T8：Apply → 人工裁定。未选规则 → 引导错误；校验拒绝（互斥/reason 必填/
     /// 孤儿）/存储故障 → 捕获异常行内展示（裁定与审计均未落盘）。
@@ -1892,6 +2101,8 @@ public sealed class MainWindow : Window
         if (UndoButton is not null) UndoButton.IsEnabled = Edit.RecentTxIds.Count > 0;
         // T9 承接闭环：审计时间线 live-rebuild（编辑/撤销/回滚后无需重开窗口）
         Audit?.Rebuild();
+        // 天读证据：编辑改图后块定义来源哈希/证据表须重读（只读面板，不写审计）。
+        ReloadDeepRead();
     }
 
     private void SetEditError(string? message)
