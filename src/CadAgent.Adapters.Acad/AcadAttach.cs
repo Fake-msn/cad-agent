@@ -79,10 +79,13 @@ public static class AcadAttach
     /// <summary>C-I2（技术债批次C）：显示名预过滤的**安全阀 + 诊断**纯逻辑（可单测）。
     /// 返回与入参等长的"是否考虑"标志；<paramref name="displayNames"/> 为空 → 空判定。
     /// <para>安全阀：整轮**零** moniker 通过 <see cref="RotDisplayNamePolicy.ShouldConsiderMonikerDisplayName"/>
-    /// 时全部按"考虑"处理（不跳过、不发诊断）——策略判据对真实 ROT 布局判断有误（显示名格式变化、
-    /// 文档 moniker 未注册等）时，本方实例仍会被查表考虑，预过滤不可能成为"整轮漏认"的根因。</para>
-    /// <para>正常路径：被策略拒绝的 moniker 逐条经 <see cref="RotSkipDiagnostics"/> 发
-    /// <c>"skip:{displayName}"</c>（displayName 必非 null——null 是"不可判定"按考虑处理）。</para></summary>
+    /// 时全部按"考虑"处理（不逐条跳过）——策略判据对真实 ROT 布局判断有误（显示名格式变化、
+    /// 文档 moniker 未注册等）时，本方实例仍会被查表考虑，预过滤不可能成为"整轮漏认"的根因。
+    /// D（微修复波D）：安全阀触发时经 <see cref="RotSkipDiagnostics"/> 发**一次**
+    /// <c>"valve:all-rejected"</c>（区分"策略失灵整轮放行"与"ROT 空"）。</para>
+    /// <para>正常路径：被策略拒绝的 moniker 按序经 <see cref="RotSkipDiagnostics"/> 发
+    /// <c>"skip:{displayName}"</c>（displayName 必非 null——null 是"不可判定"按考虑处理），
+    /// 每轮至多 <see cref="SkipDiagnosticsPerRound"/> 条（节流只省诊断，不改变判定）。</para></summary>
     internal static bool[] ResolveDisplayNameConsiderations(IReadOnlyList<string?> displayNames)
     {
         var considered = new bool[displayNames.Count];
@@ -98,19 +101,31 @@ public static class AcadAttach
         {
             // 安全阀：整轮零通过 → 全部按"考虑"（策略失灵时不得整轮漏认）。
             for (int i = 0; i < considered.Length; i++) considered[i] = true;
+            Action<string>? valveDiag = RotSkipDiagnostics;
+            if (valveDiag != null) valveDiag(SafetyValveDiagnostic);   // D：安全阀一次留痕
             return considered;
         }
+        int emitted = 0;
         for (int i = 0; i < considered.Length; i++)
         {
             if (considered[i]) continue;
+            if (emitted >= SkipDiagnosticsPerRound) break;   // D：节流——每轮至多前 3 条
             Action<string>? diag = RotSkipDiagnostics;
             if (diag != null) diag("skip:" + displayNames[i]);
+            emitted++;
         }
         return considered;
     }
 
+    /// <summary>D（微修复波D）：每轮跳过诊断上限（ROT 杂项多时不得刷屏；判定语义不受影响）。</summary>
+    internal const int SkipDiagnosticsPerRound = 3;
+
+    /// <summary>D：安全阀整轮放行的单次留痕载荷（排障可区分"预过滤放行"与"无候选"）。</summary>
+    internal const string SafetyValveDiagnostic = "valve:all-rejected";
+
     /// <summary>C-I2（技术债批次C）：预过滤跳过诊断缝（默认 noop）。在 <see cref="ResolveDisplayNameConsiderations"/>
-    /// 的**正常路径**按被拒 moniker 逐条调用，载荷 <c>"skip:{displayName}"</c>；安全阀轮次不调用。</summary>
+    /// 的**正常路径**按被拒 moniker 逐条调用（每轮至多 3 条），载荷 <c>"skip:{displayName}"</c>；
+    /// 安全阀轮次只发一次 <c>"valve:all-rejected"</c>。</summary>
     internal static Action<string> RotSkipDiagnostics = _ => { };
 
     /// <summary>进程存活判定缝（默认 Process.GetProcessById + HasExited；单测注入）。
@@ -163,7 +178,8 @@ public static class AcadAttach
     /// 显示名明显不是 DWG 实例（非 .dwg / 非 "!" 前缀）→ 不查表。
     /// **C-I2 安全阀**：先收集整轮 (moniker, 显示名) 再统一判定——若整轮**零** moniker 通过策略，
     /// 则全部按"考虑"处理（<see cref="ResolveDisplayNameConsiderations"/>），预过滤只省无效查表，
-    /// 永不成为"整轮漏认"的根因；被拒项逐条发 <see cref="RotSkipDiagnostics"/> 诊断供宿主留痕。
+    /// 永不成为"整轮漏认"的根因；被拒项按序发 <see cref="RotSkipDiagnostics"/> 诊断供宿主留痕
+    /// （D：每轮至多 3 条，安全阀轮只发 <c>"valve:all-rejected"</c>）。
     /// **该接口方法是 PreserveSig**（BCL 签名 <c>int GetObject(IMoniker, out object)</c>，net8.0 实测）：
     /// 表内已无效时以**返回值** MK_E_UNAVAILABLE(0x800401E3) 报告而**不**抛 COMException——故按
     /// HRESULT&lt;0 显式判负，把候选置 null 跳过（此时 out 形参无定义/未写，绝不得当候选用）。

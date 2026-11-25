@@ -428,6 +428,23 @@ public class BridgeChannelTests : IDisposable
         Assert.Single(e.Primitives);
         Assert.All(e.Primitives[0].Points, v => Assert.True(double.IsFinite(v)));
         Assert.Equal(new[] { "prims:nonfinite:2" }, e.FailReasons!);   // 按句柄计一次（不是两行）
+        // D（微修复波D）：与 bbox 同口径——无既有 FAIL 时该去因**同时**成为首条（FailReason）。
+        Assert.Equal("prims:nonfinite:2", e.FailReason);
+    }
+
+    // D（微修复波D）：既有 FAIL 存在时，prims 去因只追加到全量列表，不覆盖首条。
+    [Fact]
+    public void MapExplodeEvidence_NonFinitePrimitivePoints_KeepsExistingFirstReason()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("P2", "TDbWall", null, null, null, false));
+        r.Fails.Add(new FailDto("P2", "extents:Exception"));
+        r.Prims.Add(new PrimDto("P2", 0, "AcDbLine", new[] { "start=NaN,0,0", "end=0,0,0" }));   // 丢弃
+
+        var e = Assert.Single(AcadRuntime.MapExplodeEvidence(r));
+
+        Assert.Equal("extents:Exception", e.FailReason);                              // 首条不覆盖
+        Assert.Equal(new[] { "extents:Exception", "prims:nonfinite:1" }, e.FailReasons!);
     }
 
     // 端到端卫生：清洗后的证据经 TarchDerive.Enrich 落 overlay → Save(JSON) 必须成功

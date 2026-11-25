@@ -105,7 +105,8 @@ public sealed class AcadRuntime : ICadRuntime
 
     // B8（技术债批次B）：附着总时限（PID 过滤 + 单次回退共用同一 Stopwatch）——超过即响亮中止，
     // 不再让"过滤 180s + 回退 3s + 归属重试 10s"叠成无界等待。默认 120s 覆盖天正冷启动
-    // （180 次轮询常量保留为单路径上界，总时限是跨路径的硬上界）。
+    // （180 次轮询常量**不是**单路径真实上界：相位预算再按"总时限 - 已耗时 - 回退保留"夹取，
+    // 见 ComputeEffectivePidAttachAttempts；总时限是跨路径的硬上界）。
     internal static TimeSpan AttachTotalDeadline = TimeSpan.FromSeconds(120);
 
     // 总时限测试缝（单测压到毫秒级保持确定性；生产恒走 120s 默认值）。
@@ -121,11 +122,20 @@ public sealed class AcadRuntime : ICadRuntime
     internal static TimeSpan? AttachFallbackReserveOverride;
 
     /// <summary>C-I1：有效相位1 轮询上界（纯函数，可单测）：总时限减回退保留后取整秒，
-    /// 再夹到 [1, 配置常量]。生产 180/120s/15s → **105**；预算被保留吃掉 → 1（不出现 0/负数轮）。</summary>
-    internal static int ComputeEffectivePidAttachAttempts(int configuredAttempts, TimeSpan total, TimeSpan reserve)
+    /// 再夹到 [1, 配置常量]。生产 180/120s/15s → **105**；预算被保留吃掉 → 1（不出现 0/负数轮）。
+    /// D：无已耗时口径（首轮/无时钟场景）——等价于 elapsed=0 的重载。</summary>
+    internal static int ComputeEffectivePidAttachAttempts(int configuredAttempts, TimeSpan total, TimeSpan reserve) =>
+        ComputeEffectivePidAttachAttempts(configuredAttempts, total, TimeSpan.Zero, reserve);
+
+    /// <summary>D（微修复波D）：按**剩余预算**夹取的相位轮询上界（纯函数）：
+    /// <c>Max(1, Min(configuredAttempts, Ceiling((total - elapsed - reserve).TotalSeconds)))</c>。
+    /// 归属重试循环**再次进入**相位1 时必须用本口径——首轮满预算 + 次轮满预算相加可能越过总时限；
+    /// 向上取整使不足 1s 的残余预算仍给 1 轮机会（保底不为 0）。</summary>
+    internal static int ComputeEffectivePidAttachAttempts(
+        int configuredAttempts, TimeSpan total, TimeSpan elapsed, TimeSpan reserve)
     {
-        int budgetSeconds = (int)(total - reserve).TotalSeconds;
-        return Math.Max(1, Math.Min(configuredAttempts, budgetSeconds));
+        int remainingSeconds = (int)Math.Ceiling((total - elapsed - reserve).TotalSeconds);
+        return Math.Max(1, Math.Min(configuredAttempts, remainingSeconds));
     }
 
     /// <summary>C-I1：按当前配置/测试缝计算的有效相位1 轮询上界。</summary>
@@ -521,7 +531,10 @@ public sealed class AcadRuntime : ICadRuntime
     private dynamic AttachByPidWithFallback(Process proc, int processId,
         Func<bool> pidPhaseAbort, AttachBudget budget)
     {
-        int attempts = EffectivePidAttachAttempts();
+        // D（微修复波D）：轮询上界按**共享时钟**的剩余预算夹取——首入与归属重试后的每次重入
+        // 同口径（不沿用首轮满预算，避免各轮预算相加越过总时限）。
+        int attempts = budget.EffectivePidAttempts(
+            PidAttachAttempts, AttachFallbackReserveOverride ?? AttachFallbackReserve);
         _ = proc;   // 进程句柄经 pidPhaseAbort 谓词使用（签名保留与既有调用口径一致）
         try
         {
@@ -571,6 +584,11 @@ public sealed class AcadRuntime : ICadRuntime
         internal TimeSpan PidFilterElapsed { get; private set; }
 
         internal bool IsExhausted => _clock.Elapsed >= Total;
+
+        /// <summary>D（微修复波D）：相位（重）入时的有效轮询上界——配置夹取再按共享时钟的
+        /// **剩余预算**（总时限 - 已耗时 - 保留）收敛（见 ComputeEffectivePidAttachAttempts）。</summary>
+        internal int EffectivePidAttempts(int configuredAttempts, TimeSpan reserve) =>
+            ComputeEffectivePidAttachAttempts(configuredAttempts, Total, _clock.Elapsed, reserve);
 
         internal void NotePidFilterPhaseEnd() => PidFilterElapsed = _clock.Elapsed;
 
@@ -1666,8 +1684,9 @@ public sealed class AcadRuntime : ICadRuntime
     //       XData：1001 行=天正键名（探针实证 HYDRANT_RADIUS），随后各值行归入该键。
     // C-I3（技术债批次C）非有限卫生：NaN/∞ 进 overlay JSON 会让 System.Text.Json 抛异常
     //（overlay 静默保存失败）——故在映射边界清洗：bbox 任一分量非有限 → 整盒置 null 并落
-    // "bbox:nonfinite" 去因（无既有 FAIL 时该原因即首条）；基元 Points 含非有限 → 整条丢弃，
-    // 按句柄追加一次 "prims:nonfinite:{n}"（n=丢弃数）。清洗后可复核（原因留在证据行）。
+    // "bbox:nonfinite" 去因；基元 Points 含非有限 → 整条丢弃，按句柄追加一次
+    // "prims:nonfinite:{n}"（n=丢弃数）。D（微修复波D）：两类去因同口径——无既有 FAIL 时
+    // **均补为 FailReason 首条**（仅追加不覆盖）。清洗后可复核（原因留在证据行）。
     internal static IReadOnlyList<ExplodeEvidence> MapExplodeEvidence(BridgeResult result)
     {
         var now = DateTimeOffset.UtcNow;
@@ -1698,7 +1717,11 @@ public sealed class AcadRuntime : ICadRuntime
                 firstReason ??= "bbox:nonfinite";   // 首条语义：无既有 FAIL 时该原因即首条
             }
             if (droppedPrims > 0)
+            {
                 (allReasons ??= new List<string>()).Add($"prims:nonfinite:{droppedPrims}");
+                // D（微修复波D）：与 bbox 同口径——无既有 FAIL 时该去因即首条（仅追加不覆盖）。
+                firstReason ??= $"prims:nonfinite:{droppedPrims}";
+            }
             list.Add(new ExplodeEvidence(
                 e.Handle, e.RxClass, e.WrapperType, e.Layer, bbox, e.FullyExplodable,
                 prims.Count, CountResidualTdb(result.Fails, e.Handle),
