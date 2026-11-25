@@ -91,6 +91,28 @@ public class AcadAttachRotTests : IDisposable
         Assert.Equal(2, calls);
     }
 
+    // I2（评审 follow-up 1）：本方进程已退出 → 立即中止，不空转满轮询上界；消息精确钉住。
+    // abortIf 首轮即真 ⇒ 一次 ROT 枚举都不该做（连 1s 节拍都不该等），故 maxAttempts 取大值。
+    [Fact]
+    public void AttachByPid_AbortIfTrue_ThrowsExitedMessageOnFirstPoll()
+    {
+        int rotCalls = 0;
+        AcadAttach.RotAttachByPid = (_, _) =>
+        {
+            rotCalls++;
+            return null;
+        };
+        var sw = Stopwatch.StartNew();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => AcadAttach.AttachByPid(
+            "AutoCAD.Application", OurPid, maxAttempts: 1000, abortIf: () => true));
+
+        sw.Stop();
+        Assert.Equal("本方 AutoCAD 进程已退出（附着中止）", ex.Message);
+        Assert.Equal(0, rotCalls);                             // 首轮即中止：未做无意义的 ROT 枚举
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2));     // 不等 1s 节拍（更不空转 1000s 上界）
+    }
+
     // 进程已死 → 候选被排除（ROT 残留的退出实例注册不得被认成本方实例）。
     [Fact]
     public void OwnedByPid_DeadProcess_Excluded()
@@ -171,6 +193,9 @@ public class EnsureAppTArchPidFilterTests : IDisposable
     private readonly Action<IntPtr> _origClose = AcadWindows.CloseWindow;
     private readonly Func<dynamic, Process, bool> _origOwnership = AcadRuntime.OwnershipMatches;
     private readonly Func<Process, bool> _origCleanup = AcadRuntime.TarchProcessCleanup;
+    private readonly Func<Process, bool> _origProcExited = AcadRuntime.ProcExitedReader;
+    private readonly int _origPidAttachAttempts = AcadRuntime.PidAttachAttempts;
+    private readonly int _origPidFallbackAttempts = AcadRuntime.PidFallbackAttempts;
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
     private readonly TimeSpan? _origOwnershipWindow = AcadRuntime.OwnershipRetryWindowOverride;
@@ -196,6 +221,9 @@ public class EnsureAppTArchPidFilterTests : IDisposable
         AcadWindows.CloseWindow = _origClose;
         AcadRuntime.OwnershipMatches = _origOwnership;
         AcadRuntime.TarchProcessCleanup = _origCleanup;
+        AcadRuntime.ProcExitedReader = _origProcExited;
+        AcadRuntime.PidAttachAttempts = _origPidAttachAttempts;
+        AcadRuntime.PidFallbackAttempts = _origPidFallbackAttempts;
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
         AcadRuntime.OwnershipRetryWindowOverride = _origOwnershipWindow;
@@ -266,6 +294,71 @@ public class EnsureAppTArchPidFilterTests : IDisposable
         Assert.Contains("归属校验失败", ex.Message);
         Assert.Equal(0, fake.QuitCalls);      // 绝不 Quit 附着实例
         Assert.Same(launched, cleaned);       // 只清理本方启动进程
+    }
+
+    // I3（评审 follow-up 1）：ROT 过滤**耗尽**（非进程退出）→ 单次回退既有 GetActiveObject 通道，
+    // 回退命中后照常过归属校验并继续（构建可继续，不因一次过滤耗尽整体失败）。
+    [Fact]
+    public void EnsureAppTArch_RotFilterExhausted_FallsBackToActiveObjectOnce()
+    {
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadRuntime.PidAttachAttempts = 1;      // 一轮即耗尽（单测不真轮询 180s）
+        AcadRuntime.PidFallbackAttempts = 1;
+        int rotCalls = 0;
+        AcadAttach.RotAttachByPid = (_, _) => { rotCalls++; return null; };   // 过滤恒无本方候选
+        var fake = new PidFilterGateApp();
+        int activeCalls = 0;
+        AcadAttach.ActiveObjectResolver = _ => { activeCalls++; return fake; };
+        using var rt = new AcadRuntime();
+
+        var app = (object)rt.EnsureAppTArch("TElec20V5");
+
+        Assert.Same(fake, app);       // 回退命中→过归属校验→返回（构建继续）
+        Assert.Equal(1, rotCalls);    // ROT 过滤只耗尽一次
+        Assert.Equal(1, activeCalls); // 回退只做一次
+    }
+
+    // I3：回退也失败 → 原错误链路上抛（保留"未见本方 AutoCAD 实例注册"根因文案，不吞诊断）。
+    [Fact]
+    public void EnsureAppTArch_RotFilterExhaustedAndFallbackEmpty_Throws()
+    {
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadRuntime.PidAttachAttempts = 1;
+        AcadRuntime.PidFallbackAttempts = 1;
+        AcadAttach.RotAttachByPid = (_, _) => null;
+        AcadAttach.ActiveObjectResolver = _ => null;
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("未见本方 AutoCAD 实例注册", ex.Message);   // 原根因
+        Assert.Contains("ROT 附着超时", ex.Message);               // 回退失败一并披露
+    }
+
+    // I2：本方进程已退出（fake Process 的 HasExited 经缝注入）→ 附着首轮即中止，
+    // 不空转轮询、不回退 GetActiveObject，失败清理仍只处置本方启动进程。
+    [Fact]
+    public void EnsureAppTArch_LaunchedProcessExited_AbortsAttachOnFirstPoll()
+    {
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => launched = new Process();
+        AcadRuntime.ProcessIdReader = _ => LaunchedPid;
+        AcadRuntime.ProcExitedReader = _ => true;   // 真实 Process 上 HasExited 无法置位 → 注入
+        int rotCalls = 0;
+        AcadAttach.RotAttachByPid = (_, _) => { rotCalls++; return null; };
+        AcadAttach.ActiveObjectResolver = _ =>
+            throw new InvalidOperationException("本方进程已退出：不得回退 GetActiveObject");
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("已退出", ex.Message);
+        Assert.Equal(0, rotCalls);            // 首轮即中止：未做 ROT 枚举
+        Assert.Same(launched, cleaned);       // 失败清理仍只针对本方进程
     }
 }
 

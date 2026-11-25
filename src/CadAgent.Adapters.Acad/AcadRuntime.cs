@@ -75,6 +75,19 @@ public sealed class AcadRuntime : ICadRuntime
     // （fake Process 拿不到真实 PID，不得为测此路径去 Start 真进程）。
     internal static Func<Process, int> ProcessIdReader = p => SafeProcessId(p);
 
+    // 本方进程退出判定缝（评审 follow-up 1 / I2）：附着轮询期间每轮询问——已退出即中止，
+    // 不再空转满 180s。默认 HasExited（依 proc 句柄判定：句柄身份≠PID 号，故同号新进程
+    // 不会让已退出的本方句柄"复活"，PID 复用窗口因此被关上）；fake/未启动句柄抛
+    // InvalidOperationException → 由 ProcessExited 兜为 false（不可判定不中止）。
+    internal static Func<Process, bool> ProcExitedReader = p => p.HasExited;
+
+    // 附着轮询上界（缝：单测压到 1 轮，生产 180s 覆盖天正冷启动）。
+    internal static int PidAttachAttempts = 180;
+
+    // ROT 过滤耗尽后的**单次** GetActiveObject 回退预算（评审 follow-up 1 / I3）：
+    // 小预算即回退——回退只是"过滤这一路可能漏认"的兜底，不应再叠加一个 180s 窗口。
+    internal static int PidFallbackAttempts = 3;
+
     // /p 启动参数构造（纯函数，单测钉住 FileName/Arguments/UseShellExecute，不拉起进程）。
     internal static ProcessStartInfo BuildStartInfo(string profileName, string executable) =>
         new ProcessStartInfo
@@ -309,6 +322,8 @@ public sealed class AcadRuntime : ICadRuntime
     // 不得再拉起第二实例（双实例共享用户 profile 会竞态损坏 CUIX，VendorGuard 语义）。
     // 流程：守卫→/p "profileName" 启动 acad.exe→**按本方 PID 过滤** ROT 附着（AcadAttach.AttachByPid）
     // →归属校验→Gate1 就绪等待。PID 不可判定（fake/未启动进程）时回退既有 AttachOnly（GetActiveObject）。
+    // 评审 follow-up 1（I2/I3）：附着轮询带 abortIf=本方进程已退出（fast-fail，不空转 180s）；
+    // ROT 过滤耗尽（非进程退出）时只做一次 AttachOnly 小预算回退（见 AttachByPidWithFallback）。
     // fix/acad-rot-pid-filter（真机实证 3/4 全量失败）：类间交接时前一真机类刚 Quit 的实例注册可能
     // 仍在 ROT——AttachOnly 取"当前活动对象"会附着到他方/已退出实例，造成"ROT 附着实例非本方启动
     // （归属校验失败）"伪失败。故本方 PID 可判定时只认"窗口 PID==本方 PID 且进程存活"的实例；
@@ -389,12 +404,14 @@ public sealed class AcadRuntime : ICadRuntime
     {
         TimeSpan window = OwnershipRetryWindowOverride ?? OwnershipRetryWindow;
         var sw = Stopwatch.StartNew();
+        bool fallbackUsed = false;   // I3：整个附着过程只允许一次 GetActiveObject 回退
         while (true)
         {
-            // PID 可判定→按本方 PID 过滤的 ROT 附着（不会被交接残留的他方/已退出实例截胡）；
-            // PID 不可判定（fake/未启动进程、真机 PID 读取失败）→ 回退既有 GetActiveObject 口径。
+            // PID 可判定→按本方 PID 过滤的 ROT 附着（不会被交接残留的他方/已退出实例截胡；
+            // 进程退出即中止，过滤耗尽则单次回退 GetActiveObject）；
+            // PID 不可判定（fake/未启动进程、真机 PID 读取失败）→ 既有 GetActiveObject 口径。
             dynamic app = processId != 0
-                ? AcadAttach.AttachByPid(Profile.ProgId, processId)
+                ? AttachByPidWithFallback(proc, processId, ref fallbackUsed)
                 : AcadAttach.AttachOnly(Profile.ProgId);
             if (OwnershipMatches(app, proc)) return app;
             // 归属不符：只清本方缓存引用（我方尚未把 app 赋给 _app）；绝不 Quit/触碰他方实例。
@@ -407,6 +424,44 @@ public sealed class AcadRuntime : ICadRuntime
             Thread.Sleep(remaining < OwnershipRetryDelay ? remaining : OwnershipRetryDelay);
         }
     }
+
+    // ---- 评审 follow-up 1：进程退出 fast-fail + 单次回退 ----
+    // I2：附着轮询带上"本方进程是否已退出"谓词——进程没了就立即中止（响亮上抛），
+    //     不再空转满 180s；HasExited 依 proc **句柄**判定，亦挡住 PID 复用（同号新进程
+    //     不会让已退出的本方句柄复活，故不会把"他方新实例"当成本方实例附着）。
+    // I3：ROT 过滤**耗尽**（非进程退出）→ 只做**一次**既有 AttachOnly 小预算回退
+    //     （过滤这一路可能因 COM 面差异漏认）；回退亦失败→保留原根因再拼回退诊断上抛。
+    //     回退结果照旧过归属校验（纵深防御不留后门）。
+    private dynamic AttachByPidWithFallback(Process proc, int processId, ref bool fallbackUsed)
+    {
+        try
+        {
+            return AcadAttach.AttachByPid(Profile.ProgId, processId,
+                maxAttempts: PidAttachAttempts, abortIf: () => ProcessExited(proc));
+        }
+        catch (CadRuntimeException ex) when (!fallbackUsed && IsRotFilterExhaustion(ex))
+        {
+            fallbackUsed = true;
+            try { return AcadAttach.AttachOnly(Profile.ProgId, PidFallbackAttempts); }
+            catch (CadRuntimeException fb)
+            {
+                throw new CadRuntimeException(ex.Message + "；回退 GetActiveObject 亦失败：" + fb.Message, ex);
+            }
+        }
+    }
+
+    // 进程退出判定（不可判定→false，即不中止）：fake/未启动/已释放句柄的 HasExited 会抛。
+    private static bool ProcessExited(Process proc)
+    {
+        try { return ProcExitedReader(proc); }
+        catch { return false; }
+    }
+
+    // ROT 过滤**耗尽**判定（I3 的触发条件）：只认"未见本方 AutoCAD 实例注册…ROT 过滤 Ns 超时"，
+    // 不认进程退出中止（"已退出"是终局，不得再回退去拿可能已失效的他方实例）。
+    internal static bool IsRotFilterExhaustion(Exception ex) =>
+        ex.Message.Contains("ROT 过滤", StringComparison.Ordinal)
+        && ex.Message.Contains("超时", StringComparison.Ordinal);
 
     // ---- Fix round 3：本方进程信息性模态框自动关窗 ----
     // 标题针（真机实证文案）：只关"不支持硬件加速"这一条信息性提示，其他对话框（安全确认框、

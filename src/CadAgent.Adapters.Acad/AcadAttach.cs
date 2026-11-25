@@ -13,8 +13,8 @@ namespace CadAgent.Adapters.Acad;
 /// fix/acad-rot-pid-filter（真机实证 3/4 全量失败）：<c>GetActiveObject</c> 取"当前活动对象"，
 /// 类间交接时前一真机类刚 Quit 的实例注册可能仍在 ROT → 附着到**他方/已退出**实例 → 归属校验
 /// 伪失败"ROT 附着实例非本方启动"。故新增按**本方进程 PID** 过滤的附着通道
-/// （<see cref="AttachByPid"/>：枚举 ROT→逐 moniker BindToObject→实例窗口 PID==本方 PID 且
-/// 进程存活）；<see cref="AttachOnly"/> 保留为"本方 PID 不可判定"时的回退路径，语义不变。</summary>
+/// （<see cref="AttachByPid"/>：枚举 ROT→逐 moniker <c>IRunningObjectTable.GetObject</c> 查表→实例窗口
+/// PID==本方 PID 且进程存活）；<see cref="AttachOnly"/> 保留为"本方 PID 不可判定"时的回退路径，语义不变。</summary>
 public static class AcadAttach
 {
     [DllImport("ole32.dll")]
@@ -25,21 +25,16 @@ public static class AcadAttach
     private static extern int GetActiveObject(
         ref Guid clsid, IntPtr reserved, [MarshalAs(UnmanagedType.IUnknown)] out object obj);
 
-    // ROT 枚举通道（fix/acad-rot-pid-filter）：GetRunningObjectTable/CreateBindCtx 都在 ole32。
+    // ROT 枚举通道（fix/acad-rot-pid-filter）：GetRunningObjectTable 在 ole32。
+    // 评审 follow-up 1（I1）：候选对象改由 IRunningObjectTable.GetObject 查表直取——不再 CreateBindCtx
+    // + IMoniker.BindToObject（绑定语义在文档 moniker 的服务器已退出时会触发激活副作用）。
     [DllImport("ole32.dll")]
     private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable rot);
-
-    [DllImport("ole32.dll")]
-    private static extern int CreateBindCtx(int reserved, out IBindCtx bindCtx);
 
     // 窗口→进程 ID（user32；返回 0=不可判定/窗口已销毁）。与 AcadWindows 内的同名 P/Invoke
     // 各自独立：AcadAttach 不依赖窗口诊断面（AcadWindows 的缝服务关窗/安全框），此处缝专供 ROT 归属过滤。
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
-
-    // IID_IUnknown：moniker.BindToObject 只要"能读 HWND 的对象"，故按 IUnknown 绑定（不按 IDispatch，
-    // 避免实例只注册 IUnknown 时绑定失败）。
-    private static readonly Guid IidUnknown = new("00000000-0000-0000-C000-000000000046");
 
     // 缝：测试注入替代真 COM 查询（单元测试不得触真机）；默认=ROT GetActiveObject 包装。
     internal static Func<string, object?> ActiveObjectResolver = progid =>
@@ -58,17 +53,20 @@ public static class AcadAttach
         {
             var app = ActiveObjectResolver(progId);
             if (app != null) return app;
-            Thread.Sleep(1000);
+            if (i < maxAttempts - 1) Thread.Sleep(1000);   // 末轮不再睡（耗尽即抛，不白等一节拍）
         }
         throw new CadRuntimeException($"天正实例 ROT 附着超时（{maxAttempts}s）：{progId} 未就绪");
     }
+
+    /// <summary>本方进程已退出时的附着中止文案（逐字钉住；调用方/单测按此判定"中止"而非"超时"）。</summary>
+    internal const string ProcessExitedMessage = "本方 AutoCAD 进程已退出（附着中止）";
 
     // ---- fix/acad-rot-pid-filter：按本方 PID 过滤的 ROT 附着 ----
 
     /// <summary>ROT 候选过滤器（缝，单测注入；默认 <see cref="DefaultRotAttachByPid"/>）：
     /// 返回**属于 <paramref name="pid"/> 且进程仍存活**的实例对象；无匹配→null（调用方轮询）。
     /// 只按 PID 过滤，不按 ProgID：ROT 显示名是 exe 路径/文档名而非 ProgID，按名过滤会漏掉本方实例。
-    /// COM 层异常（ROT 不可用/枚举失败/绑定失败）一律吞掉返回 null——附着是轮询式等待，
+    /// COM 层异常（ROT 不可用/枚举失败/查表失败）一律吞掉返回 null——附着是轮询式等待，
     /// 单轮失败不等于终局。</summary>
     internal static Func<string, int, object?> RotAttachByPid = DefaultRotAttachByPid;
 
@@ -83,15 +81,19 @@ public static class AcadAttach
     internal static Func<int, bool> PidAlive = DefaultPidAlive;
 
     /// <summary>按 PID 过滤的有界轮询附着：1s 一次（与 <see cref="AttachOnly"/> 同节拍），
+    /// 每轮**先问** <paramref name="abortIf"/>：true=本方进程已退出→立即中止
+    /// （<see cref="ProcessExitedMessage"/>，不空转满 180s 上界——进程没了再等也无意义）。
     /// 耗尽→响亮拒绝（消息含本方 PID 与轮询秒数，真机可据此区分"未启动"与"启动过慢"）。
     /// 与 <see cref="AttachOnly"/> 的区别：不会附着到"ROT 里当前活动但非本方"的实例。</summary>
-    internal static object AttachByPid(string progId, int pid, int maxAttempts = 180)
+    internal static object AttachByPid(
+        string progId, int pid, int maxAttempts = 180, Func<bool>? abortIf = null)
     {
         for (int i = 0; i < maxAttempts; i++)
         {
+            if (abortIf != null && abortIf()) throw new CadRuntimeException(ProcessExitedMessage);
             var app = RotAttachByPid(progId, pid);
             if (app != null) return app;
-            Thread.Sleep(1000);
+            if (i < maxAttempts - 1) Thread.Sleep(1000);   // 末轮不再睡（耗尽即抛）
         }
         throw new CadRuntimeException(
             $"未见本方 AutoCAD 实例注册（PID {pid}，ROT 过滤 {maxAttempts}s 超时）");
@@ -116,26 +118,25 @@ public static class AcadAttach
     }
 
     /// <summary>默认过滤器：GetRunningObjectTable→EnumRunning→逐个 moniker
-    /// BindToObject(IID_IUnknown)（失败即跳过该候选）→ 读 HWND→窗口 PID→与目标 PID 比对→
-    /// 进程存活→返回**首个命中**者；全不命中→null。任何 ROT 层 COM 异常吞掉返回 null
-    /// （调用方按 1s 节拍轮询，单轮失败不是终局）。返回的实例对象**不**释放（所有权交给调用方；
-    /// 其余被拒候选/枚举器/绑定上下文在 finally 内 best-effort 释放）。</summary>
+    /// **<c>IRunningObjectTable.GetObject</c> 查表直取**（无 moniker 绑定语义——文档 moniker 的
+    /// 服务器已退出时 BindToObject 会触发激活副作用；查表拿不到即 MK_E_UNAVAILABLE，跳过该候选）
+    /// → 读 HWND→窗口 PID→与目标 PID 比对→进程存活→返回**首个命中**者；全不命中→null。
+    /// 任何 ROT 层 COM 异常吞掉返回 null（调用方按 1s 节拍轮询，单轮失败不是终局）。
+    /// 返回的实例对象**不**释放（所有权交给调用方；其余被拒候选/枚举器/ROT 在 finally 内
+    /// best-effort 释放）。不需要 IBindCtx，也不读 moniker 显示名（DisplayName-free）。</summary>
     private static object? DefaultRotAttachByPid(string progId, int pid)
     {
         // progId 参与签名以保持缝口径与诊断一致；过滤维度只有 PID（见 RotAttachByPid 注释）。
         _ = progId;
         if (pid <= 0) return null;
         IRunningObjectTable? rot = null;
-        IBindCtx? bindCtx = null;
         IEnumMoniker? enumMoniker = null;
         try
         {
             if (GetRunningObjectTable(0, out rot) < 0 || rot == null) return null;
-            if (CreateBindCtx(0, out bindCtx) < 0 || bindCtx == null) return null;
             rot.EnumRunning(out enumMoniker);
             if (enumMoniker == null) return null;
             var batch = new IMoniker[1];
-            Guid iid = IidUnknown;
             while (true)
             {
                 // S_OK=取到 1 个；S_FALSE/失败=枚举结束。
@@ -145,11 +146,12 @@ public static class AcadAttach
                 object candidate = null!;
                 try
                 {
-                    moniker.BindToObject(bindCtx, null!, ref iid, out candidate);
+                    rot.GetObject(moniker, out candidate);
                 }
                 catch
                 {
-                    candidate = null!;   // 绑定失败（实例退出中/无 IUnknown 面）：跳过该候选
+                    // MK_E_UNAVAILABLE（表内已无效）/未注册/查表失败：跳过该候选（非终局）。
+                    candidate = null!;
                 }
                 if (candidate != null && OwnedByPid(candidate, pid)) return candidate;
                 ReleaseQuietly(candidate);
@@ -164,7 +166,6 @@ public static class AcadAttach
         finally
         {
             ReleaseQuietly(enumMoniker);
-            ReleaseQuietly(bindCtx);
             ReleaseQuietly(rot);
         }
     }
