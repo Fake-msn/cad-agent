@@ -308,6 +308,11 @@ public sealed class AcadRuntime : ICadRuntime
     // 置空 _app 并响亮拒绝（绝不 Quit 附着实例）。
     // 失败路径不残留进程（spec §5）：经 CleanupTArchFailure 优雅 Quit / 兜底 Kill 本方进程。
     // 调用方（ReadNativeParams，Task 5）经 Run 在 STA 队列内执行。
+    //
+    // Fix round 3（真机实证）：/p 每次启动都弹一个**信息性** WPF 模态框（标题含"不支持硬件加速"）。
+    // 未关掉时 COM Gate1 间歇失败、Dispose 的 Quit 还会留下本方 acad.exe 孤儿进程；测试场景
+    // 无人手点，只能按标题自动关窗。范围严格收紧：只枚举本方启动进程的窗口、只投递 WM_CLOSE、
+    // 绝不按键/点击/结束进程；非标题命中的窗口一律不碰。
     internal dynamic EnsureAppTArch(string profileName)
     {
         if (_app != null)
@@ -321,6 +326,8 @@ public sealed class AcadRuntime : ICadRuntime
         EnsureChannelDir();
         VendorGuard.EnsureNoForeignInstance(Profile);
         Process? proc = null;
+        Timer? dismissal = null;   // 关窗节拍句柄：finally 必 dispose（不遗留线程/回调）
+        int processId = 0;
         try
         {
             // 复审修复波：默认 launcher 异常已透传（不再吞 Win32 原因），此处统一包装并
@@ -330,6 +337,9 @@ public sealed class AcadRuntime : ICadRuntime
             if (proc == null)
                 throw new CadRuntimeException("天正实例启动失败");
             _launchedProc = proc;
+            // 关窗节拍须在 ROT 附着之前起：模态框会挡住 COM 调用（Gate1/附着均被拒）。
+            processId = SafeProcessId(proc);
+            dismissal = StartInformationalDialogDismissal(processId);
             _app = AcadAttach.AttachOnly(Profile.ProgId);
             // 归属校验（findings 4）：_launchedProc 恒非空于本路径（复用早退走上方 _app!=null）。
             // 不符→清空 _app 后抛出，外层 catch 的 CleanupTArchFailure 只见 proc（不 Quit）。
@@ -343,10 +353,51 @@ public sealed class AcadRuntime : ICadRuntime
         }
         catch
         {
-            // best-effort 清理（内部吞异常）；rethrow 保持原异常与堆栈，清理不掩盖根因。
+            // 清理前补关一次：模态框未关时优雅 Quit 会被卡住，留下孤儿进程。best-effort 吞异常，
+            // rethrow 保持原异常与堆栈，清理不掩盖根因。
+            DismissInformationalDialogs(processId);
             CleanupTArchFailure(proc);
             throw;
         }
+        finally
+        {
+            // Gate1 成功或放弃即停节拍（Timer.Dispose 不阻塞、不 Join 在途回调）。
+            dismissal?.Dispose();
+        }
+    }
+
+    // ---- Fix round 3：本方进程信息性模态框自动关窗 ----
+    // 标题针（真机实证文案）：只关"不支持硬件加速"这一条信息性提示，其他对话框（安全确认框、
+    // 用户图纸相关模态框等）一律不碰——关错窗口的代价远大于收益。
+    internal static readonly string[] InformationalDialogTitleNeedles = { "不支持硬件加速" };
+
+    // 节拍（缝：单测可调）；首发立即执行（模态框出现即关，不等第一个周期）。
+    internal static TimeSpan DialogDismissInterval = TimeSpan.FromSeconds(1);
+
+    // 进程 PID（未 Start/已退出的句柄会抛 InvalidOperationException）→ 0 表示"无 PID"：
+    // 关窗逻辑据此早退，绝不退回全桌面枚举（那会误伤他方窗口）。
+    private static int SafeProcessId(Process? proc)
+    {
+        try { return proc?.Id ?? 0; }
+        catch { return 0; }
+    }
+
+    // 关窗一次性动作（best-effort）：只经 AcadWindows 的标题匹配关窗缝，异常一律吞掉。
+    private static void DismissInformationalDialogs(int processId)
+    {
+        if (processId <= 0) return;
+        try { AcadWindows.DismissDialogs(processId, InformationalDialogTitleNeedles); }
+        catch { /* 关窗 best-effort：不影响 Gate1/退出主路径 */ }
+    }
+
+    // 关窗节拍：首发同步执行一次（确定性，且尽早解除模态阻塞），随后每 DialogDismissInterval
+    // 一次直到调用方 dispose。<paramref name="processId"/>&lt;=0（fake/未启动进程）不建定时器。
+    private static Timer? StartInformationalDialogDismissal(int processId)
+    {
+        if (processId <= 0) return null;
+        DismissInformationalDialogs(processId);   // 首发：不等周期
+        return new Timer(_ => DismissInformationalDialogs(processId), null,
+            DialogDismissInterval, DialogDismissInterval);
     }
 
     // 失败路径进程清理（spec §5「启动失败不残留进程」）。仅处置本方经 ProcessLauncher
@@ -1365,6 +1416,9 @@ public sealed class AcadRuntime : ICadRuntime
                 // 其余退出期错误忽略。
                 try { RetryBusy(() => { _doc?.Close(false); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
                 _doc = null;
+                // Fix round 3：Quit 前关本方信息性模态框（实证：模态框未关时 Quit 后本方
+                // acad.exe 变孤儿）。仅本方启动进程、仅标题命中窗口；best-effort。
+                DismissInformationalDialogs(SafeProcessId(_launchedProc));
                 try { RetryBusy(() => { _app?.Quit(); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 退出时忽略 */ }
                 _app = null;
             });
