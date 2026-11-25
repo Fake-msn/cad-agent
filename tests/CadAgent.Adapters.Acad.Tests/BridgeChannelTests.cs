@@ -579,6 +579,76 @@ public class BridgeChannelTests : IDisposable
         Assert.Contains("Close(False)", calls);
     }
 
+    // ---- Fix round 5（R18）：桥 SendCommand 忙窗拒绝有界重试 ----
+    // 真机 run7 实证：三条真机用例皆在 Document.SendCommand 命中 TArch 启动忙窗 →
+    // RPC_E_CALL_REJECTED(0x80010001)「被呼叫方拒绝接收呼叫」。单写调用可安全重试。
+
+    /// <summary>前两次发送被拒、第三次成功 → 全编排（NETLOAD→探针→正式 READ）恢复绿；
+    /// NETLOAD 尝试次数=3（被拒 2 次 + 成功 1 次），调用序与无拒绝时一致（不重复发命令）。</summary>
+    [Fact]
+    public void ReadExplodeEvidence_SendCommandBusyTwiceThenSucceeds_RetriesAndCompletes()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls) { BusyRejectionsRemaining = 2 };
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        var origAttempts = AcadRuntime.StartupRetryAttempts;
+        var origDelay = AcadRuntime.StartupRetryDelay;
+        AcadRuntime.StartupRetryAttempts = 5;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            using var rt = new AcadRuntime();
+            var list = rt.ReadExplodeEvidence("16#1116.dwg");
+
+            Assert.Equal("21E00", Assert.Single(list).Handle);
+            Assert.Equal(3, doc.NetLoadAttempts);            // 被拒 2 + 成功 1 = 有界重试生效
+            Assert.Equal(
+                new[] { "Open(16#1116.dwg, ReadOnly=True)", "NETLOAD", "READ", "READ", "Close(False)" },   // 探针 READ + 正式 READ
+                calls);
+        }
+        finally
+        {
+            AcadRuntime.StartupRetryAttempts = origAttempts;
+            AcadRuntime.StartupRetryDelay = origDelay;
+        }
+    }
+
+    /// <summary>始终被拒 → 重试耗尽（=StartupRetryAttempts）后异常上抛，经既有 catch 包装为
+    /// CadRuntimeException（消息含真因「被呼叫方拒绝」+「深度炸开读取失败」，绝不静默吞）。</summary>
+    [Fact]
+    public void ReadExplodeEvidence_SendCommandAlwaysBusy_ThrowsWrappedAfterBoundedAttempts()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls) { BusyRejectionsRemaining = int.MaxValue };
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        var origAttempts = AcadRuntime.StartupRetryAttempts;
+        var origDelay = AcadRuntime.StartupRetryDelay;
+        AcadRuntime.StartupRetryAttempts = 3;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            using var rt = new AcadRuntime();
+            var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg"));
+
+            Assert.Contains("深度炸开读取失败", ex.Message);
+            Assert.Contains("被呼叫方拒绝", ex.Message);
+            Assert.Equal(3, doc.NetLoadAttempts);            // 有界：==StartupRetryAttempts（非无限挂起）
+        }
+        finally
+        {
+            AcadRuntime.StartupRetryAttempts = origAttempts;
+            AcadRuntime.StartupRetryDelay = origDelay;
+        }
+    }
+
     // 低优先补齐：桥 DLL 缺失文案逐字（先于 NETLOAD，不触进程）。
     [Fact]
     public void BridgeDllPath_Missing_MessageExact()
@@ -614,6 +684,13 @@ public class BridgeChannelTests : IDisposable
         public List<string> ChannelDirs { get; } = new();
         /// <summary>正式 READ 返回 status fail（探针仍回"错图"fail）。</summary>
         public bool FailRealRead { get; set; }
+        /// <summary>
+        /// 忙窗拒绝注入（Fix round 5，R18）：前 N 次 SendCommand 抛 COMException
+        /// HResult=0x80010001（RPC_E_CALL_REJECTED）——真机 run7 形态。
+        /// </summary>
+        public int BusyRejectionsRemaining { get; set; }
+        /// <summary>NETLOAD 发送尝试次数（含被拒重试；"有界重试次数"断言用）。</summary>
+        public int NetLoadAttempts { get; private set; }
         public string Name => "16#1116.dwg";
         public string LastRequest { get; private set; } = "";
         /// <summary>最近一次文档面系统变量读取（GetVariable）的变量名（TRUSTEDPATHS 口径观测）。</summary>
@@ -627,10 +704,20 @@ public class BridgeChannelTests : IDisposable
 
         public void SendCommand(string command)
         {
+            string cmd = command.TrimEnd('\r', '\n');
+            bool isNetLoad = cmd.StartsWith("(command \"NETLOAD\"", StringComparison.Ordinal);
+            if (isNetLoad) NetLoadAttempts++;
+            // R18：忙窗拒绝注入——先计数后抛，模拟 COM 在 TArch 启动期直接拒绝该次调用。
+            if (BusyRejectionsRemaining > 0)
+            {
+                BusyRejectionsRemaining--;
+                throw new System.Runtime.InteropServices.COMException(
+                    "被呼叫方拒绝接收呼叫。 (0x80010001 (RPC_E_CALL_REJECTED))",
+                    unchecked((int)0x80010001));
+            }
             string channel = Environment.GetEnvironmentVariable(AcadRuntime.BridgeChannelEnvVar) ?? "";
             ChannelDirs.Add(channel);
-            string cmd = command.TrimEnd('\r', '\n');
-            if (cmd.StartsWith("(command \"NETLOAD\"", StringComparison.Ordinal))
+            if (isNetLoad)
             {
                 Calls.Add("NETLOAD");
                 return;

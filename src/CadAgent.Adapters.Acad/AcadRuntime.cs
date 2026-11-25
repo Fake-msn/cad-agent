@@ -1137,14 +1137,26 @@ public sealed class AcadRuntime : ICadRuntime
             {
                 EnsureAppTArch(TArchProfileName);
                 // 系统变量在文档面（见 DocumentVariableReader 注释）：会话已有文档优先，否则取活动文档。
+                // R18（Fix round 5）：活动文档取用也是 COM 调用——同样落在启动忙窗内会被拒，须忙重试。
                 dynamic? doc = _doc;
-                if (doc == null) doc = _app!.ActiveDocument;
+                if (doc == null) doc = RetryBusy<object?>(() => _app!.ActiveDocument);
                 return ReadTrustedPaths(doc);
             }
             catch (Exception ex) when (ex is not CadRuntimeException)
             { throw new CadRuntimeException($"读取 TRUSTEDPATHS 失败: {ex.Message}", ex); }
         });
     }
+
+    /// <summary>
+    /// 文档面 SendCommand 单调用忙重试（Fix round 5，R18；真机 run7 实证）：桥命令落在 TArch
+    /// 启动/再生忙窗内时 IDispatch 直接回 RPC_E_CALL_REJECTED(0x80010001)（消息"被呼叫方拒绝
+    /// 接收呼叫"），与 Documents.Open 等基元同形态。SendCommand 是单写调用（被拒=命令未执行），
+    /// 故有界重试安全；耗尽→异常上抛（由各桥入口既有 catch 包装 CadRuntimeException，不吞诊断）。
+    /// NETLOAD / 注册探针 / 正式命令三处发送**全部**经 <see cref="BridgeChannel.SendCommand"/> 缝
+    /// 注入至此（见 <see cref="InstallBridgeSeams"/>），单点包装即覆盖全部发送点。
+    /// </summary>
+    private static void SendCommandRetry(object doc, string command) =>
+        RetryBusy(() => { ((dynamic)doc).SendCommand(command); });
 
     /// <summary>
     /// 桥缝注入（R6）：静态 SendCommand 在每次公开入口赋值——委托捕获本实例文档。
@@ -1157,7 +1169,8 @@ public sealed class AcadRuntime : ICadRuntime
     {
         BridgeChannel.SendCommand = (cmd, _) =>
         {
-            _doc!.SendCommand(cmd + "\n");
+            // R18：忙窗拒绝有界重试（NETLOAD/探针/正式命令共用本缝）。
+            SendCommandRetry(_doc!, cmd + "\n");
             return "";
         };
         BridgeChannel.HardTimeoutHandler = () =>
