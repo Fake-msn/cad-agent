@@ -1004,12 +1004,36 @@ public sealed class AcadRuntime : ICadRuntime
         return dll;
     }
 
+    // 系统变量读缝（**文档面** API；测试注入 fake，无 COM）。真机实证（TRX Skip 原因）：
+    // ActiveX **Application** 对象没有 GetSystemVariable 成员——dynamic 绑定抛
+    // "'System.__ComObject' does not contain a definition for 'GetSystemVariable'"。
+    // 系统变量属 Document：doc.GetVariable(name)。**勿回退到 Application**（已烧过一次）。
+    internal static Func<dynamic, string, string> DocumentVariableReader =
+        (doc, name) => (string)doc.GetVariable(name);
+
+    /// <summary>
+    /// TRUSTEDPATHS 纯助手（无 COM、不启动实例，可单测）：无活动文档→响亮拒绝；
+    /// 否则经 <see cref="DocumentVariableReader"/> 读文档面系统变量。
+    /// </summary>
+    internal static string ReadTrustedPaths(dynamic? doc)
+    {
+        if (doc == null) throw new CadRuntimeException("无活动文档，无法读取 TRUSTEDPATHS");
+        return DocumentVariableReader(doc, "TRUSTEDPATHS");
+    }
+
     /// <summary>TRUSTEDPATHS 现值（TRUSTEDPATHS 预检=信息性；真机测试据此决定 Skip/运行）。</summary>
     internal string GetTrustedPaths() => Run(() =>
     {
         // 复审 F2：必须走天正 profile 启动路径——EnsureApp()（默认 profile，无 /p）会返回
         // 错误 profile 的 TRUSTEDPATHS，且把默认 profile 的实例缓存进 _app，污染后续桥会话。
-        try { return (string)EnsureAppTArch(TArchProfileName).GetSystemVariable("TRUSTEDPATHS"); }
+        try
+        {
+            EnsureAppTArch(TArchProfileName);
+            // 系统变量在文档面（见 DocumentVariableReader 注释）：会话已有文档优先，否则取活动文档。
+            dynamic? doc = _doc;
+            if (doc == null) doc = _app!.ActiveDocument;
+            return ReadTrustedPaths(doc);
+        }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"读取 TRUSTEDPATHS 失败: {ex.Message}", ex); }
     });

@@ -471,7 +471,8 @@ public class BridgeChannelTests : IDisposable
     public void GetTrustedPaths_LaunchesTArchProfile()
     {
         var calls = new List<string>();
-        var app = new FakeBridgeApp(new FakeBridgeDoc(calls));
+        var doc = new FakeBridgeDoc(calls);
+        var app = new FakeBridgeApp(doc);
         AcadRuntime.ProcessLauncher = name => { calls.Add("Launch(" + name + ")"); return new Process(); };
         AcadAttach.ActiveObjectResolver = _ => app;
 
@@ -479,7 +480,7 @@ public class BridgeChannelTests : IDisposable
         string trusted = rt.GetTrustedPaths();
 
         Assert.Equal("C:\\trusted;C:\\other", trusted);
-        Assert.Equal("TRUSTEDPATHS", app.LastSystemVariable);
+        Assert.Equal("TRUSTEDPATHS", doc.LastVariableName);   // 文档面 GetVariable（Application 无该系统变量 API）
         Assert.Equal(new[] { "Launch(TElec20V5)" }, calls);   // 以 /p 天正 profile 启动
     }
 
@@ -610,6 +611,13 @@ public class BridgeChannelTests : IDisposable
         public bool FailRealRead { get; set; }
         public string Name => "16#1116.dwg";
         public string LastRequest { get; private set; } = "";
+        /// <summary>最近一次文档面系统变量读取（GetVariable）的变量名（TRUSTEDPATHS 口径观测）。</summary>
+        public string? LastVariableName { get; private set; }
+        public string GetVariable(string name)
+        {
+            LastVariableName = name;
+            return "C:\\trusted;C:\\other";
+        }
         public void Close(bool save) => Calls.Add("Close(" + save + ")");
 
         public void SendCommand(string command)
@@ -668,7 +676,8 @@ public class BridgeChannelTests : IDisposable
 
     /// <summary>
     /// 假 app：EnsureAppTArch 的 Gate1（Version/Documents.Count）与 Open 走此面；
-    /// VersionReads 供"复用路径仍执行 Gate1"（F2）观测，GetSystemVariable 供 TRUSTEDPATHS。
+    /// VersionReads 供"复用路径仍执行 Gate1"（F2）观测。真机实证 Application 无
+    /// GetSystemVariable → TRUSTEDPATHS 由 <see cref="FakeBridgeDoc.GetVariable"/>（文档面）承担。
     /// </summary>
     public sealed class FakeBridgeApp
     {
@@ -681,13 +690,8 @@ public class BridgeChannelTests : IDisposable
         }
         public int VersionReads => Volatile.Read(ref _versionReads);
         public FakeBridgeDocuments Documents => new(_doc);
+        public FakeBridgeDoc ActiveDocument => _doc;
         public bool Visible { get; set; }
-        public string? LastSystemVariable { get; private set; }
-        public string GetSystemVariable(string name)
-        {
-            LastSystemVariable = name;
-            return "C:\\trusted;C:\\other";
-        }
         public void Quit() { }
     }
 
