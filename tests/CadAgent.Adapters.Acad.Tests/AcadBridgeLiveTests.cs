@@ -6,19 +6,23 @@ namespace CadAgent.Adapters.Acad.Tests;
 
 /// <summary>
 /// 切片B Task 10：桥通道**真机**证据（条件测试，镜像切片A <see cref="AcadNativeLiveTests"/> 纪律）。
-/// 三道守卫（任一不满足→SkippableFact 显式 Skip，原因如实，绝不伪造绿）：
+/// 四道守卫（任一不满足→SkippableFact 显式 Skip，原因如实，绝不伪造绿）：
 /// ① 桥 DLL 已构建（<c>CADAGENT_BRIDGE_DLL</c> 覆盖，或仓库
 ///    <c>src/CadAgent.TArchBridge/bin/{Debug|Release}/net45/CadAgent.TArchBridge.dll</c>）；
-/// ② 桥目录在 <c>TRUSTEDPATHS</c> 内（经 <c>AcadRuntime.GetTrustedPaths()</c> 实读；变量为空/
-///    不可读/不含桥目录 → Skip 并输出 spec §5 一次性配置指引）——**不尝试 NETLOAD**：
+/// ② 本机 AutoCAD ProgID 注册 + 桥目录在 <c>TRUSTEDPATHS</c> 内（ProgID 检查**先于任何 COM**；
+///    <c>AcadRuntime.GetTrustedPaths()</c> 实读；缺失/为空/不可读/不含桥目录 → Skip 并附只读
+///    leftover acad PID 诊断 + spec §5 一次性配置指引）——**不尝试 NETLOAD**：
 ///    AutoCAD 2014 对未签名程序集弹安全确认框，SendCommand 同步阻塞（spike 实测 45 分钟）；
-/// ③ 标本副本可用（复用 <see cref="AcadNativeLiveFixture"/>：副本 + 源件/副本 SHA + CUIX 指纹 + acad 零残留金丝雀）。
+/// ③ 标本副本可用（复用 <see cref="AcadNativeLiveFixture"/>：副本 + 源件/副本 SHA + acad 零残留金丝雀）；
+/// ④ CUIX 金丝雀基线**非空**（与切片A 同一定位器 <see cref="AcadNativeLiveFixture.CuixHashes"/>；
+///    空集 → Skip("金丝雀空集（CuixCount=0）")，不静默通过；非空 → 前后指纹比对 + 输出 "CUIX count=N sha=…"）。
 /// 纪律：所有修改只作用**副本**；源件只 SHA256 比对、绝不打开写入；每测试自建 <see cref="AcadRuntime"/>
 /// 并 Dispose（Close(false)+Quit+WaitForProcessExit）；绝不配置 TRUSTEDPATHS / 改任何 AutoCAD 设置。
-/// 三条事实：
-/// T1 READ 基准（证据数 ≥300，探针基准 343；21E00 extents；XData HYDRANT_RADIUS；TDbSymbArrow 永久 FAIL 披露）；
+/// 四条事实：
+/// T1 READ 基准（证据数 ≥300，探针基准 343 只记日志；21E00 extents；XData HYDRANT_RADIUS=28）；
 /// T2 递归（NestedTdbCount&gt;0 残留行；标本无此类行→Skip）；
-/// T3 EXPLODE_REPLACE（NewCount&gt;0/BboxMatch、读回无 21E00、.live.dwg 落盘、源件/副本/CUIX 不变）。
+/// T3 EXPLODE_REPLACE（NewCount&gt;0/BboxMatch、实体数 before-1+NewCount、读回无 21E00、.live.dwg 落盘、源件/副本/CUIX 不变）；
+/// A4 TDbSymbArrow 永久 FAIL 披露（自 T1 拆出：标本无样本→Skip，不拖累 T1 已证部分）。
 /// </summary>
 [Trait("Category", "RequiresAutoCAD")]
 [Collection("AcadLive")]
@@ -34,6 +38,13 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     private const int MinEvidenceCount = 300;
     private const int ProbeEvidenceCount = 343;
 
+    // XData 探针基线：天正设备键 HYDRANT_RADIUS = 28（字面值，不断言浮点等价）。
+    private const string HydrantRadiusKey = "HYDRANT_RADIUS";
+    private const string HydrantRadiusExpected = "28";
+
+    // TDbSymbArrow：几何双通道 eInvalidInput → 永久 FAIL（Core 只映射为 FullyExplodable=false）。
+    private const string SymbolArrowRxClass = "TDbSymbArrow";
+
     // 探针实证 extents（切片A基准逐字：120300/130100/3000）。
     private static readonly double[] WallBbox = { 127749.996, 120300, 0, 127849.996, 130100, 3000 };
 
@@ -41,6 +52,9 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     private readonly ITestOutputHelper _out;
     private readonly string? _origBridgeDll = AcadRuntime.BridgeDllOverride;
     private readonly TimeSpan _origNetLoadTimeout = AcadRuntime.NetLoadTimeout;
+
+    // CUIX 金丝雀基线（RequireLiveEnvironment 在任何 COM 之前经同一定位器实算；非空才继续）。
+    private Dictionary<string, string> _cuixBefore = new(StringComparer.OrdinalIgnoreCase);
 
     public AcadBridgeLiveTests(AcadNativeLiveFixture fx, ITestOutputHelper output)
     {
@@ -59,13 +73,14 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     }
 
     /// <summary>
-    /// T1 READ 基准：ReadExplodeEvidence(副本) → 证据数 ≥300（精确 343 记日志）；
-    /// 21E00（TDbWall）extents 与切片A基准逐字（1e-2）、FullyExplodable=true；
-    /// XData 至少一行含 HYDRANT_RADIUS；TDbSymbArrow 至少一行 FullyExplodable=false
-    /// （桥内 eInvalidInput 永久 FAIL 如实呈现——Core 无逐实体 Fail 列表，FAIL 只映射为 Fully=false）。
+    /// T1 READ 基准：ReadExplodeEvidence(副本) → 证据数 ≥300（精确 343 只记日志，不硬断言）；
+    /// 21E00（TDbWall）RxClass 逐字 + extents 与切片A基准逐字（1e-2）、FullyExplodable=true；
+    /// XData HYDRANT_RADIUS 实读值 == 28（不止断言键存在）。
+    /// TDbSymbArrow 已拆到 <see cref="A4_Read_SymbArrowFailDisclosure"/>（A4）——
+    /// 其标本缺样本时的 Skip 不会连带作废本测试已证部分。
     /// </summary>
     [SkippableFact]
-    public void T1_Read_BaselineCountBboxXDataSymbArrowFail()
+    public void T1_Read_BaselineCountBboxXData()
     {
         RequireLiveEnvironment();
 
@@ -85,12 +100,15 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
             .Take(10)
             .Select(g => $"{g.Key}:{g.Count()}")));
 
+        // 下限硬断言；探针精确值 343 只记日志（标本/天正版本可变，硬等 343 会伪失败）。
         Assert.True(evidences.Count >= MinEvidenceCount,
             $"深度读证据数 {evidences.Count} < 下限 {MinEvidenceCount}（探针基准 {ProbeEvidenceCount}；空读/桥截断须显式失败）");
         if (evidences.Count != ProbeEvidenceCount)
-            _out.WriteLine($"[T1] 注意：证据数 {evidences.Count} ≠ 探针基准 {ProbeEvidenceCount}（标本/天正版本可变，只记录不判失败）");
+            _out.WriteLine($"[T1] 注意：证据数 {evidences.Count} ≠ 探针基准 {ProbeEvidenceCount}（只记录不判失败）");
+        else
+            _out.WriteLine($"[T1] 证据数与探针基准一致（{ProbeEvidenceCount}）");
 
-        // 21E00（TDbWall）：extents 与切片A基准逐字、完全炸开。
+        // 21E00（TDbWall）：RxClass 逐字、extents 与切片A基准逐字、完全炸开。
         var wall = evidences.FirstOrDefault(e => HandleEquals(e.Handle, WallHandle));
         Assert.True(wall != null, $"深度读未见句柄 {WallHandle}（TDbWall 应存在）");
         Assert.Equal("TDbWall", wall!.RxClass);
@@ -103,25 +121,18 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         _out.WriteLine($"[T1] {WallHandle} rx={wall.RxClass} wrapper={wall.WrapperType} prims={wall.PrimitiveCount} " +
                        $"nested={wall.NestedTdbCount} bbox={Fmt(wall.Bbox!)}");
 
-        // XData：至少一行含天正键名 HYDRANT_RADIUS（探针基线 =28，只披露实读值）。
-        var hydrant = evidences.Where(e => e.XData.ContainsKey("HYDRANT_RADIUS")).ToList();
-        Assert.True(hydrant.Count > 0, "全量证据中无任何 HYDRANT_RADIUS XData 键（天正 XData 通道失效或标本不含设备）");
-        foreach (var row in hydrant.Take(5))
-            _out.WriteLine($"[T1] XData HYDRANT_RADIUS handle={row.Handle} rx={row.RxClass} " +
-                           $"value={row.XData["HYDRANT_RADIUS"]}（探针基线 28）");
-
-        // TDbSymbArrow：几何双通道 eInvalidInput → 永久 FAIL，Core 只映射为 FullyExplodable=false。
-        var arrows = evidences.Where(e => e.RxClass == "TDbSymbArrow").ToList();
-        _out.WriteLine($"[T1] TDbSymbArrow rows={arrows.Count} notFully={arrows.Count(e => !e.FullyExplodable)}");
-        Skip.If(arrows.Count == 0, "标本无 TDbSymbArrow 样本");
-        var arrowFailed = arrows.Where(e => !e.FullyExplodable).ToList();
-        Assert.True(arrowFailed.Count > 0,
-            $"TDbSymbArrow {arrows.Count} 行全部 FullyExplodable=true（探针实证 eInvalidInput 失败应如实披露为 false）");
-        foreach (var row in arrowFailed.Take(5))
-            _out.WriteLine($"[T1] TDbSymbArrow FAIL handle={row.Handle} prims={row.PrimitiveCount} " +
-                           $"nested={row.NestedTdbCount} bbox={(row.Bbox == null ? "null" : Fmt(row.Bbox))}");
+        // XData：HYDRANT_RADIUS 键必须存在且实读值 == 28（探针基线；不止断言键存在）。
+        var hydrant = evidences.Where(e => e.XData.ContainsKey(HydrantRadiusKey)).ToList();
+        Assert.True(hydrant.Count > 0, $"全量证据中无任何 {HydrantRadiusKey} XData 键（天正 XData 通道失效或标本不含设备）");
+        foreach (var row in hydrant)
+            _out.WriteLine($"[T1] XData {HydrantRadiusKey} handle={row.Handle} rx={row.RxClass} " +
+                           $"value={row.XData[HydrantRadiusKey]}（探针基线 {HydrantRadiusExpected}）");
+        Assert.True(hydrant.Any(e => string.Equals(e.XData[HydrantRadiusKey], HydrantRadiusExpected, StringComparison.Ordinal)),
+            $"{HydrantRadiusKey} 共 {hydrant.Count} 行，无一等于探针基线 {HydrantRadiusExpected}；" +
+            "实读值=" + string.Join("/", hydrant.Select(e => $"{e.Handle}:{e.XData[HydrantRadiusKey]}").Take(10)));
 
         rt.Dispose();
+        AssertCuixCanary("bridge-read");
         _fx.AssertCanaries("bridge-read");
     }
 
@@ -148,6 +159,7 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
                           " prims=" + string.Join("/", spaceRows.Take(5)
                               .Select(e => $"{e.Handle}:prims{e.PrimitiveCount},nested{e.NestedTdbCount},fully={e.FullyExplodable}"))));
 
+        AssertCuixCanary("bridge-recursion");
         _fx.AssertCanaries("bridge-recursion");
 
         Skip.If(nested.Count == 0, "标本无嵌套 TDb 样本");
@@ -162,10 +174,42 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     }
 
     /// <summary>
+    /// A4（自 T1 拆出）TDbSymbArrow 永久 FAIL 披露：桥内几何双通道 eInvalidInput → 永久 FAIL，
+    /// Core 无逐实体 Fail 列表，FAIL 只映射为 FullyExplodable=false，此处断言至少一行 false。
+    /// 标本无 arrow 行 → Skip("标本无 TDbSymbArrow 样本")——独立成事实，
+    /// 其样本缺失不再连带作废 T1 已证的计数/bbox/XData 部分。
+    /// </summary>
+    [SkippableFact]
+    public void A4_Read_SymbArrowFailDisclosure()
+    {
+        RequireLiveEnvironment();
+
+        using var rt = new AcadRuntime();
+        var evidences = rt.ReadExplodeEvidence(_fx.CopyPath);
+        rt.Dispose();
+
+        var arrows = evidences.Where(e => e.RxClass == SymbolArrowRxClass).ToList();
+        var arrowFailed = arrows.Where(e => !e.FullyExplodable).ToList();
+        _out.WriteLine($"[A4] evidence={evidences.Count} {SymbolArrowRxClass} rows={arrows.Count} " +
+                       $"notFully={arrowFailed.Count}");
+
+        AssertCuixCanary("bridge-symb-arrow");
+        _fx.AssertCanaries("bridge-symb-arrow");
+
+        Skip.If(arrows.Count == 0, "标本无 TDbSymbArrow 样本");
+        Assert.True(arrowFailed.Count > 0,
+            $"{SymbolArrowRxClass} {arrows.Count} 行全部 FullyExplodable=true（探针实证 eInvalidInput 失败应如实披露为 false）");
+        foreach (var row in arrowFailed.Take(5))
+            _out.WriteLine($"[A4] {SymbolArrowRxClass} FAIL handle={row.Handle} prims={row.PrimitiveCount} " +
+                           $"nested={row.NestedTdbCount} bbox={(row.Bbox == null ? "null" : Fmt(row.Bbox))}");
+    }
+
+    /// <summary>
     /// T3 EXPLODE_REPLACE（**副本**上，生产 native-live 会话序）：先 ReadNativeParams(副本) 完成
     /// /p 天正会话开路（单独 Open 走的是 EnsureApp() 默认 profile——天正未载，TDb 实体不可炸），
     /// 再 Open(副本) + ExplodeReplaceByHandle("21E00", 副本+".live.dwg")。
-    /// 断言：NewCount&gt;0、BboxMatch=true、读回无 21E00、.live.dwg 落盘；
+    /// 断言：NewCount&gt;0、BboxMatch=true、实体数守恒（after == before − 1 + NewCount，即 1 换 NewCount）、
+    /// 读回无 21E00、.live.dwg 落盘；
     /// 金丝雀：源件 SHA / 副本 SHA（Open RW 但无 Save ⇒ 字节不变）/ CUIX 指纹 / acad 零残留。
     /// </summary>
     [SkippableFact]
@@ -184,15 +228,25 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         _out.WriteLine($"[T3] open-warm records={before.Count} {WallHandle}.{wallBefore!.ObjectName} layer={wallBefore.Layer}");
 
         rt.Open(_fx.CopyPath);
+        // 替换前实体数（Open 后、替换前；爆炸替换=删 1 换 NewCount，总数须守恒）。
+        int entityBefore = rt.EntityCount();
+        _out.WriteLine($"[T3] modelSpace entityCount before={entityBefore}");
+
         var rep = rt.ExplodeReplaceByHandle(WallHandle, liveDwg);
+        int entityAfter = rt.EntityCount();
         _out.WriteLine($"[T3] REPLACED handle={rep.Handle} newCount={rep.NewCount} bboxMatch={rep.BboxMatch} " +
-                       $"tolerance={rep.Tolerance:R} saved={rep.SavedPath}");
+                       $"tolerance={rep.Tolerance:R} saved={rep.SavedPath} " +
+                       $"entityCount {entityBefore}->{entityAfter}（期望 {entityBefore - 1 + rep.NewCount}）");
 
         Assert.True(rep.NewCount > 0, $"替换叶数 {rep.NewCount} 非正（炸开空产物）");
         Assert.True(rep.BboxMatch,
             $"替换前后 bbox 不一致（BboxMatch=false，容差 {rep.Tolerance:R}）——包含性判据失败");
         Assert.True(string.Equals(rep.Handle, WallHandle, StringComparison.OrdinalIgnoreCase),
             $"REPLACED 句柄 {rep.Handle} ≠ 请求句柄 {WallHandle}");
+        // 实体数守恒：1 实体被替换为 NewCount 个叶产物（after == before − 1 + NewCount）。
+        Assert.True(entityAfter == entityBefore - 1 + rep.NewCount,
+            $"替换后模型空间实体数不守恒：before={entityBefore} after={entityAfter} newCount={rep.NewCount}"
+            + $"（期望 {entityBefore - 1 + rep.NewCount}）——替换漏删/漏插或桥读回窗口失真");
 
         // 读回（null 形态=当前已开文档）：原句柄必须消失（已替换为叶产物）。
         var after = rt.ReadNativeParams();
@@ -208,6 +262,7 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         Assert.True(live.Length > 0, $".live.dwg 为空文件: {liveDwg}");
         _out.WriteLine($"[T3] live.dwg size={live.Length} path={liveDwg}");
 
+        AssertCuixCanary("bridge-explode-replace");
         _fx.AssertCanaries("bridge-explode-replace");
     }
 
@@ -216,11 +271,33 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     private void RequireLiveEnvironment()
     {
         Skip.If(!_fx.SpecimenReady, _fx.SpecimenSkipReason ?? "真实电气标本不可用，跳过真机测试");
-        Assert.Equal(0, _fx.AcadProcessCountBefore);
+
+        // 前置进程纪律（与 <see cref="AcadProbe"/> 第四态同口径）：起始就有 acad 进程 → **Skip**
+        // （并发激活= CUIX 竞态，且残留实例必被前次启动期模态框滞留）；残留非本测试缺陷，
+        // 硬失败会掩盖真因。收尾金丝雀（AssertCanaries）仍**硬断言** Dispose 后 0 残留。
+        Skip.If(_fx.AcadProcessCountBefore > 0,
+            $"起始已有 acad 进程 {_fx.AcadProcessCountBefore} 个（不并发激活/CUIX 竞态守卫）——"
+            + "已运行的实例可能仍挂着启动期模态框，须人工关闭后重跑"
+            + BridgeLiveGuard.LeftoverNote("测试启动时"));
+
+        // CUIX 金丝雀基线（纯只读文件 I/O，无 COM，故置于守卫之前——每次 live 运行输出都带基线）：
+        // 与切片A **同一定位器**（AcadNativeLiveFixture.CuixHashes，遍历
+        // %APPDATA%\Autodesk\AutoCAD*\**\acad.cuix；Windows 文件名不区分大小写 ⇒ acad.CUIX 亦命中，
+        // 这正是首版报告"0 cuix"的误判根源：大小写敏感的目录检索判空，定位器本身是对的）。
+        // 空集 → 显式 Skip（金丝雀恒等=弱证据，不静默通过）；非空 → 记录基线供收尾逐字比对。
+        _cuixBefore = AcadNativeLiveFixture.CuixHashes();
+        _out.WriteLine("[canary] CUIX before count=" + _cuixBefore.Count + " sha=" + FmtCuix(_cuixBefore));
+        Skip.If(_cuixBefore.Count == 0,
+            "金丝雀空集（CuixCount=0）——同一定位器 "
+            + "AcadNativeLiveFixture.CuixHashes()（%APPDATA%\\Autodesk\\AutoCAD*\\**\\acad.cuix）未找到任何 CUIX；"
+            + "CUIX 金丝雀将退化为空集恒等（弱证据），按纪律显式 Skip 而非静默通过");
+        if (_cuixBefore.Count != _fx.CuixCount)
+            _out.WriteLine($"[canary] 注意：本测试实算 CUIX 数 {_cuixBefore.Count} ≠ 夹具基线 {_fx.CuixCount}（应同时点采样，只记录）");
 
         // 守卫顺序：桥/信任判定**先于** AcadProbe——AcadProbe 会先拉起默认 profile 实例，
         // 该实例在退出时可能被启动期模态框滞留（本机实证"不支持硬件加速"框），滞留进程会让
         // 后续 /p 启动的 EnsureNoForeignInstance 拒绝、TRUSTEDPATHS 永远读不到；先读才拿得到真值。
+        // 守卫自身首步是 ProgID 注册检查（不触 COM）：无 AutoCAD 时立即 Skip，绝不激活进程。
         var guard = BridgeLiveGuard.State;
         _out.WriteLine($"[guard] bridgeDll={guard.DllPath ?? "<缺失>"}");
         _out.WriteLine($"[guard] TRUSTEDPATHS={(guard.TrustedPaths == null ? "<未读取>" : FmtTrusted(guard.TrustedPaths))}");
@@ -231,6 +308,24 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     }
 
     // ---- helpers ----
+
+    /// <summary>收尾 CUIX 金丝雀（同一定位器实算）：数量 + 逐文件 SHA 指纹逐字相等，并把
+    /// "CUIX count=N sha=…" 打入测试输出（真机证据可复核）。调用前提：本方 AcadRuntime 已 Dispose。</summary>
+    private void AssertCuixCanary(string stage)
+    {
+        var after = AcadNativeLiveFixture.CuixHashes();
+        _out.WriteLine($"[{stage}] CUIX count={after.Count} sha={FmtCuix(after)}");
+        Assert.Equal(_cuixBefore.Count, after.Count);
+        Assert.Equal(AcadNativeLiveFixture.CuixFingerprint(_cuixBefore),
+            AcadNativeLiveFixture.CuixFingerprint(after));
+    }
+
+    /// <summary>CUIX 指纹摘要（路径排序；"文件名=sha256"，多文件逗号分隔）。</summary>
+    private static string FmtCuix(IReadOnlyDictionary<string, string> map) =>
+        map.Count == 0
+            ? "<空集>"
+            : string.Join(",", map.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => $"{Path.GetFileName(kv.Key)}={kv.Value}"));
 
     private static bool HandleEquals(string? a, string? b) =>
         string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
@@ -243,10 +338,12 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
 }
 
 /// <summary>
-/// 桥真机守卫（Lazy 一次求值，类内三测试共享）：
-/// 桥 DLL 定位 → 实读 TRUSTEDPATHS（<c>AcadRuntime.GetTrustedPaths()</c>，/p 天正 profile，F2 口径）
+/// 桥真机守卫（Lazy 一次求值，类内各测试共享）：
+/// 桥 DLL 定位 → **ProgID 注册前置检查（不触 COM/不启动进程）** → 实读 TRUSTEDPATHS
+/// （<c>AcadRuntime.GetTrustedPaths()</c>，/p 天正 profile，F2 口径）
 /// → 桥目录是否落在信任位置（TRUSTEDPATHS 含子目录，故祖先目录亦算信任）。
-/// 任何失败（含 COM 异常）→ Skip 原因，绝不上抛失败；绝不写注册表 / 改任何 AutoCAD 设置。
+/// 任何失败（含 COM 异常）→ Skip 原因（附**只读** leftover acad PID 诊断；绝不强杀，人工清理）；绝不上抛失败；
+/// 绝不写注册表 / 改任何 AutoCAD 设置。
 /// </summary>
 internal static class BridgeLiveGuard
 {
@@ -266,6 +363,13 @@ internal static class BridgeLiveGuard
         string? dll = ResolveBridgeDll(out string? missing);
         if (dll == null) return new BridgeGuard(false, missing!, null, null);
 
+        // COM 前置：ProgID 未注册 → 直接 Skip（Type.GetTypeFromProgID 只读注册表，不激活进程）。
+        // 否则 Activated 路径会先拉起 acad.exe（或抛孤儿注册异常），Skip 原因离开真因。
+        if (Type.GetTypeFromProgID(VendorProfiles.Acad.ProgId) == null)
+            return new BridgeGuard(false,
+                $"本机无 AutoCAD ProgID 注册（{VendorProfiles.Acad.ProgId}）——无法实读 TRUSTEDPATHS，"
+                + "不尝试 NETLOAD。" + LeftoverNote("ProgID 预检"), dll, null);
+
         string? trusted;
         try
         {
@@ -277,16 +381,18 @@ internal static class BridgeLiveGuard
             // 本机真机实证（2026-11-25，Task 10）：AutoCAD 2014 每次启动弹「AutoCAD - 不支持硬件加速」
             // WPF 模态框；人工未关闭前 COM 调用持续 RPC_E_CALL_REJECTED → Gate1 超时、Quit 滞留
             // （acad.exe 残留须人工处理）。属环境前置，不改任何 AutoCAD 设置，只如实 Skip。
+            // leftover 计数在 using 释放（Close/Quit 已尽力执行）之后实读：正是"我们退出失败"的残留证据。
             return new BridgeGuard(false,
                 $"TRUSTEDPATHS 不可读（{ex.GetType().Name}: {ex.Message}）——不尝试 NETLOAD（安全框会阻塞）。"
                 + "诊断提示：若为天正实例未就绪/Gate1 超时，先确认启动期模态框（如「不支持硬件加速」）已人工关闭。"
+                + LeftoverNote("COM 实读失败、本测试实例已 Dispose 后")
                 + Guidance(dll), dll, null);
         }
 
         var leftover = AcadNativeLiveFixture.AcadProcessTokens();
         string leftoverNote = leftover.Count == 0
             ? ""
-            : $"（注意：TRUSTEDPATHS 预检后残留 acad 进程 {string.Join(",", leftover)}——退出期模态框滞留，须人工处理后方可重跑）";
+            : $"（注意：TRUSTEDPATHS 预检后残留 acad 进程 {string.Join(",", leftover)}——退出期模态框滞留，须人工处理后方可重跑；测试不做强杀）";
 
         string dir = Path.GetDirectoryName(dll) ?? dll;
         if (string.IsNullOrWhiteSpace(trusted))
@@ -302,6 +408,17 @@ internal static class BridgeLiveGuard
                 $"TRUSTEDPATHS 预检后残留 acad 进程 {string.Join(",", leftover)}（不并发激活）" + leftoverNote, dll, trusted);
 
         return new BridgeGuard(true, null, dll, trusted);
+    }
+
+    /// <summary>只读 leftover 诊断（tasklist 口径，<c>Process.GetProcessesByName("acad")</c> 等价集合）：
+    /// 计数/PID 打进 Skip 原因；**绝不 kill**——残留由用户人工清理。</summary>
+    internal static string LeftoverNote(string when)
+    {
+        var leftover = AcadNativeLiveFixture.AcadProcessTokens();
+        return leftover.Count == 0
+            ? $"（{when}：无残留 acad 进程）"
+            : $"（{when}：残留 acad 进程 {leftover.Count} 个 [{string.Join(",", leftover)}]——"
+              + "测试不做强杀，须人工清理后方可重跑）";
     }
 
     /// <summary>桥 DLL 定位：CADAGENT_BRIDGE_DLL 覆盖优先，否则仓库 src/CadAgent.TArchBridge/bin/{Debug|Release}/net45。</summary>
