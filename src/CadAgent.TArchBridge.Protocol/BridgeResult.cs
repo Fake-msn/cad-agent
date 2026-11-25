@@ -23,6 +23,10 @@ public sealed record XDataDto(string Handle, int TypeCode, string Value);
 /// <summary>符号块引用：句柄、块名与插入点。</summary>
 public sealed record BlockDto(string Handle, string Name, double[] Position);
 
+/// <summary>块定义内 TDb 聚合（边界补齐 B1，<c>BDEF</c> 记录）：块名、类名与**定义内**实体计数。
+/// 与 ENTITY（模型空间实例，按句柄）是分离事实：定义计数 ≠ 实例计数（同一块可零实例可多实例）。</summary>
+public sealed record BlockDefDto(string BlockName, string RxClass, int Count);
+
 /// <summary>读取失败记录：句柄与原因。</summary>
 public sealed record FailDto(string Handle, string Reason);
 
@@ -54,6 +58,9 @@ public sealed class BridgeResult
 
     /// <summary>符号块引用记录。</summary>
     public List<BlockDto> Blocks { get; } = new List<BlockDto>();
+
+    /// <summary>块定义 TDb 聚合记录（B1：与 ENTITY 实例段分离）。</summary>
+    public List<BlockDefDto> BlockDefs { get; } = new List<BlockDefDto>();
 
     /// <summary>失败记录。</summary>
     public List<FailDto> Fails { get; } = new List<FailDto>();
@@ -96,6 +103,11 @@ public sealed class BridgeResult
             sb.Append("BLOCK\t").Append(TsCodec.Escape(b.Handle)).Append('\t')
               .Append(TsCodec.Escape(b.Name)).Append('\t')
               .Append(Point(b.Position, 0)).Append('\n');
+
+        foreach (var d in BlockDefs)
+            sb.Append("BDEF\t").Append(TsCodec.Escape(d.BlockName)).Append('\t')
+              .Append(TsCodec.Escape(d.RxClass)).Append('\t')
+              .Append(d.Count.ToString(CultureInfo.InvariantCulture)).Append('\n');
 
         foreach (var f in Fails)
             sb.Append("FAIL\t").Append(TsCodec.Escape(f.Handle)).Append('\t')
@@ -169,6 +181,14 @@ public sealed class BridgeResult
                 case "BLOCK":
                     Expect(f, 4);
                     result.Blocks.Add(new BlockDto(f[1], f[2], ParsePoint(f[3])));
+                    break;
+
+                case "BDEF":
+                    Expect(f, 4);
+                    // PR32：定义内实体计数 >=0 为协议不变量——负值无可解释语义，响亮拒绝。
+                    int bdefCount = ParseInt(f[3], "blockDefCount");
+                    if (bdefCount < 0) throw new FormatException($"blockDefCount 非法（不得为负）: {f[3]}");
+                    result.BlockDefs.Add(new BlockDefDto(f[1], f[2], bdefCount));
                     break;
 
                 case "FAIL":

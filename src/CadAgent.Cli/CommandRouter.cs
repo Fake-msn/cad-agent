@@ -771,6 +771,8 @@ public static partial class CommandRouter
         // 扫描继续到正常 stdout/审计/exit 0（理解侧诚实降级；--explode 失败同骑该降级）。
         int explodeRead = 0, explodeFully = 0, explodePartial = 0, explodeFailed = 0;
         IReadOnlyList<SymbolCandidate> explodeCandidates = Array.Empty<SymbolCandidate>();
+        // B1（边界补齐）：块定义 TDb 独立段（定义计数 ≠ 实例数）——加性披露/持久化；无 --explode 恒空。
+        IReadOnlyList<BlockDefTdbEntry> blockDefTdb = Array.Empty<BlockDefTdbEntry>();
         if (args.Contains("--explode"))
         {
             void ExplodeReadFailed(Exception ex)
@@ -841,10 +843,34 @@ public static partial class CommandRouter
                                 !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount > 0);
                             explodeFailed = evidences.Count(e =>
                                 !e.FullyExplodable && (e.Primitives?.Count ?? 0) + e.NestedTdbCount == 0);
-                            var derive = TarchDerive.Enrich(result.Overlay, evidences);
+                            // B1：块定义段与证据同一次桥会话（AcadRuntime 缓存命中，不二次开图）。
+                            // PR32：块定义读数**独立** try/catch——该段失败不得把证据四计数归 0、
+                            // 不得跳过 overlay Save、不得记 explode-read-failed；只降级该段
+                            //（审计加性 explode-blockdef-failed{error} + stderr 提示）。
+                            IReadOnlyList<BlockDefTdbEntry>? blockDefs = null;
+                            try { blockDefs = explodeRuntime.ReadExplodeBlockDefs(drawingPath); }
+                            catch (Exception ex)
+                            {
+                                audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
+                                    session, "semantic", "explode-blockdef-failed", drawingPath,
+                                    JsonSerializer.Serialize(new { error = ex.Message }), hash, hash, "", ""));
+                                stderr.WriteLine($"--explode: 块定义段读取失败（{ex.Message}），证据段照常落盘");
+                            }
+                            // 块定义失败时 Enrich 收到 null（本轮无可用定义事实）：先快照上轮定义段，
+                            // Enrich 后回填——失败不覆盖磁盘旧事实（与 M9 证据失败保留同口径）。
+                            List<BlockDefTdbEntry>? retained = blockDefs is null
+                                ? result.Overlay.BlockDefTdb.ToList()
+                                : null;
+                            var derive = TarchDerive.Enrich(result.Overlay, evidences, blockDefs);
+                            if (retained is not null)
+                            {
+                                result.Overlay.BlockDefTdb.Clear();
+                                result.Overlay.BlockDefTdb.AddRange(retained);
+                            }
                             explodeCandidates = derive.SymbolCandidates;
-                            // 恰一次额外 Save（扫描结果已在上方 Save）：证据行/标注须持久化，否则下次
-                            // scan Load 深度表为空。无 --explode 路径仍恰一次 Save，旧行为逐字不变。
+                            blockDefTdb = blockDefs ?? Array.Empty<BlockDefTdbEntry>();
+                            // 恰一次额外 Save（扫描结果已在上方 Save）：证据行/标注/块定义段须持久化，
+                            // 否则下次 scan Load 深度表为空。无 --explode 路径仍恰一次 Save，旧行为逐字不变。
                             result.Overlay.Save(overlayPath);
                         }
                         catch (Exception ex)
@@ -852,6 +878,7 @@ public static partial class CommandRouter
                             // 异常前已赋值的计数一律归 0（读证据整体失败=无可用深度事实，诚实口径）。
                             explodeRead = explodeFully = explodePartial = explodeFailed = 0;
                             explodeCandidates = Array.Empty<SymbolCandidate>();
+                            blockDefTdb = Array.Empty<BlockDefTdbEntry>();
                             ExplodeReadFailed(ex);
                         }
                     }
@@ -896,7 +923,9 @@ public static partial class CommandRouter
                 explodeFully,
                 explodePartial,
                 explodeFailed,
-                explodeSymbolCandidates = explodeCandidateDtos
+                explodeSymbolCandidates = explodeCandidateDtos,
+                // B1 审计加性：块定义段行数（定义计数 ≠ 实例数；无 --explode 恒 0）。
+                blockDefTdbCount = blockDefTdb.Count
             }),
             hash, hash, "", ""));
         stdout.WriteLine(JsonSerializer.Serialize(new
@@ -936,7 +965,13 @@ public static partial class CommandRouter
             explodeFully,
             explodePartial,
             explodeFailed,
-            explodeSymbolCandidates = explodeCandidateDtos
+            explodeSymbolCandidates = explodeCandidateDtos,
+            // B1 stdout 加性键恒在（边界补齐）：块定义 TDb 段 {blockName,rxClass,count}——
+            // **定义**内实体计数，不是模型空间实例数（实例段见 explodeRead/证据表）；
+            // 无 --explode / 运行时无此能力 → 空数组。旧键逐字不变。
+            blockDefTdb = blockDefTdb
+                .Select(d => new { blockName = d.BlockName, rxClass = d.RxClass, count = d.Count })
+                .ToArray()
         }, SemanticJsonOpts));
         return 0;
     }

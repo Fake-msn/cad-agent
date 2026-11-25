@@ -32,6 +32,8 @@ public static class TarchSymbolPrefixes
 /// NativeExplode 标注种子 + 符号块候选 + 陈旧证据行清理。纯数据层（零 COM/零 IO）。
 /// 幂等：按句柄 Upsert，重扫刷新 CenterlineJson；重扫先删本轮未读到的证据行（镜像
 /// NativeParamSeeder "当前原生数据"语义）。空/缺基元、null XData 一律按空处理（不 NRE）。
+/// 种子口径：Fully && 类已知 && <c>Bbox != null</c>（I-2b：bbox 不可验=null 一律不落 0.9——
+/// 覆盖退化 <c>extents:degenerate</c> 与 <c>extents:Exception</c> 等全部不可验原因；证据行保留供复核）。
 /// 标注同口径：本轮未成功种子的 NativeExplode 标注一律回收（证据消失/存疑→不得残留授权）。</summary>
 public static class TarchDerive
 {
@@ -47,10 +49,21 @@ public static class TarchDerive
 
     /// <summary>一轮炸开证据落 overlay。返回符号块候选（不落标注）。
     /// 顺序：先按入参算 live 句柄集 → 删陈旧证据行 → 逐条 upsert（本轮行不会被误删）
-    /// → 回收本轮未成功种子的 NativeExplode 标注。</summary>
-    public static TarchDeriveResult Enrich(SemanticOverlay overlay, IReadOnlyList<ExplodeEvidence> evidences)
+    /// → 回收本轮未成功种子的 NativeExplode 标注。
+    /// B1（边界补齐）：<paramref name="blockDefs"/> 为同一次桥会话的**块定义段**（块名+类计数，
+    /// 定义 ≠ 实例）——**每轮 --explode 整表替换**（重扫刷新、空/缺省清空）；非 --explode 扫描
+    /// 不调用本方法，磁盘上的定义段原样保留（与 ExplodeEvidence 表同语义）。
+    /// 只披露不造标注、不进证据表。</summary>
+    public static TarchDeriveResult Enrich(SemanticOverlay overlay, IReadOnlyList<ExplodeEvidence> evidences,
+        IReadOnlyList<BlockDefTdbEntry>? blockDefs = null)
     {
         ArgumentNullException.ThrowIfNull(overlay);
+
+        // B1：块定义段全量刷新（与证据表并列的独立段；每轮以本轮读数替换，绝不残留上轮）。
+        overlay.BlockDefTdb.Clear();
+        if (blockDefs != null)
+            foreach (var d in blockDefs)
+                if (d is not null) overlay.BlockDefTdb.Add(d);
 
         var list = new List<ExplodeEvidence>();
         foreach (var e in evidences ?? Array.Empty<ExplodeEvidence>())
@@ -81,7 +94,7 @@ public static class TarchDerive
         return new TarchDeriveResult(candidates);
     }
 
-    // ---- 种子：Fully && 类已知 && bbox 口径一致（参数面缺失即不比）----
+    // ---- 种子：Fully && 类已知 && bbox 可验 && bbox 口径一致（参数面缺失即不比）----
 
     /// <summary>返回是否本轮成功种子（供标注回收判定）。</summary>
     private static bool SeedNativeExplode(SemanticOverlay overlay, ExplodeEvidence ev)
@@ -89,8 +102,13 @@ public static class TarchDerive
         var cls = TDbClassMap.ClassFor(ev.RxClass);
         if (!ev.FullyExplodable || cls == SemanticClass.Unknown) return false;
 
+        // I-2/I-2b（修复波1/2）：bbox 不可验（null）一律不种子——旧实现让 bbox 比对整体跳过而静默
+        // 落 0.9，等于把"包围盒不可验"当"已验证一致"。判据不看 FailReason 前缀：退化（A1 置 null）、
+        // extents 读取异常（异常路径不写 bbox）与其它"读不到"同口径，证据行本身保留供人工复核。
+        if (ev.Bbox is null) return false;
+
         var p = overlay.NativeEntities.FirstOrDefault(n => n.Handle == ev.Handle);
-        if (p?.Bbox is not null && ev.Bbox is not null && !BboxClose(p.Bbox, ev.Bbox, BboxTol))
+        if (p?.Bbox is not null && !BboxClose(p.Bbox, ev.Bbox, BboxTol))
             return false;   // 原生 bbox 与炸开 bbox 不一致：证据存疑，不种子
 
         // UpsertAnnotation 以 (handle+provenance) 去重 → 重扫幂等。

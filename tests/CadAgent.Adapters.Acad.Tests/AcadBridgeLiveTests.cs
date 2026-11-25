@@ -43,7 +43,8 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     private const string HydrantRadiusKey = "HYDRANT_RADIUS";
     private const string HydrantRadiusExpected = "28";
 
-    // TDbSymbArrow：几何双通道 eInvalidInput → 永久 FAIL（Core 只映射为 FullyExplodable=false）。
+    // TDbSymbArrow：几何双通道 eInvalidInput → 永久 FAIL（宿主以 FailReason/FailReasons 透出；
+    // PR32：原 no-geometry 原因更正为 explode:eInvalidInput）。
     private const string SymbolArrowRxClass = "TDbSymbArrow";
 
     // 探针实证 extents（切片A基准逐字：120300/130100/3000）。
@@ -175,8 +176,10 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     }
 
     /// <summary>
-    /// A4（自 T1 拆出）TDbSymbArrow 永久 FAIL 披露：桥内几何双通道 eInvalidInput → 永久 FAIL，
-    /// Core 无逐实体 Fail 列表，FAIL 只映射为 FullyExplodable=false，此处断言至少一行 false。
+    /// A4（自 T1 拆出）TDbSymbArrow 永久 FAIL 披露：桥内几何双通道 eInvalidInput → 永久 FAIL。
+    /// PR32：宿主现携 <c>FailReasons</c>（该句柄全部 FAIL，按桥输出序；首条仍在 <c>FailReason</c>）——
+    /// 失败行的首条 FAIL 实证为 <c>extents:Exception</c>（bbox 读取先失败），炸开失败若发生则为
+    /// <c>explode:eInvalidInput</c>（嵌套炸开同码，不得再断言"无几何"）。
     /// 标本无 arrow 行 → Skip("标本无 TDbSymbArrow 样本")——独立成事实，
     /// 其样本缺失不再连带作废 T1 已证的计数/bbox/XData 部分。
     /// </summary>
@@ -200,9 +203,17 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         Skip.If(arrows.Count == 0, "标本无 TDbSymbArrow 样本");
         Assert.True(arrowFailed.Count > 0,
             $"{SymbolArrowRxClass} {arrows.Count} 行全部 FullyExplodable=true（探针实证 eInvalidInput 失败应如实披露为 false）");
-        foreach (var row in arrowFailed.Take(5))
+        foreach (var row in arrowFailed)
+        {
+            // PR32：全部失败原因可复核（不再只有"Fully=false 无逐实体 Fail 列表"）。
+            Assert.False(string.IsNullOrEmpty(row.FailReason));
+            Assert.NotNull(row.FailReasons);
+            Assert.NotEmpty(row.FailReasons!);
+            Assert.Contains("extents:Exception", row.FailReasons!);
             _out.WriteLine($"[A4] {SymbolArrowRxClass} FAIL handle={row.Handle} prims={row.PrimitiveCount} " +
-                           $"nested={row.NestedTdbCount} bbox={(row.Bbox == null ? "null" : Fmt(row.Bbox))}");
+                           $"nested={row.NestedTdbCount} bbox={(row.Bbox == null ? "null" : Fmt(row.Bbox))} " +
+                           $"fails={string.Join("|", row.FailReasons!)}");
+        }
     }
 
     /// <summary>
@@ -267,17 +278,228 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         _fx.AssertCanaries("bridge-explode-replace");
     }
 
+    // ---- 边界补齐（A1/A2/B1）真机骨架：TDbECabletry/TDbEFitting + 块定义独立段 + 退化 extents ----
+
+    private const string ElecTdbeSpecimenDirEnv = "CADAGENT_ELEC_TDBE_SPECIMEN_DIR";
+    private const string ElecCabletryRx = "TDbECabletry";
+    private const string ElecFittingRx = "TDbEFitting";
+    // spike 实证：16#1116 退化 extents 恰 47 行；PR32 下限 45（标本本地确定性 47，留 2 行版本噪声余量），
+    // 精确值仍只记日志。
+    private const int MinDegenerateExtentsRows = 45;
+    private const int SpikeDegenerateExtentsRows = 47;
+
+    /// <summary>
+    /// T5（A2/B1 电气类）：elec-tdbe-01 副本 → ReadExplodeEvidence → 证据含
+    /// <c>TDbECabletry</c> 与 <c>TDbEFitting</c> 各至少一行（缺失即 Skip + 直方图，绝不伪造绿）；
+    /// 逐类记录 extents 可得性与炸开状态；源副本 SHA 不变 + CUIX/acad 零残留金丝雀。
+    /// </summary>
+    [SkippableFact]
+    public void T5_ElecTdbeClasses_Read()
+    {
+        // M-6：电类标本自证存在性（CreateElecCopy 内 Skip），不依赖 16#1116 夹具。
+        RequireLiveEnvironment(needsWallSpecimen: false);
+        string copy = CreateElecCopy("elec-tdbe-01.dwg");
+        try
+        {
+            string shaBefore = AcadNativeLiveFixture.Sha256File(copy);
+            using var rt = new AcadRuntime();
+            var evidences = rt.ReadExplodeEvidence(copy);
+            rt.Dispose();
+
+            string histogram = string.Join("/", evidences
+                .GroupBy(e => e.RxClass, StringComparer.Ordinal)
+                .OrderByDescending(g => g.Count())
+                .Take(12)
+                .Select(g => $"{g.Key}:{g.Count()}"));
+            _out.WriteLine($"[T5] evidence={evidences.Count} rxClassTop={histogram}");
+
+            var cabletry = evidences.Where(e => e.RxClass == ElecCabletryRx).ToList();
+            var fitting = evidences.Where(e => e.RxClass == ElecFittingRx).ToList();
+            LogClassRows("T5", ElecCabletryRx, cabletry);
+            LogClassRows("T5", ElecFittingRx, fitting);
+
+            AssertCuixCanary("elec-tdbe-read");
+            AssertElecCanaries("elec-tdbe-read");
+            Assert.Equal(shaBefore, AcadNativeLiveFixture.Sha256File(copy));
+            // PR32：副本 SHA 与标本旁注 <file>.dwg.sha256 对账（旁注缺失=只记录不失败，标本 local-only）。
+            AssertElecSpecimenSha("elec-tdbe-01.dwg", copy);
+
+            Skip.If(cabletry.Count == 0,
+                $"elec-tdbe-01 未见 {ElecCabletryRx} 证据行（直方图 {histogram}）——标本缺类或桥读空，不伪造绿");
+            Skip.If(fitting.Count == 0,
+                $"elec-tdbe-01 未见 {ElecFittingRx} 证据行（直方图 {histogram}）——标本缺类或桥读空，不伪造绿");
+        }
+        finally { CleanupElecCopy(copy); }
+    }
+
+    /// <summary>
+    /// T6（B1 块定义独立段）：elec-tdbe-02 副本 → ReadExplodeEvidence + ReadExplodeBlockDefs
+    ///（同一次桥会话的伴生读数，缓存命中不二次开图）。断言块定义表非空且含电气类之一；
+    /// 块定义行（按块名）**不得**混入模型空间证据句柄集（定义 ≠ 实例，不得双计）；
+    /// (blockName,rxClass) 唯一；金丝雀同上。
+    /// M-6 覆盖面说明：本真机骨架只证"真桥/真标本"一段；语义边界由 fake 测试钉住——
+    /// Data <c>Enrich_BlockDefs_DisclosureOnly_DoesNotTouchAnnotationsOrNativeEntities</c>
+    ///（不改标注/原生表、只入独立表）与 Cli <c>ScanExplode_BlockDefTdb_SeparateSection_AdditiveKeys</c>
+    ///（stdout 与本轮输入逐字一致、explode 四计数不变）。
+    /// </summary>
+    [SkippableFact]
+    public void T6_BlockDefTdb_SeparateSection()
+    {
+        // M-6：电类标本自证存在性（CreateElecCopy 内 Skip），不依赖 16#1116 夹具。
+        RequireLiveEnvironment(needsWallSpecimen: false);
+        string copy = CreateElecCopy("elec-tdbe-02.dwg");
+        try
+        {
+            string shaBefore = AcadNativeLiveFixture.Sha256File(copy);
+            using var rt = new AcadRuntime();
+            var evidences = rt.ReadExplodeEvidence(copy);
+            var blockDefs = rt.ReadExplodeBlockDefs(copy);
+            rt.Dispose();
+
+            _out.WriteLine($"[T6] evidence={evidences.Count} blockDefs={blockDefs.Count}");
+            foreach (var d in blockDefs.Take(12))
+                _out.WriteLine($"[T6] BDEF block={d.BlockName} rx={d.RxClass} count={d.Count}");
+
+            AssertCuixCanary("elec-tdbe-blockdef");
+            AssertElecCanaries("elec-tdbe-blockdef");
+            Assert.Equal(shaBefore, AcadNativeLiveFixture.Sha256File(copy));
+
+            Skip.If(blockDefs.Count == 0,
+                "elec-tdbe-02 未见任何块定义 TDb 行（桥 BlockTable 遍历失效或标本无 TDb 块定义），不伪造绿");
+            Assert.Contains(blockDefs, d => d.RxClass == ElecCabletryRx || d.RxClass == ElecFittingRx);
+
+            // 分离段口径：块定义按块名聚合，绝不冒充模型空间实例（证据整表按句柄）。
+            var handles = new HashSet<string>(evidences.Select(e => e.Handle), StringComparer.OrdinalIgnoreCase);
+            Assert.DoesNotContain(blockDefs, d => handles.Contains(d.BlockName));
+            // M-1 回归守卫（PR32）：布局块（*Model_Space / *Paper_Space*）不得作为块定义计数出现。
+            Assert.DoesNotContain(blockDefs,
+                d => d.BlockName is "*Model_Space" || d.BlockName.StartsWith("*Paper_Space"));
+            Assert.Equal(blockDefs.Count, blockDefs
+                .Select(d => d.BlockName + "\u0000" + d.RxClass)
+                .Distinct(StringComparer.Ordinal)
+                .Count());
+        }
+        finally { CleanupElecCopy(copy); }
+    }
+
+    /// <summary>
+    /// T7（A1 退化 extents）：16#1116 副本 → 证据中 FailReason=="extents:degenerate" 行数 ≥45
+    ///（spike 实证 47 只记日志；标本本地确定性下界，留 2 行噪声余量），且每行 Bbox==null（ENTITY 行 bbox 字段留空）；
+    /// 反向不变量：任何非空 bbox 行不得六分量全近零（退化判据漏网）。
+    /// </summary>
+    [SkippableFact]
+    public void T7_DegenerateExtents_NullBbox()
+    {
+        RequireLiveEnvironment();
+
+        using var rt = new AcadRuntime();
+        var evidences = rt.ReadExplodeEvidence(_fx.CopyPath);
+        rt.Dispose();
+
+        var degenerate = evidences.Where(e => e.FailReason == "extents:degenerate").ToList();
+        _out.WriteLine($"[T7] evidence={evidences.Count} degenerate={degenerate.Count} " +
+                       $"(spike={SpikeDegenerateExtentsRows})");
+        _out.WriteLine("[T7] degenerateTop=" + string.Join("/", degenerate
+            .GroupBy(e => e.RxClass, StringComparer.Ordinal)
+            .OrderByDescending(g => g.Count())
+            .Take(6)
+            .Select(g => $"{g.Key}:{g.Count()}")));
+
+        AssertCuixCanary("degenerate-extents");
+        _fx.AssertCanaries("degenerate-extents");
+
+        Assert.True(degenerate.Count >= MinDegenerateExtentsRows,
+            $"退化 extents 行 {degenerate.Count} < 下限 {MinDegenerateExtentsRows}"
+            + $"（spike 实证 {SpikeDegenerateExtentsRows}）——A1 判据失效或标本变更，不得伪造绿");
+        foreach (var e in degenerate)
+            Assert.Null(e.Bbox);   // A1：退化 → null，不得落 0,0,0..0,0,0
+        foreach (var e in evidences.Where(x => x.Bbox != null))
+            Assert.True(e.Bbox!.Any(v => Math.Abs(v) >= 1e-6),
+                $"{e.Handle} 出现六分量全近零 bbox（应判退化→null，A1 判据漏网）");
+    }
+
+    /// <summary>逐类日志：句柄/bbox/炸开状态/FailReason（真机证据可复核）。</summary>
+    private void LogClassRows(string stage, string rx, IReadOnlyList<ExplodeEvidence> rows)
+    {
+        foreach (var r in rows.Take(5))
+            _out.WriteLine($"[{stage}] {rx} handle={r.Handle} bbox={(r.Bbox == null ? "null" : Fmt(r.Bbox))} " +
+                           $"fully={r.FullyExplodable} prims={r.PrimitiveCount} fail={r.FailReason ?? "-"}");
+    }
+
+    /// <summary>电气标本目录：环境变量 <c>CADAGENT_ELEC_TDBE_SPECIMEN_DIR</c> 覆盖，
+    /// 默认仓库 <c>outputs/specimens/elec-tdbe</c>；缺失 → Skip（标本 local-only 不入库）。</summary>
+    private static string ElecSpecimenSourcePath(string fileName)
+    {
+        string? dir = Environment.GetEnvironmentVariable(ElecTdbeSpecimenDirEnv);
+        if (string.IsNullOrWhiteSpace(dir))
+            dir = Path.Combine(RepoRoot(), "outputs", "specimens", "elec-tdbe");
+        return Path.Combine(dir, fileName);
+    }
+
+    private string CreateElecCopy(string fileName)
+    {
+        string source = ElecSpecimenSourcePath(fileName);
+        Skip.If(!File.Exists(source),
+            $"电气标本不在本机: {source}（可用环境变量 {ElecTdbeSpecimenDirEnv} 覆盖目录），跳过真机测试");
+
+        string copyDir = Directory.CreateTempSubdirectory("elec-tdbe").FullName;
+        string copy = Path.Combine(copyDir, fileName);
+        File.Copy(source, copy);
+        return copy;
+    }
+
+    /// <summary>PR32：副本 SHA 与标本旁注 <c>&lt;file&gt;.sha256</c>（首 token=预期 SHA256）对账。
+    /// 旁注缺失 → 只记录不失败（标本 local-only，旁注属可选证据）；文件存在但为空 → 硬失败（损坏哨兵）；存在则硬断言一致。</summary>
+    private void AssertElecSpecimenSha(string fileName, string copyPath)
+    {
+        string shaFile = ElecSpecimenSourcePath(fileName) + ".sha256";
+        if (!File.Exists(shaFile))
+        {
+            _out.WriteLine($"[elec-sha] 缺旁注 {shaFile}——跳过 SHA 对账（只记录，不失败）");
+            return;
+        }
+        string expected = File.ReadAllText(shaFile)
+            .Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault() ?? "";
+        string actual = AcadNativeLiveFixture.Sha256File(copyPath);
+        _out.WriteLine($"[elec-sha] {fileName} expected={expected} actual={actual}");
+        Assert.False(string.IsNullOrEmpty(expected), $"标本旁注 {shaFile} 为空（无法对账）——旁注须含 SHA256");
+        Assert.True(string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase),
+            $"{fileName} 副本 SHA256={actual} ≠ 标本旁注 {expected}——标本被改动或旁注过期");
+    }
+
+    private static void CleanupElecCopy(string copyPath)
+    {
+        try { Directory.Delete(Path.GetDirectoryName(copyPath)!, true); }
+        catch { /* best-effort（AutoCAD 句柄释放延迟） */ }
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CadAgent.sln")))
+            dir = dir.Parent;
+        if (dir is null) throw new InvalidOperationException("未找到仓库根（CadAgent.sln）");
+        return dir.FullName;
+    }
+
     // ---- guards ----
 
-    private void RequireLiveEnvironment()
+    private void RequireLiveEnvironment(bool needsWallSpecimen = true)
     {
-        Skip.If(!_fx.SpecimenReady, _fx.SpecimenSkipReason ?? "真实电气标本不可用，跳过真机测试");
+        // M-6（修复波1）：16#1116 标本闸只对依赖它的 T1-T4/T7 生效。T5/T6 用电气标本
+        // （elec-tdbe-01/02），其存在性由 CreateElecCopy 各自 Skip——不得因 16#1116 缺失
+        // 而把电类用例误 Skip 成"标本不可用"（反之亦然）。
+        if (needsWallSpecimen)
+            Skip.If(!_fx.SpecimenReady, _fx.SpecimenSkipReason ?? "真实电气标本不可用，跳过真机测试");
 
         // 前置进程纪律（与 <see cref="AcadProbe"/> 第四态同口径）：起始就有 acad 进程 → **Skip**
         // （并发激活= CUIX 竞态，且残留实例必被前次启动期模态框滞留）；残留非本测试缺陷，
         // 硬失败会掩盖真因。收尾金丝雀（AssertCanaries）仍**硬断言** Dispose 后 0 残留。
-        Skip.If(_fx.AcadProcessCountBefore > 0,
-            $"起始已有 acad 进程 {_fx.AcadProcessCountBefore} 个（不并发激活/CUIX 竞态守卫）——"
+        // 计数独立实算：夹具仅在 16#1116 存在时赋值 AcadProcessCountBefore，本闸对电类用例同样适用。
+        int acadBefore = AcadNativeLiveFixture.AcadProcessTokens().Count;
+        Skip.If(acadBefore > 0,
+            $"起始已有 acad 进程 {acadBefore} 个（不并发激活/CUIX 竞态守卫）——"
             + "已运行的实例可能仍挂着启动期模态框，须人工关闭后重跑"
             + BridgeLiveGuard.LeftoverNote("测试启动时"));
 
@@ -319,6 +541,17 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         Assert.Equal(_cuixBefore.Count, after.Count);
         Assert.Equal(AcadNativeLiveFixture.CuixFingerprint(_cuixBefore),
             AcadNativeLiveFixture.CuixFingerprint(after));
+    }
+
+    /// <summary>电类标本收尾金丝雀（T5/T6 专用）：CUIX 指纹 + acad 零残留。
+    /// 不复用 <see cref="AcadNativeLiveFixture.AssertCanaries"/>——后者硬断言 16#1116 标本可用/字节不变，
+    /// 而 T5/T6 的标本是 elec-tdbe-01/02（副本 SHA 由用例内联断言）。</summary>
+    private void AssertElecCanaries(string stage)
+    {
+        AssertCuixCanary(stage);
+        var acad = AcadNativeLiveFixture.AcadProcessTokens();
+        Assert.True(acad.Count == 0,
+            $"[{stage}] 残留 acad.exe 进程: {string.Join(",", acad)}（自家实例 Dispose 后须零残留）");
     }
 
     /// <summary>CUIX 指纹摘要（路径排序；"文件名=sha256"，多文件逗号分隔）。</summary>

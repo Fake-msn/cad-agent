@@ -23,6 +23,10 @@ public sealed class SemanticOverlay
     // JSON 加性：旧 overlay 无此字段→反序列化 null→Load 归一为空 List（消费端免判空）。
     public List<ExplodeEvidence> ExplodeEvidence { get; set; } = new();
 
+    // 边界补齐 B1：块定义内 TDb 聚合独立表——**定义段**（块名+类计数），不是模型空间实例数。
+    // JSON 加性：旧 overlay 无此字段→null→Load 归一为空 List；重扫整表替换（TarchDerive.Enrich）。
+    public List<BlockDefTdbEntry> BlockDefTdb { get; set; } = new();
+
     public int Version { get; set; }
 
     public static SemanticOverlay Load(string path)
@@ -33,6 +37,7 @@ public sealed class SemanticOverlay
         // JSON 显式 null 亦归一为空表（属性初始化仅覆盖字段缺失场景）。
         overlay.NativeEntities ??= new();
         overlay.ExplodeEvidence ??= new();
+        overlay.BlockDefTdb ??= new();
         return overlay;
     }
 

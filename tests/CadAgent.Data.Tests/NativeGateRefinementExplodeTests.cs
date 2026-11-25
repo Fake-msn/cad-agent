@@ -66,6 +66,15 @@ public class NativeGateRefinementExplodeTests
         => Assert.Equal(NativeGateVerdict.Pass,
             NativeGateRefinement.EvaluateCombined(Ov(E("H9", b: 0.0)), "H9", null, E("H9", b: 5e-4)));
 
+    // 双 null 视同一致（**现有语义的 advisory 钉住，无行为变更**）：该通道身份判据=句柄
+    //（查表命中）+ RxClass + FullyExplodable，bbox 仅是附加几何一致项；两侧都不可验（null）时
+    // 不判漂移（BboxNearEq 双 null=true）。注意：准入门不读 FailReason（下游须知）。
+    [Fact]
+    public void BboxBothNull_TreatedAsConsistent_Pass()
+        => Assert.Equal(NativeGateVerdict.Pass,
+            NativeGateRefinement.EvaluateCombined(
+                Ov(E("HB") with { Bbox = null }), "HB", null, E("HB") with { Bbox = null }));
+
     // R15（控制器义务，顺带修）：非有限 bbox 分量必须按**不符** fail-closed——旧写法
     // `Math.Abs(diff) > tol` 对 NaN 恒 false，会把 NaN/Inf 漂移当"容差内一致"放行。
     [Theory]

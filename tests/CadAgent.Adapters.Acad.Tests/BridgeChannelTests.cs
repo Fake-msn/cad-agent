@@ -262,6 +262,9 @@ public class BridgeChannelTests : IDisposable
         r.Blocks.Add(new BlockDto("21E00", "$TWTSYS$00000508", new[] { 500700.0, 1325.0, 0.0 }));
         r.XData.Add(new XDataDto("21E00", 1001, "HYDRANT_RADIUS"));
         r.XData.Add(new XDataDto("21E00", 1000, "28"));
+        // B1：块定义行与 ENTITY（模型空间实例）分离——同一响应携带两段互不混同。
+        r.BlockDefs.Add(new BlockDefDto("$equip$00002832", "TDbECabletry", 1364));
+        r.BlockDefs.Add(new BlockDefDto("门块A", "TDbEFitting", 2));
         return r;
     }
 
@@ -344,6 +347,34 @@ public class BridgeChannelTests : IDisposable
         Assert.Null(prim.BlockName);
     }
 
+    // A2（边界补齐）/ PR32：FailReason 取该句柄**首条** FAIL 行原因，FailReasons 携带该句柄
+    // **全部** FAIL（按桥输出序）——桥内 explodes 失败的分类（extents:degenerate / extents:Exception /
+    // explode:eInvalidInput）由此如实透出，宿主不做二次推断。
+    [Fact]
+    public void MapExplodeEvidence_FailReason_FirstFailRowPerHandle()
+    {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("D1", "TDbWall", null, null, null, true));
+        r.Evidence.Add(new EvidenceDto("S1", "TDbSymbArrow", null, null, null, false));
+        r.Evidence.Add(new EvidenceDto("OK1", "TDbWall", null, null, null, true));
+        r.Fails.Add(new FailDto("D1", "extents:degenerate"));
+        r.Fails.Add(new FailDto("D1", "explode:Exception"));       // 后续 FAIL 不覆盖首条，但须入 FailReasons
+        r.Fails.Add(new FailDto("S1", "explode:eInvalidInput"));
+
+        var list = AcadRuntime.MapExplodeEvidence(r);
+
+        var d1 = list.Single(e => e.Handle == "D1");
+        Assert.Equal("extents:degenerate", d1.FailReason);
+        Assert.NotNull(d1.FailReasons);
+        Assert.Equal(new[] { "extents:degenerate", "explode:Exception" }, d1.FailReasons!);
+        var s1 = list.Single(e => e.Handle == "S1");
+        Assert.Equal("explode:eInvalidInput", s1.FailReason);
+        Assert.NotNull(s1.FailReasons);
+        Assert.Equal(new[] { "explode:eInvalidInput" }, s1.FailReasons!);
+        Assert.Null(list.Single(e => e.Handle == "OK1").FailReason);   // 无 FAIL 行 → null
+        Assert.Null(list.Single(e => e.Handle == "OK1").FailReasons);
+    }
+
     [Fact]
     public void PrimitiveKind_FamiliesCollapse()
     {
@@ -416,6 +447,90 @@ public class BridgeChannelTests : IDisposable
 
         // 同实例第二次：不重发 NETLOAD、不重跑探针——只有 开图/READ/关图。
         Assert.Equal(new[] { "Open(16#1116.dwg, ReadOnly=True)", "READ", "Close(False)" }, calls);
+    }
+
+    // B1（边界补齐）：块定义伴生读数——与 ReadExplodeEvidence 同一次桥会话的读数，
+    // 由实例缓存直接返回（**不二次开图/不发命令**；相对/绝对路径按同一实体归一）。
+    [Fact]
+    public void ReadExplodeBlockDefs_AfterReadExplodeEvidence_CacheHit_NoSecondOpen()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls);
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        using var rt = new AcadRuntime();
+        rt.ReadExplodeEvidence("16#1116.dwg");
+        int afterRead = calls.Count;
+
+        var defs = rt.ReadExplodeBlockDefs("16#1116.dwg");
+
+        Assert.Equal(2, defs.Count);
+        Assert.Contains(defs, d => d.RxClass == "TDbECabletry" && d.Count == 1364);
+        Assert.Contains(defs, d => d.BlockName == "门块A" && d.RxClass == "TDbEFitting" && d.Count == 2);
+        Assert.Equal(afterRead, calls.Count);   // 缓存命中：无新增 Open/READ
+
+        // 路径形态差异（相对/绝对）按同一实体归一 → 仍命中缓存。
+        var again = rt.ReadExplodeBlockDefs(Path.GetFullPath("16#1116.dwg"));
+        Assert.Equal(defs.Count, again.Count);
+        Assert.Equal(afterRead, calls.Count);
+    }
+
+    // B1：无先读即取块定义 → 响亮拒绝（缓存缺失不得静默空表，也不得隐式二次开图）。
+    [Fact]
+    public void ReadExplodeBlockDefs_NoPriorRead_Throws()
+    {
+        using var rt = new AcadRuntime();
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("ReadExplodeEvidence", ex.Message);
+    }
+
+    // M-3(a)（修复波1）：Dispose 清空块定义缓存——实例销毁后不得再返回上一会话的块定义表
+    //（缓存生命周期 = 桥会话生命周期；残留缓存会让已销毁实例"复活"旧读数）。
+    [Fact]
+    public void ReadExplodeBlockDefs_AfterDispose_Throws()
+    {
+        PrepareBridge();
+        var doc = new FakeBridgeDoc(new List<string>());
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        var rt = new AcadRuntime();
+        try
+        {
+            rt.ReadExplodeEvidence("16#1116.dwg");
+            Assert.NotEmpty(rt.ReadExplodeBlockDefs("16#1116.dwg"));   // 销毁前命中
+        }
+        finally
+        {
+            rt.Dispose();
+        }
+
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("块定义缓存缺失", ex.Message);
+    }
+
+    // M-3(b)（修复波1）：读证据成功但 Close 失败 → 整体按失败上抛，块定义缓存**不得**
+    // 被本轮读数填充（缓存写入须在 Close 成功之后；否则后续 ReadExplodeBlockDefs 会把
+    // 一次失败会话的块定义当有效读数返回）。
+    [Fact]
+    public void ReadExplodeEvidence_CloseFailure_LeavesBlockDefCacheInvalid()
+    {
+        PrepareBridge();
+        var doc = new FakeBridgeDoc(new List<string>()) { FailClose = true };
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        using var rt = new AcadRuntime();
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg"));
+        Assert.Contains("Close 失败", ex.Message);
+
+        var cacheEx = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("块定义缓存缺失", cacheEx.Message);
     }
 
     // 复审 F1(i)：/p 启动瞬间（CreateProcess 前）环境变量必须已指向本实例通道目录——
@@ -929,6 +1044,8 @@ public class BridgeChannelTests : IDisposable
         public bool TimeoutRealRead { get; set; }
         /// <summary>EXPLODE_REPLACE 只回 status ok，不写 REPLACED/VERIFY（I6：缺替换记录分支）。</summary>
         public bool OmitReplaceRecord { get; set; }
+        /// <summary>M-3(b)（修复波1）：Close 失败注入——读证据收尾需失败上抛且缓存不得被填充。</summary>
+        public bool FailClose { get; set; }
         public string Name => "16#1116.dwg";
         public string LastRequest { get; private set; } = "";
         /// <summary>最近一次文档面系统变量读取（GetVariable）的变量名（TRUSTEDPATHS 口径观测）。</summary>
@@ -938,7 +1055,11 @@ public class BridgeChannelTests : IDisposable
             LastVariableName = name;
             return "C:\\trusted;C:\\other";
         }
-        public void Close(bool save) => Calls.Add("Close(" + save + ")");
+        public void Close(bool save)
+        {
+            Calls.Add("Close(" + save + ")");
+            if (FailClose) throw new InvalidOperationException("fake close failure");
+        }
 
         public void SendCommand(string command)
         {

@@ -82,7 +82,16 @@ namespace CadAgent.TArchBridge
                     if (!rx.StartsWith("TDb", StringComparison.Ordinal)) continue;
                     string handle = id.Handle.ToString();
                     double[] bbox = null;
-                    try { var ext = ent.GeometricExtents; bbox = new[] { ext.MinPoint.X, ext.MinPoint.Y, ext.MinPoint.Z, ext.MaxPoint.X, ext.MaxPoint.Y, ext.MaxPoint.Z }; }
+                    try
+                    {
+                        var ext = ent.GeometricExtents;
+                        double[] box = { ext.MinPoint.X, ext.MinPoint.Y, ext.MinPoint.Z, ext.MaxPoint.X, ext.MaxPoint.Y, ext.MaxPoint.Z };
+                        // A1（边界补齐）：六分量全近零=退化 extents（零尺寸/无几何实体）——不得冒充
+                        // "0,0,0..0,0,0"的可用包围盒；bbox 置 null（ENTITY 行两列为空）+ 落 FAIL 事实，
+                        // 消费侧据 FailReason 区分"读不到"与"读到的就是零"。
+                        if (IsDegenerateExtents(box)) result.Fails.Add(new FailDto(handle, "extents:degenerate"));
+                        else bbox = box;
+                    }
                     catch (System.Exception ex) { result.Fails.Add(new FailDto(handle, "extents:" + ex.GetType().Name)); }
                     var prims = new List<PrimDto>();
                     bool fully = TryExplodeDeep(ent, handle, 0, maxDepth, prims, result);
@@ -96,7 +105,85 @@ namespace CadAgent.TArchBridge
                     }
                     catch (System.Exception ex) { result.Fails.Add(new FailDto(handle, "xdata:" + ex.GetType().Name)); }
                 }
+                // B1（边界补齐）：块定义内 TDb 聚合**独立段**（BDEF）——与上方模型空间实例段
+                // （ENTITY，按句柄）互不混同；定义计数不是实例计数。
+                CollectBlockDefs(result, db, tr);
                 tr.Commit();
+            }
+        }
+
+        /// <summary>A1：退化包围盒判据——六分量 |v| 全 &lt; 1e-6 即退化（零尺寸/无几何）。</summary>
+        internal static bool IsDegenerateExtents(double[] box)
+        {
+            for (int i = 0; i < box.Length; i++)
+                if (Math.Abs(box[i]) >= 1e-6) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// B1：块定义 TDb 聚合。遍历 BlockTable 记录，跳过模型空间/图纸空间**布局块**
+        /// （主判据 <c>BlockTableRecord.IsLayout</c>：不依赖块名约定；*Model_Space/*Paper_Space*
+        /// 名称前缀保留为兜底），对每个块定义内的 TDb 实体按 (块名, 类) 计数；
+        /// 嵌套块只统计**直接**实体（不递归展开）。
+        /// 输出按 (块名, 类) Ordinal 定序，保证同一图纸多次读取行序稳定。
+        /// </summary>
+        internal static void CollectBlockDefs(BridgeResult result, Database db, Transaction tr)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            var names = new Dictionary<string, string>(StringComparer.Ordinal);
+            var classes = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            var bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+            if (bt == null) return;
+            foreach (ObjectId btrId in bt)
+            {
+                BlockTableRecord btr;
+                try { btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord; }
+                catch { continue; }
+                if (btr == null) continue;
+
+                string blockName;
+                try { blockName = btr.Name; }
+                catch { continue; }
+                if (string.IsNullOrEmpty(blockName)) continue;
+                // M-1（修复波1）：布局块判定以 BTR.IsLayout 为主判据（模型/图纸空间布局在任何
+                // 块名约定下都不会被当块定义计数）；名称前缀保留为兜底（IsLayout 读取异常时
+                // 仍能挡住 *Model_Space/*Paper_Space*）。
+                bool isLayout = false;
+                try { isLayout = btr.IsLayout; }
+                catch { /* 取不到按非布局，交由名称兜底 */ }
+                if (isLayout) continue;
+                if (string.Equals(blockName, "*Model_Space", StringComparison.OrdinalIgnoreCase)) continue;
+                if (blockName.StartsWith("*Paper_Space", StringComparison.OrdinalIgnoreCase)) continue;
+
+                foreach (ObjectId entId in btr)
+                {
+                    Entity e;
+                    try { e = tr.GetObject(entId, OpenMode.ForRead) as Entity; }
+                    catch { continue; }
+                    if (e == null) continue;
+                    string rx;
+                    try { rx = e.GetRXClass().Name; }
+                    catch { continue; }
+                    if (!rx.StartsWith("TDb", StringComparison.Ordinal)) continue;
+
+                    // 具名 struct 键（net45 无 ValueTuple）：块名与类名以 NUL 连接（两者不含 NUL）。
+                    string key = blockName + "\u0000" + rx;
+                    if (!counts.ContainsKey(key))
+                    {
+                        counts[key] = 0;
+                        names[key] = blockName;
+                        classes[key] = rx;
+                    }
+                    counts[key] = counts[key] + 1;
+                }
+            }
+
+            foreach (string key in counts.Keys
+                .OrderBy(k => names[k], StringComparer.Ordinal)
+                .ThenBy(k => classes[k], StringComparer.Ordinal))
+            {
+                result.BlockDefs.Add(new BlockDefDto(names[key], classes[key], counts[key]));
             }
         }
 
@@ -134,7 +221,20 @@ namespace CadAgent.TArchBridge
                 return fully;
             }
             catch (System.Exception ex)
-            { result.Fails.Add(new FailDto(handle, "explode:" + ex.GetType().Name)); return false; }
+            {
+                // A2（边界补齐 / PR32 更正）：几何双通道 eInvalidInput（实证 TDbSymbArrow）= 炸开请求
+                // 被宿主以"输入无效"拒绝。**不得**再记作 no-geometry：reviewer 实证 TDbRectStair 有几何
+                // 却因嵌套炸开同样落 eInvalidInput——"无几何"是过度断言，故原因改为
+                // explode:eInvalidInput（爆炸阶段+状态码，可复核且不猜几何有无）。
+                // 注：.NET 枚举元素名为 InvalidInput（ObjectARX 同名值写作 eInvalidInput；
+                // 2014 反射核实无 e 前缀成员）。其余异常文案逐字不变。
+                var acadEx = ex as Autodesk.AutoCAD.Runtime.Exception;
+                if (acadEx != null && acadEx.ErrorStatus == ErrorStatus.InvalidInput)
+                    result.Fails.Add(new FailDto(handle, "explode:eInvalidInput"));
+                else
+                    result.Fails.Add(new FailDto(handle, "explode:" + ex.GetType().Name));
+                return false;
+            }
             finally { if (exploded != null) foreach (DBObject o in exploded) { try { o.Dispose(); } catch { } } }
         }
 

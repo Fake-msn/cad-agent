@@ -84,6 +84,24 @@ public class TarchDeriveTests
         Assert.Empty(o.Annotations);
     }
 
+    // I-2（修复波1）/ I-2b（修复波2）：bbox 不可验（null）的证据行——旧实现跳过 bbox 比对后
+    // 静默落 0.9，等于把"包围盒不可验"当"已验证一致"。保守口径：**bbox=null 一律不种子**
+    //（不只 extents:degenerate 前缀；extents:Exception 等其它不可验原因同口径），行本身保留可复核。
+    [Theory]
+    [InlineData("extents:degenerate")]
+    [InlineData("extents:degenerate:roundtrip")]   // 前缀口径：后续细分原因亦不种子
+    [InlineData("extents:Exception")]              // I-2b：非退化前缀但 bbox 同样不可验
+    public void Enrich_UnverifiableBbox_FullyAndClassKnown_NoAnnotation_ButRowKept(string failReason)
+    {
+        var o = new SemanticOverlay();
+        TarchDerive.Enrich(o, new[] { Wall("D1") with { Bbox = null, FailReason = failReason } });
+
+        var row = Assert.Single(o.ExplodeEvidence);
+        Assert.Equal(failReason, row.FailReason);   // 证据行保留（撤行=丢事实）
+        Assert.Null(row.Bbox);
+        Assert.Empty(o.Annotations);                // 但不得落 NativeExplode 0.9
+    }
+
     [Fact]
     public void Enrich_Rescan_RemovesStaleRows()
     {
@@ -246,5 +264,73 @@ public class TarchDeriveTests
         Assert.Equal("30", p.Params["XData:HYDRANT_RADIUS"]);
         Assert.False(p.Params.ContainsKey("XData:GONE_KEY"));
         Assert.Equal("100", p.Params["PScale"]);
+    }
+
+    // ---- B1（边界补齐）：块定义 TDb 独立段——全量刷新语义（重扫替换、空/缺省清空），只披露不落标注 ----
+
+    [Fact]
+    public void Enrich_BlockDefs_ReplacedOnRescan_EmptyClears()
+    {
+        var o = new SemanticOverlay();
+        var ev = new[] { Wall("21E00") };
+
+        TarchDerive.Enrich(o, ev, new[]
+        {
+            new BlockDefTdbEntry("门块A", "TDbECabletry", 3),
+        });
+        var first = Assert.Single(o.BlockDefTdb);
+        Assert.Equal("门块A", first.BlockName);
+        Assert.Equal(3, first.Count);
+
+        // 重扫（新读数）→ 整表替换，旧块名不得残留。
+        TarchDerive.Enrich(o, ev, new[]
+        {
+            new BlockDefTdbEntry("块B", "TDbEFitting", 1),
+            new BlockDefTdbEntry("块C", "TDbECabletry", 2),
+        });
+        Assert.Equal(2, o.BlockDefTdb.Count);
+        Assert.DoesNotContain(o.BlockDefTdb, e => e.BlockName == "门块A");
+
+        // 空表（桥无 BDEF 行 / 旧运行时）→ 清空，不留上轮幽灵。
+        TarchDerive.Enrich(o, ev, Array.Empty<BlockDefTdbEntry>());
+        Assert.Empty(o.BlockDefTdb);
+
+        // 缺省（null）与空表同口径：清空。
+        TarchDerive.Enrich(o, ev, new[] { new BlockDefTdbEntry("块D", "TDbECabletry", 1) });
+        TarchDerive.Enrich(o, ev);
+        Assert.Empty(o.BlockDefTdb);
+    }
+
+    /// <summary>
+    /// M-6（修复波1）：块定义段**只披露**——不改写既有标注/原生参数表。
+    /// 旧用例把证据类设为 Unknown（"天然不种子"），断言近乎同义反复；本用例改用**类已知**证据
+    /// （FullyExplodable=false 使其本条不种子）并预置既有标注 + 原生参数行：块定义进入独立表时，
+    /// 这两张表必须逐字不变（不得回收非 NativeExplode 标注、不得改原生参数）。
+    /// </summary>
+    [Fact]
+    public void Enrich_BlockDefs_DisclosureOnly_DoesNotTouchAnnotationsOrNativeEntities()
+    {
+        var o = new SemanticOverlay();
+        o.UpsertNative(new NativeEntityParam("21E00", "TDbWall", SemanticClass.Wall,
+            new Dictionary<string, string> { ["TotalWidth"] = "100" },
+            null, DateTimeOffset.UtcNow, true, "0dt"));
+        o.UpsertAnnotation(new SemanticAnnotation(
+            "21E00", SemanticClass.Wall, Provenance.LayerInference, 0.8, "图层推断"));
+
+        // 类已知（TDbWall）但未全炸开 → 本条证据本身不种子；块定义更不得造标注。
+        var ev = Wall("21E00") with { FullyExplodable = false };
+        TarchDerive.Enrich(o, new[] { ev }, new[]
+        {
+            new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364),
+        });
+
+        var row = Assert.Single(o.ExplodeEvidence);
+        Assert.Equal("21E00", row.Handle);   // 块定义（按块名）不混入实例证据表
+        var native = Assert.Single(o.NativeEntities);
+        Assert.Equal("100", native.Params!["TotalWidth"]);
+        var annotation = Assert.Single(o.Annotations);
+        Assert.Equal(Provenance.LayerInference, annotation.Provenance);   // 既有标注原样保留
+        Assert.Equal(0.8, annotation.Confidence);
+        Assert.Single(o.BlockDefTdb);
     }
 }

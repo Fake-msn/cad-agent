@@ -73,6 +73,67 @@ public class ExplodeEvidenceModelTests
         Assert.False(row.FullyExplodable);
     }
 
+    // A2（边界补齐）：FailReason/FailReasons 是可选尾部参数——旧构造/旧 JSON 一律 null，
+    // 不破坏既有形状（PR32：FailReasons=全部失败原因，JSON 加性尾字段）。
+    [Fact]
+    public void ExplodeEvidence_FailReason_DefaultNull_AndRoundTrip()
+    {
+        Assert.Null(E("21E00").FailReason);    // 旧构造（13 参）→ null
+        Assert.Null(E("21E00").FailReasons);   // PR32：旧构造（14 参）→ null
+
+        var dir = Directory.CreateTempSubdirectory("explodefail").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "semantic.json");
+            var o = new SemanticOverlay();
+            o.UpsertExplode(E("321A") with
+            {
+                FailReason = "extents:Exception",
+                FailReasons = new[] { "extents:Exception", "explode:eInvalidInput" },
+            });
+            o.Save(path);
+
+            var loaded = SemanticOverlay.Load(path);
+            var row = Assert.Single(loaded.ExplodeEvidence);
+            Assert.Equal("extents:Exception", row.FailReason);                       // 首条口径保持
+            Assert.NotNull(row.FailReasons);
+            Assert.Equal(new[] { "extents:Exception", "explode:eInvalidInput" }, row.FailReasons!);   // 全量加性
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    // B1（边界补齐）：块定义 TDb 独立表——JSON 加性（旧文件无此字段→空表）、显式 null 归一、往返保真。
+    [Fact]
+    public void Overlay_BlockDefTdb_JsonAdditive_ExplicitNull_AndRoundTrip()
+    {
+        var dir = Directory.CreateTempSubdirectory("blockdef").FullName;
+        try
+        {
+            string legacy = Path.Combine(dir, "legacy.json");
+            File.WriteAllText(legacy, """{"Annotations":[],"Mappings":[],"Version":1}""");
+            Assert.Empty(SemanticOverlay.Load(legacy).BlockDefTdb);
+
+            string nulled = Path.Combine(dir, "nulled.json");
+            File.WriteAllText(nulled,
+                """{"Annotations":[],"Mappings":[],"Version":1,"ExplodeEvidence":[],"BlockDefTdb":null}""");
+            Assert.Empty(SemanticOverlay.Load(nulled).BlockDefTdb);
+
+            string path = Path.Combine(dir, "semantic.json");
+            var o = new SemanticOverlay();
+            o.BlockDefTdb.Add(new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364));
+            o.BlockDefTdb.Add(new BlockDefTdbEntry("门块A", "TDbEFitting", 2));
+            o.Save(path);
+
+            var loaded = SemanticOverlay.Load(path);
+            Assert.Equal(2, loaded.BlockDefTdb.Count);
+            Assert.Equal("$equip$00002832", loaded.BlockDefTdb[0].BlockName);
+            Assert.Equal("TDbECabletry", loaded.BlockDefTdb[0].RxClass);
+            Assert.Equal(1364, loaded.BlockDefTdb[0].Count);
+            Assert.Equal("TDbEFitting", loaded.BlockDefTdb[1].RxClass);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Fact]
     public void Overlay_Json_Additive_And_RoundTrip()
     {
