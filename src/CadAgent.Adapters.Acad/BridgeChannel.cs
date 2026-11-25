@@ -26,7 +26,14 @@ internal static class BridgeChannel
 
     /// <summary>误拒明文归因（规格逐字：点击【不加载】/TRUSTEDPATHS/SECURELOAD 三因）。</summary>
     internal const string DeniedMessage =
-        "NETLOAD 被拒绝：可能点击了【不加载】/TRUSTEDPATHS 未含桥目录/SECURELOAD 阻止";
+        "NETLOAD 被拒绝：可能点击【不加载】/TRUSTEDPATHS 未含桥目录/SECURELOAD 阻止";
+
+    /// <summary>
+    /// 硬超时明文（规格逐字）：监视线程在 NETLOAD 总预算耗尽且 SendCommand 仍阻塞时触发
+    /// （宿主已终止本方 AutoCAD 会话），随后的 COM 异常据此包装。
+    /// </summary>
+    internal const string NetLoadHardTimeoutMessage =
+        "NETLOAD 超时（3600s）：已终止本方 AutoCAD 会话";
 
     /// <summary>NETLOAD 请求标记文件（诊断用：证明本次 NETLOAD 已发出）。</summary>
     internal const string NetLoadRequestMarker = "netload.req";
@@ -48,24 +55,21 @@ internal static class BridgeChannel
     internal static TimeSpan ProbeTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// 20s 无进展指引的调度缝：默认后台延时执行（真机 SendCommand 阻塞期间无法自本线程轮询，
-    /// 故指引由后台一次性打印）；测试替换为立即执行以确定性钉住"只回调一次"。
+    /// 硬超时处理器（复审 F3）：宿主（AcadRuntime）在桥入口注入，默认实现=终止**本方**经 /p
+    /// 启动的进程（经既有 TarchProcessCleanup 缝）并置标志，使随后从阻塞 SendCommand 抛出的
+    /// COM 异常被包装为 <see cref="NetLoadHardTimeoutMessage"/>。null=不武装硬超时
+    /// （无终止能力时不得声称"已终止会话"，仍由软超时/调用方降级兜底）。
     /// </summary>
-    internal static Action<TimeSpan, Action> ScheduleGuidance = (delay, action) =>
-    {
-        Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(delay).ConfigureAwait(false);
-                action();
-            }
-            catch
-            {
-                // 一次性提示：后台失败不影响 NETLOAD 主路径。
-            }
-        });
-    };
+    internal static Action? HardTimeoutHandler;
+
+    /// <summary>
+    /// NETLOAD 总预算测试缝（null=用调用方传入值，生产 3600s）。仅供单测把 3600s 压低到毫秒级，
+    /// 与软超时/硬超时同口径生效。
+    /// </summary>
+    internal static TimeSpan? NetLoadTimeoutOverride;
+
+    /// <summary>监视线程轮询切片（指引/硬超时的判定粒度；20ms 足够，测试据此确定性收敛）。</summary>
+    private static readonly TimeSpan MonitorSlice = TimeSpan.FromMilliseconds(20);
 
     private static readonly System.Text.Encoding Utf8NoBom =
         new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
@@ -73,6 +77,9 @@ internal static class BridgeChannel
     /// <summary>
     /// 写请求文件 <c>req-&lt;id&gt;.txt</c>（id=目录内现有最大数字+1，1 起），返回 id。
     /// 目录不存在时先创建（跨实例复用同一通道目录时幂等）。
+    /// 写前先<b>放弃</b>目录内所有"有 req 无 done"的历史请求：通道目录改为实例级复用（复审 F1）
+    /// 后，超时/异常路径留下的请求不会被清理，桥的 NextPending 恒拾取最早那条旧请求——
+    /// 新请求将永远轮不到（第二次桥操作必超时）。标记 done 即让桥跳过该旧请求。
     /// </summary>
     internal static string WriteRequest(string channelDir, string requestText)
     {
@@ -83,13 +90,29 @@ internal static class BridgeChannel
         {
             string name = Path.GetFileNameWithoutExtension(f);
             if (name.Length <= 4) continue;
-            if (int.TryParse(name.Substring(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)
-                && n > max)
-                max = n;
+            string existing = name.Substring(4);
+            if (!int.TryParse(existing, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)) continue;
+            if (n > max) max = n;
+            AbandonPendingRequest(channelDir, existing);
         }
         string id = (max + 1).ToString(CultureInfo.InvariantCulture);
         File.WriteAllText(Path.Combine(channelDir, "req-" + id + ".txt"), requestText, Utf8NoBom);
         return id;
+    }
+
+    // 放弃历史未完成请求：先落结果文件再置 done（与桥的"结果先、done 后"顺序一致），
+    // 使桥的 NextPending 跳过它；失败 best-effort（真超时仍由调用方 120s 兜底）。
+    private static void AbandonPendingRequest(string channelDir, string id)
+    {
+        string done = Path.Combine(channelDir, "res-" + id + ".done");
+        if (File.Exists(done)) return;
+        try
+        {
+            File.WriteAllText(Path.Combine(channelDir, "res-" + id + ".txt"),
+                "status\tfail\nerror\t宿主已放弃（超时/失败）\n", Utf8NoBom);
+            File.WriteAllText(done, "1", Utf8NoBom);
+        }
+        catch { /* best-effort：写入失败时由本次请求的超时兜底 */ }
     }
 
     /// <summary>
@@ -152,16 +175,18 @@ internal static class BridgeChannel
         value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     /// <summary>
-    /// 发送 NETLOAD 并等待"已返回/有进展"（看门狗）：
+    /// 发送 NETLOAD 并等待"已返回/有进展"：
     /// ① 写 <see cref="NetLoadRequestMarker"/> 请求标记；
-    /// ② 若给了指引预算/回调，按 <paramref name="noProgressThreshold"/> 后台调度一次指引
-    ///    （返回后由完成标志抑制——快速返回不打印）；
-    /// ③ <see cref="SendCommand"/> 同步发送（COM 阻塞即 NETLOAD 墙钟等待）；
-    /// ④ 写 <see cref="NetLoadSentMarker"/>（返回=NETLOAD 已结束，加载/拒绝由探针判定）；
-    /// ⑤ 轮询 <paramref name="watchdog"/>：true=有进展→返回；超过 <paramref name="netLoadTimeout"/>→
-    ///    <see cref="CadRuntimeException"/>（规格逐字超时文案）。
-    /// 说明：SendCommand 在 STA 内同步阻塞，阻塞期间无法自本线程轮询——故 3600s 上限覆盖
-    /// "返回后仍无进展"的恒假看门狗场景（真机返回即写 sent 标记，循环首轮即放行）。
+    /// ② 启监视线程（复审 F3）：SendCommand 在 STA 内**同步阻塞**（COM 调用不返回），故
+    ///    20s 无进展指引与 3600s 硬超时只能由独立后台线程施加——
+    ///    · 到达 <paramref name="noProgressThreshold"/>：经 <paramref name="slowGuidance"/> 打印一次指引；
+    ///    · 到达总预算（<see cref="NetLoadTimeoutOverride"/> ?? <paramref name="netLoadTimeout"/>）时
+    ///      发送仍未返回：调用 <see cref="HardTimeoutHandler"/>（终止本方会话）→ 随后的发送异常
+    ///      包装为 <see cref="NetLoadHardTimeoutMessage"/>；
+    ///    发送返回即取消监视线程（快速返回不打印指引、不误报硬超时）。
+    /// ③ 写 <see cref="NetLoadSentMarker"/>（发送已返回=NETLOAD 已结束，加载/拒绝由探针判定）；
+    /// ④ 轮询 <paramref name="watchdog"/>：true=有进展→返回；超时→软超时 <see cref="CadRuntimeException"/>。
+    /// 说明：软超时循环只覆盖"发送已返回但看门狗仍无进展"的场景；发送阻塞期由②兜底。
     /// </summary>
     internal static void EnsureNetLoad(
         string bridgeDll,
@@ -176,29 +201,95 @@ internal static class BridgeChannel
         Directory.CreateDirectory(channelDir);
         File.WriteAllText(Path.Combine(channelDir, NetLoadRequestMarker), bridgeDll, Utf8NoBom);
 
-        int completed = 0;
-        if (slowGuidance != null && noProgressThreshold is TimeSpan threshold && threshold > TimeSpan.Zero)
+        TimeSpan timeout = NetLoadTimeoutOverride ?? netLoadTimeout;
+        TimeSpan? guideAfter = noProgressThreshold is TimeSpan t && t > TimeSpan.Zero ? t : null;
+        string? guideText = slowGuidance != null ? GuidanceText(bridgeDll, channelDir) : null;
+        TimeSpan? hardAfter = HardTimeoutHandler != null ? timeout : null;
+
+        int sendReturned = 0;
+        int hardFired = 0;
+        // 不 Dispose：监视线程可能仍停在 WaitHandle.WaitOne 上，Dispose 会把取消句柄抽走
+        // （ObjectDisposedException 在本线程=进程级未处理异常）；只用 Cancel 收敛。
+        var monitor = new CancellationTokenSource();
+        if (guideText != null || hardAfter != null)
         {
-            string text = GuidanceText(bridgeDll, channelDir);
-            ScheduleGuidance(threshold, () =>
-            {
-                if (Volatile.Read(ref completed) == 0) slowGuidance(text);
-            });
+            StartNetLoadMonitor(monitor.Token, guideAfter, guideText, slowGuidance, hardAfter,
+                () => Volatile.Read(ref sendReturned) != 0,
+                () =>
+                {
+                    if (Interlocked.Exchange(ref hardFired, 1) != 0) return;
+                    try { HardTimeoutHandler?.Invoke(); }
+                    catch { /* 终止本方会话 best-effort：失败仍按硬超时响亮上抛 */ }
+                });
         }
 
         try { SendCommand(NetLoadLisp(bridgeDll), "netload"); }
-        finally { Volatile.Write(ref completed, 1); }
+        catch (Exception ex) when (Volatile.Read(ref hardFired) != 0)
+        { throw new CadRuntimeException(NetLoadHardTimeoutMessage, ex); }
+        finally
+        {
+            Volatile.Write(ref sendReturned, 1);
+            monitor.Cancel();
+        }
+        // 硬超时后发送仍"正常"返回（进程已被终止的竞态）：不得当成加载成功继续探针。
+        if (Volatile.Read(ref hardFired) != 0) throw new CadRuntimeException(NetLoadHardTimeoutMessage);
 
         File.WriteAllText(Path.Combine(channelDir, NetLoadSentMarker), "1", Utf8NoBom);
 
         var sw = Stopwatch.StartNew();
         while (!SafeWatchdog(watchdog, sw.Elapsed))
         {
-            if (sw.Elapsed >= netLoadTimeout)
+            if (sw.Elapsed >= timeout)
                 throw new CadRuntimeException(
-                    $"NETLOAD 超时（{(int)netLoadTimeout.TotalSeconds}s）：可能安全弹窗未处理");
+                    $"NETLOAD 超时（{(int)timeout.TotalSeconds}s）：可能安全弹窗未处理");
             Thread.Sleep(PollInterval);
         }
+    }
+
+    // 监视线程（复审 F3）：发送阻塞期间唯一能观察墙钟的线程。发送返回/取消即退出；
+    // 指引只回调一次；硬超时在总预算到点且发送仍未返回时触发一次。异常一律吞掉
+    // （诊断增强不得替代主路径的 fail-closed 结论）。
+    private static void StartNetLoadMonitor(
+        CancellationToken token,
+        TimeSpan? guideAfter,
+        string? guideText,
+        Action<string>? guidance,
+        TimeSpan? hardAfter,
+        Func<bool> sendReturned,
+        Action onHardTimeout)
+    {
+        var thread = new Thread(() =>
+        {
+            var sw = Stopwatch.StartNew();
+            bool guided = false;
+            try
+            {
+                while (true)
+                {
+                    if (token.IsCancellationRequested || sendReturned()) return;
+                    if (!guided && guideAfter is TimeSpan after && sw.Elapsed >= after)
+                    {
+                        guided = true;
+                        try { guidance!(guideText!); } catch { /* 指引打印失败不影响主路径 */ }
+                    }
+                    if (hardAfter is TimeSpan hard && sw.Elapsed >= hard)
+                    {
+                        onHardTimeout();
+                        return;
+                    }
+                    if (token.WaitHandle.WaitOne(MonitorSlice)) return;
+                }
+            }
+            catch
+            {
+                // 诊断线程的任何异常都不得升级为进程级未处理异常（主路径仍 fail-closed）。
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "cadagent-netload-watchdog",
+        };
+        thread.Start();
     }
 
     /// <summary>
