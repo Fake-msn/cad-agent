@@ -66,6 +66,13 @@ namespace CadAgent.Cli;
 /// {readback:"no-bbox-baseline"}，fail-closed）；炸开结果各以 null 形态读回断言原句柄
 /// 消失且 NewCount&gt;0 && BboxMatch，否则 native-live-failed{readback:"explode-native"}。
 /// 零写入/Dispose 后哈希/证据窗口闭合等切片A 契约逐字不动。
+/// **F1 失败文案阶段感知（最终整分支复审）**：REPLACED 成功即桥内 db.SaveAs 已交付
+/// .live.dwg——此后读回/收尾失败文案改为"已产出 .live.dwg 但未通过读回校验，按失败退出；
+/// 原图零写入"，且 native-live-failed 审计加性带 `liveOutExists`；无 REPLACED（准入/op/
+/// malformed）保持"未交付 .live.dwg"旧文案。
+/// **F2 收尾 SaveAs 去重（同轮）**：宿主 epilogue 仅在**末步 kind≠explode-native** 时
+/// rt.SaveAs（末步炸开=终态已由桥交付，跳过重复写出）；混合计划保留单次宿主 SaveAs
+/// （炸开后仍有句柄步改动保存后状态；同路径 SaveAs=AutoCAD SAVE 语义，真机待验）。
 /// </summary>
 public static partial class CommandRouter
 {
@@ -211,6 +218,25 @@ public static partial class CommandRouter
 
         string outPath = drawingPath + ".live.dwg";
 
+        // 最终复审 F1：阶段感知的失败文案——REPLACED 已成功执行=桥已交付 .live.dwg
+        // （桥内 db.SaveAs 在替换时即写出），此后读回/收尾失败不得宣称"未产出"。
+        // 标志声明在 RunSession 之外：异常 catch 亦须按阶段诚实报文案/审计。
+        bool replacedExecuted = false;
+        // 最终复审 F2：宿主收尾 SaveAs 的跳过判据（末步 kind==explode-native → 桥已交付终态）。
+        string? lastExecutedKind = null;
+
+        // 失败文案后缀（F1）：无 REPLACED → 旧文案逐字保留；有 REPLACED → 已产出但未过读回校验。
+        string FailHint() => replacedExecuted
+            ? "（已产出 .live.dwg 但未通过读回校验，按失败退出；原图零写入）"
+            : "（未交付 .live.dwg，原图零写入）";
+
+        // 加性审计键（F1）：本次会话是否由桥真正产出 liveout 文件（旧残留文件不算）。
+        bool LiveOutExists()
+        {
+            try { return replacedExecuted && File.Exists(outPath); }
+            catch { return false; }
+        }
+
         // 会话工作（4a–7）收进局部函数：各失败早退只返回码，不再绕过零写入复核
         // （I3 复审修复）——运行时一旦创建（存在副作用可能），成功/失败路径一律在
         // Dispose（Close+Quit+进程退出）之后重算源件 SHA 并与初值比对；失败文案不得
@@ -303,6 +329,9 @@ public static partial class CommandRouter
                 {
                     // 桥内自证：NewCount=叶数、BboxMatch=包含性校验结论（R10 口径在桥侧算）。
                     var rep = rt.ExplodeReplaceByHandle(hex, outPath);
+                    // F1：REPLACED 返回即桥内 db.SaveAs 已落 liveout——此后失败按"已产出"诚实报文案。
+                    replacedExecuted = true;
+                    lastExecutedKind = kind;
                     Audit("native-explode-step", hex,
                         new { hex, newCount = rep.NewCount, savedPath = rep.SavedPath, bboxMatch = rep.BboxMatch });
                     explodeResults.Add((hex, rep));
@@ -312,10 +341,12 @@ public static partial class CommandRouter
                 var rr = replay.Replay(single, drawing);
                 if (!rr[0].Ok)
                 {
-                    Audit("native-live-failed", hex, new { step = kind, handle = hex, error = rr[0].Error });
-                    stderr.WriteLine($"native-live 执行失败: {kind}: {rr[0].Error}（未交付 .live.dwg，原图零写入）");
+                    Audit("native-live-failed", hex,
+                        new { step = kind, handle = hex, error = rr[0].Error, liveOutExists = LiveOutExists() });
+                    stderr.WriteLine($"native-live 执行失败: {kind}: {rr[0].Error}{FailHint()}");
                     return 1;
                 }
+                lastExecutedKind = kind;
             }
 
             // 6. 读回闸（参数面）：after 读一次，期望按句柄**终态聚合**比对（同句柄多步不得按
@@ -333,15 +364,16 @@ public static partial class CommandRouter
                 if (!exp.Delete && exp.HasMove && exp.BaselineBbox == null)
                 {
                     Audit("native-live-failed", exp.Handle,
-                        new { readback = "no-bbox-baseline", handle = exp.Handle });
-                    stderr.WriteLine($"native-live 读回无基准: move {exp.Handle} 既无参数面 before-bbox 也无炸开证据 bbox（未交付 .live.dwg，原图零写入）");
+                        new { readback = "no-bbox-baseline", handle = exp.Handle, liveOutExists = LiveOutExists() });
+                    stderr.WriteLine($"native-live 读回无基准: move {exp.Handle} 既无参数面 before-bbox 也无炸开证据 bbox{FailHint()}");
                     return 1;
                 }
                 string? detail = CheckReadback(exp, after, out bool bboxNull);
                 if (detail != null)
                 {
-                    Audit("native-live-failed", drawingPath, new { readback = detail });
-                    stderr.WriteLine($"native-live 读回不符: {detail}（未交付 .live.dwg，原图零写入）");
+                    Audit("native-live-failed", drawingPath,
+                        new { readback = detail, liveOutExists = LiveOutExists() });
+                    stderr.WriteLine($"native-live 读回不符: {detail}{FailHint()}");
                     return 1;
                 }
                 exp.BboxNull = bboxNull;
@@ -364,8 +396,8 @@ public static partial class CommandRouter
                                 : null;
                     if (detail == null) continue;
                     Audit("native-live-failed", hex,
-                        new { readback = "explode-native", handle = hex, error = detail });
-                    stderr.WriteLine($"native-live 读回不符: {detail}（未交付 .live.dwg，原图零写入）");
+                        new { readback = "explode-native", handle = hex, error = detail, liveOutExists = LiveOutExists() });
+                    stderr.WriteLine($"native-live 读回不符: {detail}{FailHint()}");
                     return 1;
                 }
             }
@@ -383,7 +415,12 @@ public static partial class CommandRouter
 
             // 7. 交付：唯一写出是 .live.dwg 新文件（SaveAs+Close 仍在会话内；证据哈希在
             //    运行时 Dispose 后读取，见下方零写入复核）。
-            rt.SaveAs(outPath);
+            //    F2（最终复审）：桥在 EXPLODE_REPLACE 事务内已 db.SaveAs(liveout)——末步即
+            //    explode-native 时终态已由桥交付，宿主再 SaveAs 属重复写出（跳过）；否则保留
+            //    单次宿主 SaveAs（覆盖"炸开之后仍有句柄步修改了保存后状态"的混合计划——
+            //    同路径 SaveAs 即 AutoCAD SAVE 语义，真机待验）。
+            if (lastExecutedKind != "explode-native")
+                rt.SaveAs(outPath);
             rt.Close(false);
             return 0; // committed/收据在零写入复核之后才落（I3）
         }
@@ -418,8 +455,10 @@ public static partial class CommandRouter
         }
         catch (Exception ex)
         {
-            Audit("native-live-failed", drawingPath, new { error = ex.Message });
-            stderr.WriteLine($"native-live 失败: {ex.Message}（未交付 .live.dwg，原图零写入）");
+            // F1：异常同样按阶段诚实报（REPLACED 后桥已交付 liveout，不得宣称"未交付"）。
+            Audit("native-live-failed", drawingPath,
+                new { error = ex.Message, liveOutExists = LiveOutExists() });
+            stderr.WriteLine($"native-live 失败: {ex.Message}{FailHint()}");
             rc = 1;
         }
 

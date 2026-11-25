@@ -184,6 +184,8 @@ internal static class BridgeChannel
     ///      发送仍未返回：调用 <see cref="HardTimeoutHandler"/>（终止本方会话）→ 随后的发送异常
     ///      包装为 <see cref="NetLoadHardTimeoutMessage"/>；
     ///    发送返回即取消监视线程（快速返回不打印指引、不误报硬超时）。
+    ///    F4：<paramref name="securityDialogProbe"/> 非空时监视线程按节拍探测安全框，
+    ///    命中至少一次 → 指引文案加性附加 <see cref="SecurityDialogSeenSuffix"/>（只一次）。
     /// ③ 写 <see cref="NetLoadSentMarker"/>（发送已返回=NETLOAD 已结束，加载/拒绝由探针判定）；
     /// ④ 轮询 <paramref name="watchdog"/>：true=有进展→返回；超时→软超时 <see cref="CadRuntimeException"/>。
     /// 说明：软超时循环只覆盖"发送已返回但看门狗仍无进展"的场景；发送阻塞期由②兜底。
@@ -194,7 +196,8 @@ internal static class BridgeChannel
         Func<TimeSpan, bool> watchdog,
         TimeSpan netLoadTimeout,
         TimeSpan? noProgressThreshold = null,
-        Action<string>? slowGuidance = null)
+        Action<string>? slowGuidance = null,
+        Func<bool>? securityDialogProbe = null)
     {
         if (string.IsNullOrWhiteSpace(bridgeDll)) throw new CadRuntimeException("桥 DLL 路径为空");
         if (string.IsNullOrEmpty(channelDir)) throw new CadRuntimeException("桥通道目录为空");
@@ -220,7 +223,8 @@ internal static class BridgeChannel
                     if (Interlocked.Exchange(ref hardFired, 1) != 0) return;
                     try { HardTimeoutHandler?.Invoke(); }
                     catch { /* 终止本方会话 best-effort：失败仍按硬超时响亮上抛 */ }
-                });
+                },
+                securityDialogProbe);
         }
 
         try { SendCommand(NetLoadLisp(bridgeDll), "netload"); }
@@ -249,6 +253,8 @@ internal static class BridgeChannel
     // 监视线程（复审 F3）：发送阻塞期间唯一能观察墙钟的线程。发送返回/取消即退出；
     // 指引只回调一次；硬超时在总预算到点且发送仍未返回时触发一次。异常一律吞掉
     // （诊断增强不得替代主路径的 fail-closed 结论）。
+    // F4：安全框探测（可空）按 DialogProbeInterval 节拍锁存——命中至少一次时指引文案
+    // 加性附加 <see cref="SecurityDialogSeenSuffix"/>（原文案其余部分逐字不变）。
     private static void StartNetLoadMonitor(
         CancellationToken token,
         TimeSpan? guideAfter,
@@ -256,21 +262,37 @@ internal static class BridgeChannel
         Action<string>? guidance,
         TimeSpan? hardAfter,
         Func<bool> sendReturned,
-        Action onHardTimeout)
+        Action onHardTimeout,
+        Func<bool>? securityDialogProbe = null)
     {
         var thread = new Thread(() =>
         {
             var sw = Stopwatch.StartNew();
             bool guided = false;
+            bool dialogSeen = false;
+            // 首发立即探测（模态框通常先于 NETLOAD 返回出现；测试据此确定性锁存），
+            // 此后每 DialogProbeInterval 复测（弹窗晚到亦能命中）。
+            if (securityDialogProbe != null)
+            {
+                try { dialogSeen = securityDialogProbe(); } catch { /* 探测失败=未检出 */ }
+            }
+            var lastDialogProbe = Stopwatch.StartNew();
             try
             {
                 while (true)
                 {
                     if (token.IsCancellationRequested || sendReturned()) return;
+                    // F4：节拍探测（首发立即，随后每 DialogProbeInterval）；命中即锁存。
+                    if (securityDialogProbe != null && lastDialogProbe.Elapsed >= DialogProbeInterval)
+                    {
+                        lastDialogProbe.Restart();
+                        try { if (securityDialogProbe()) dialogSeen = true; } catch { /* 探测失败=未检出 */ }
+                    }
                     if (!guided && guideAfter is TimeSpan after && sw.Elapsed >= after)
                     {
                         guided = true;
-                        try { guidance!(guideText!); } catch { /* 指引打印失败不影响主路径 */ }
+                        string text = dialogSeen ? guideText! + SecurityDialogSeenSuffix : guideText!;
+                        try { guidance!(text); } catch { /* 指引打印失败不影响主路径 */ }
                     }
                     if (hardAfter is TimeSpan hard && sw.Elapsed >= hard)
                     {
@@ -306,9 +328,11 @@ internal static class BridgeChannel
         Func<TimeSpan, bool> watchdog,
         TimeSpan netLoadTimeout,
         TimeSpan? noProgressThreshold = null,
-        Action<string>? slowGuidance = null)
+        Action<string>? slowGuidance = null,
+        Func<bool>? securityDialogProbe = null)
     {
-        EnsureNetLoad(bridgeDll, channelDir, watchdog, netLoadTimeout, noProgressThreshold, slowGuidance);
+        EnsureNetLoad(bridgeDll, channelDir, watchdog, netLoadTimeout, noProgressThreshold,
+            slowGuidance, securityDialogProbe);
         if (ProbeRegistered(channelDir, ProbeTimeout)) return;
         throw new CadRuntimeException(DeniedMessage);
     }
@@ -333,6 +357,15 @@ internal static class BridgeChannel
         return "NETLOAD 已等待超过 " + (int)NoProgressGuideSeconds + " 秒：若 AutoCAD 弹出安全确认框，请点击【加载】；"
             + "如需永久免弹窗，请将桥目录加入 TRUSTEDPATHS（桥目录：" + bridgeDir + "；通道目录：" + channelDir + "）。";
     }
+
+    /// <summary>
+    /// 安全框检出时的诊断后缀（F4：指引文案加性拼接；检测未命中不改变原文案）。
+    /// 监视线程在无进展阈值到达前按固定节拍探测一次（一次命中即锁存），打印指引时附加。
+    /// </summary>
+    internal const string SecurityDialogSeenSuffix = "（已检测到安全框）";
+
+    /// <summary>监视线程内安全框探测节拍（与轮询口径一致；避免 20ms 切片级窗口枚举）。</summary>
+    private static readonly TimeSpan DialogProbeInterval = TimeSpan.FromMilliseconds(500);
 
     // 指引文案的秒数（与 AcadRuntime.NetLoadNoProgressThreshold 默认值一致；文案冗余说明用）。
     internal const int NoProgressGuideSeconds = 20;

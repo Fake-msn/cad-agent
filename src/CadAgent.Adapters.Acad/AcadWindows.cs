@@ -66,6 +66,25 @@ internal static class AcadWindows
     internal static Action<IntPtr> CloseWindow = hWnd => PostMessageW(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
 
     /// <summary>
+    /// 窗口所属进程 ID（F3 归属校验增强：句柄→PID；0=不可判定/窗口已销毁）。
+    /// 直接回答"附着实例的窗口是不是本方 /p 进程的窗口"——比比对
+    /// <c>Process.MainWindowHandle</c> 更精确（启动期该属性可能指向闪屏等非主框架窗口，
+    /// 造成"本方实例被误判为他方"的伪失败）。
+    /// </summary>
+    internal static Func<int, int> WindowProcessId = DefaultWindowProcessId;
+
+    private static int DefaultWindowProcessId(int windowHandle)
+    {
+        try
+        {
+            return GetWindowThreadProcessId(new IntPtr(windowHandle), out uint pid) == 0
+                ? 0
+                : (int)pid;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
     /// 是否存在安全确认框：枚举顶层窗口，标题含"安全"或"Security"（大小写不敏感）即命中。
     /// <paramref name="processId"/>!=0 时只看该进程（AutoCAD）的窗口；0=全桌面（进程未知时兜底）。
     /// </summary>

@@ -61,6 +61,7 @@ public class EnsureAppTArchTests : IDisposable
     private readonly Func<dynamic, Process, bool> _origOwnership = AcadRuntime.OwnershipMatches;
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
+    private readonly TimeSpan? _origOwnershipWindow = AcadRuntime.OwnershipRetryWindowOverride;
 
     public EnsureAppTArchTests()
     {
@@ -79,6 +80,7 @@ public class EnsureAppTArchTests : IDisposable
         AcadRuntime.OwnershipMatches = _origOwnership;
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
+        AcadRuntime.OwnershipRetryWindowOverride = _origOwnershipWindow;
     }
 
     /// <summary>假 app：Gate1 读 Version + Documents.Count（两者可配）；Visible 供复用用例走 GetInfo；
@@ -100,6 +102,13 @@ public class EnsureAppTArchTests : IDisposable
         private readonly int _count;
         public GateDocs(int count) => _count = count;
         public int Count => _count;
+    }
+
+    /// <summary>"带窗口"的附着实例（默认归属判定的 HwndReader 面）。</summary>
+    public sealed class HwndApp
+    {
+        public HwndApp(int hwnd) => HWND = hwnd;
+        public int HWND { get; }
     }
 
     /// <summary>假 app：Version 恒忙拒绝（模拟附着后启动窗口未就绪）。</summary>
@@ -268,6 +277,8 @@ public class EnsureAppTArchTests : IDisposable
     {
         AcadRuntime.StartupRetryAttempts = 2;
         AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        // F3 有界重试：恒不符时勿耗满 10s 生产窗口（毫秒级窗口保持确定性）。
+        AcadRuntime.OwnershipRetryWindowOverride = TimeSpan.FromMilliseconds(80);
         int launches = 0;
         Process? launched = null;
         AcadRuntime.ProcessLauncher = _ => { launches++; return launched = new Process(); };
@@ -290,6 +301,72 @@ public class EnsureAppTArchTests : IDisposable
         Assert.Equal(2, launches);
     }
 
+    // F3（最终整分支复审）：类间交接遗留的 ROT 残留注册 → 归属伪失败；有界重试在窗口内
+    // 重新 AttachOnly（每次取新活动对象）→ 第 3 次归属相符成功：不重启进程、不清理本方进程、
+    // 绝不 Quit 前两次附着到的（他方/已退出）实例。
+    [Fact]
+    public void EnsureAppTArch_OwnershipMismatchTwiceThenMatch_RetriesWithinWindow()
+    {
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        AcadRuntime.OwnershipRetryWindowOverride = TimeSpan.FromSeconds(5); // 足够覆盖 2 次 1s 等待
+        int launches = 0;
+        AcadRuntime.ProcessLauncher = _ => { launches++; return new Process(); };
+        bool cleanupCalled = false;
+        AcadRuntime.TarchProcessCleanup = _ => { cleanupCalled = true; return true; };
+        var stale1 = new GateApp("19.1s (LMS Tech)", 1);
+        var stale2 = new GateApp("19.1s (LMS Tech)", 1);
+        var fresh = new GateApp("19.1s (LMS Tech)", 1);
+        var queue = new Queue<GateApp>(new[] { stale1, stale2, fresh });
+        int attaches = 0;
+        AcadAttach.ActiveObjectResolver = _ =>
+        {
+            attaches++;
+            return queue.Count > 0 ? queue.Dequeue() : fresh;
+        };
+        int ownershipProbes = 0;
+        AcadRuntime.OwnershipMatches = (_, __) => ++ownershipProbes >= 3; // false,false,true
+        using var rt = new AcadRuntime();
+
+        var app = (object)rt.EnsureAppTArch("TElec20V5");
+
+        Assert.Same(fresh, app);
+        Assert.Equal(3, attaches);        // 三次附着（前两次归属不符）
+        Assert.Equal(3, ownershipProbes);
+        Assert.Equal(1, launches);        // 同一本方 /p 进程，不重启
+        Assert.Equal(0, stale1.QuitCalls); // 绝不 Quit 他方/残留实例
+        Assert.Equal(0, stale2.QuitCalls);
+        Assert.False(cleanupCalled);      // 成功路径不触进程清理
+    }
+
+    // F3 对照（有界）：归属恒不符 → 窗口耗尽后沿用原响亮拒绝；只清理本方启动进程、
+    // 不 Quit 附着实例；附着尝试次数有界（非无限重试）。
+    [Fact]
+    public void EnsureAppTArch_OwnershipMismatchAlways_ThrowsAfterBoundedRetries()
+    {
+        AcadRuntime.StartupRetryAttempts = 2;
+        AcadRuntime.StartupRetryDelay = TimeSpan.FromMilliseconds(10);
+        AcadRuntime.OwnershipRetryWindowOverride = TimeSpan.FromMilliseconds(120);
+        int launches = 0;
+        Process? launched = null;
+        AcadRuntime.ProcessLauncher = _ => { launches++; return launched = new Process(); };
+        Process? cleaned = null;
+        AcadRuntime.TarchProcessCleanup = p => { cleaned = p; return true; };
+        var attached = new GateApp("19.1s (LMS Tech)", 1);
+        AcadAttach.ActiveObjectResolver = _ => attached;
+        int probes = 0;
+        AcadRuntime.OwnershipMatches = (_, __) => { probes++; return false; };
+        using var rt = new AcadRuntime();
+
+        var ex = Assert.Throws<CadRuntimeException>(() => { rt.EnsureAppTArch("TElec20V5"); });
+
+        Assert.Contains("归属校验失败", ex.Message);
+        Assert.Equal(0, attached.QuitCalls);      // 绝不 Quit 他方实例
+        Assert.Same(launched, cleaned);           // 只清理本方启动的进程
+        Assert.Equal(1, launches);
+        Assert.True(probes >= 1 && probes <= 3, $"probes={probes}"); // 有界（120ms 窗口 ⇒ 1-2 次）
+    }
+
     // 复审 finding 4 对照：归属相符→正常走进 Gate1 并返回附着实例（不清理、不 Quit）。
     [Fact]
     public void EnsureAppTArch_OwnershipMatch_AttachesAndReturnsApp()
@@ -304,6 +381,36 @@ public class EnsureAppTArchTests : IDisposable
 
         var app = (object)rt.EnsureAppTArch("TElec20V5");
         Assert.Same(fake, app);
+    }
+
+    // F3 增强（默认归属判定的精确化）：窗口→PID 命中本方进程 → 归属相符（即使该窗口不是
+    // Process.MainWindowHandle——启动期闪屏/主框架差异不再造伪失败）；命中他方 PID → 不符。
+    [Fact]
+    public void DefaultOwnership_WindowBelongsToLaunchedProcess_Matches()
+    {
+        using var proc = Process.GetCurrentProcess();
+        var app = new HwndApp(4242);
+        var origPid = AcadWindows.WindowProcessId;
+        AcadWindows.WindowProcessId = _ => proc.Id;
+        try
+        {
+            Assert.True(_origOwnership(app, proc));
+        }
+        finally { AcadWindows.WindowProcessId = origPid; }
+    }
+
+    [Fact]
+    public void DefaultOwnership_WindowBelongsToForeignProcess_Mismatches()
+    {
+        using var proc = Process.GetCurrentProcess();
+        var app = new HwndApp(4242);
+        var origPid = AcadWindows.WindowProcessId;
+        AcadWindows.WindowProcessId = _ => proc.Id + 1;   // 他方进程窗口
+        try
+        {
+            Assert.False(_origOwnership(app, proc));
+        }
+        finally { AcadWindows.WindowProcessId = origPid; }
     }
 
     // 复审修复波：默认清理缝对"未 Start 的 fake Process"必须吞异常不抛（测试/真机句柄失效常态）。

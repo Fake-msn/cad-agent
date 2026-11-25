@@ -132,6 +132,27 @@ public class BridgeChannelTests : IDisposable
         string text = Assert.Single(guided);
         Assert.Contains("TRUSTEDPATHS", text);
         Assert.Contains(@"C:\bridge", text);
+        // F4 对照：未注入安全框探测（=未检出）→ 原文案逐字，不附加诊断后缀。
+        Assert.DoesNotContain(BridgeChannel.SecurityDialogSeenSuffix, text);
+    }
+
+    // F4（最终复审）：监视线程按节拍探测安全框，命中至少一次 → 指引文案加性附加
+    // "（已检测到安全框）"，且仍只打印一次（快速返回/未检出路径文案不变）。
+    [Fact]
+    public void EnsureNetLoad_SlowSend_SecurityDialogDetected_AppendsDiagnosticSuffixOnce()
+    {
+        BridgeChannel.SendCommand = (_, _) => { Thread.Sleep(250); return ""; };
+        var guided = new List<string>();
+        int probes = 0;
+
+        BridgeChannel.EnsureNetLoad(
+            @"C:\bridge\CadAgent.TArchBridge.dll", _dir, _ => true, TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(30), guided.Add, () => { Interlocked.Increment(ref probes); return true; });
+
+        string text = Assert.Single(guided);
+        Assert.Contains(BridgeChannel.SecurityDialogSeenSuffix, text);
+        Assert.Contains("TRUSTEDPATHS", text);
+        Assert.True(probes >= 1);   // 首发立即探测
     }
 
     // 复审 F3(a) 对照：快速返回不打印指引（监视线程随发送返回取消）。

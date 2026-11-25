@@ -149,7 +149,9 @@ public class NativeLiveExplodeTests : IDisposable
         Assert.Equal("open:" + Path.GetFileName(_drawing), _rt.Calls[2]);
         // 执行与交付：桥替换落到 .live.dwg 候选路径，唯一写出是交付件。
         Assert.Contains("explode:21E00", _rt.Calls);
-        Assert.Equal(OutPath, _rt.SavedPath);
+        // F2：末步即 explode-native → 桥已 SaveAs 交付终态，宿主 epilogue 不得重复 SaveAs。
+        Assert.DoesNotContain("saveas", _rt.Calls);
+        Assert.Null(_rt.SavedPath);
         Assert.True(File.Exists(OutPath));
         Assert.Equal(before, File.ReadAllBytes(_drawing)); // 源件字节零写入
 
@@ -224,6 +226,9 @@ public class NativeLiveExplodeTests : IDisposable
         // 炸开步不参与参数面聚合（否则会期待 21E00 仍在 → 假拒）。
         Assert.Single(records, r => r.Entry.Kind == "native-live-committed");
         Assert.True(File.Exists(OutPath));
+        // F2：末步为非 explode-native（change-layer 在保存后改动状态）→ 宿主保留单次 SaveAs。
+        Assert.Contains("saveas", _rt.Calls);
+        Assert.Equal(OutPath, _rt.SavedPath);
         // 21F00 走参数门（与 overlay 逐值一致）——不列 explodeGateHandles。
         var gatePass = Assert.Single(records, r => r.Entry.Kind == "native-gate-pass");
         using (var p = JsonDocument.Parse(gatePass.Entry.ParamsJson))
@@ -264,7 +269,9 @@ public class NativeLiveExplodeTests : IDisposable
     }
 
     /// <summary>brief 用例 4：桥替换自报成功但 (null) 读回仍含原句柄 → 读回闸
-    /// native-live-failed{readback:"explode-native"}，不 SaveAs 不交付，exit 1。</summary>
+    /// native-live-failed{readback:"explode-native"}，不交付（成功退出），exit 1。
+    /// F1：REPLACED 已执行 → 桥已交付 .live.dwg（fake 镜像确实写盘）——失败文案改为
+    /// "已产出 .live.dwg 但未通过读回校验"，审计加性 liveOutExists=true。</summary>
     [Fact]
     public void ExplodeNative_RereadGoneFail_ReadbackFails()
     {
@@ -278,18 +285,48 @@ public class NativeLiveExplodeTests : IDisposable
 
         Assert.Equal(1, code);
         Assert.Contains("炸开", stderr);
+        Assert.Contains("已产出 .live.dwg 但未通过读回校验，按失败退出；原图零写入", stderr);
         Assert.Contains("explode:21E00", _rt.Calls); // 替换确实执行过
+        // F2：末步 explode-native → 宿主不再 SaveAs；文件存在性由桥（fake）交付。
         Assert.DoesNotContain("saveas", _rt.Calls);
         Assert.Null(_rt.SavedPath);
-        Assert.False(File.Exists(OutPath));
+        Assert.True(File.Exists(OutPath)); // 桥已交付（证据保留，但诚实报失败）
         var records = AuditRecords();
         var failed = Assert.Single(records, r => r.Entry.Kind == "native-live-failed");
         using (var p = JsonDocument.Parse(failed.Entry.ParamsJson))
         {
             Assert.Equal("explode-native", p.RootElement.GetProperty("readback").GetString());
             Assert.Equal("21E00", p.RootElement.GetProperty("handle").GetString());
+            Assert.True(p.RootElement.GetProperty("liveOutExists").GetBoolean());
         }
         Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
+    }
+
+    /// <summary>F1 阶段感知（补充等价类）：混合计划 [explode-native, change-layer] 中炸开成功
+    /// 后 change-layer op 抛错 → 失败文案属"已产出 .live.dwg"阶段（桥已交付），审计
+    /// liveOutExists=true；不得误报"未交付"。</summary>
+    [Fact]
+    public void ExplodeNative_ThenHandleOpFails_MessageIsPostReplaceStageAware()
+    {
+        WriteOverlay(new[] { Wall("21E00", "120", 0), Wall("21F00", "120", 200) },
+            new[] { ExplodeRow() });
+        SeedStandardLive();
+        _rt.FailOps = true;
+        string plan = WritePlan(
+            """{"planId":"NE-11","steps":[{"kind":"explode-native","params":{"handle":"21E00"}},{"kind":"change-layer","params":{"handle":"21F00","layer":"L"}}]}""");
+
+        var (code, _, stderr) = Run("run", plan, "--drawing", _drawing, "--live");
+
+        Assert.Equal(1, code);
+        Assert.Contains("op-fail", stderr);
+        Assert.Contains("已产出 .live.dwg 但未通过读回校验", stderr);
+        Assert.DoesNotContain("未交付 .live.dwg", stderr);
+        Assert.True(File.Exists(OutPath));       // 桥已在 REPLACED 时交付
+        Assert.DoesNotContain("saveas", _rt.Calls);
+        var failed = Assert.Single(AuditRecords(), r => r.Entry.Kind == "native-live-failed");
+        using var p = JsonDocument.Parse(failed.Entry.ParamsJson);
+        Assert.Equal("change-layer", p.RootElement.GetProperty("step").GetString());
+        Assert.True(p.RootElement.GetProperty("liveOutExists").GetBoolean());
     }
 
     /// <summary>用例 5（补充等价类）：目标句柄既无 live 参数行、也无炸开证据行 →
@@ -434,6 +471,8 @@ public class NativeLiveExplodeTests : IDisposable
 
         Assert.Equal(1, code);
         Assert.Contains("读回无基准", stderr);
+        // F1：无 REPLACED（纯 move 计划）→ 旧文案逐字保留（未交付）。
+        Assert.Contains("未交付 .live.dwg，原图零写入", stderr);
         Assert.Contains("move:21E00:10:20", _rt.Calls); // op 已执行，失败在读回闸
         Assert.DoesNotContain("saveas", _rt.Calls);
         Assert.False(File.Exists(OutPath));
@@ -443,6 +482,7 @@ public class NativeLiveExplodeTests : IDisposable
         {
             Assert.Equal("no-bbox-baseline", p.RootElement.GetProperty("readback").GetString());
             Assert.Equal("21E00", p.RootElement.GetProperty("handle").GetString());
+            Assert.False(p.RootElement.GetProperty("liveOutExists").GetBoolean());
         }
         Assert.DoesNotContain(records, r => r.Entry.Kind == "native-live-committed");
     }
@@ -473,10 +513,11 @@ public class NativeLiveExplodeTests : IDisposable
     /// <summary>
     /// Fake 厂商运行时（零 COM）：ReadExplodeEvidence 记录 "read-explode" 并对"已有打开文档"
     /// 抛 CadRuntimeException（顺序守卫：真实契约要求无打开文档）；ReadNativeParams 按形态区分
-    /// path（准入重读事实）/null（活文档读回）；ExplodeReplaceByHandle 记录调用、默认从读回集
-    /// 移除原句柄（KeepHandleAfterExplode=true 时保留以覆盖读回失败面）并自报 NewCount=4+
-    /// BboxMatch=true；MoveByHandle 把位移落到读回 bbox（读回事实镜像执行）；SaveAs 落合成
-    /// .live.dwg 字节（让 liveSha 可计算）。
+    /// path（准入重读事实）/null（活文档读回）；ExplodeReplaceByHandle 记录调用、从读回集移除
+    /// 原句柄（KeepHandleAfterExplode=true 时保留以覆盖读回失败面）、自报 NewCount=4+
+    /// BboxMatch=true **并写盘 liveout**（F1 镜像桥内 db.SaveAs 在替换时即交付文件）；
+    /// MoveByHandle 把位移落到读回 bbox（读回事实镜像执行）；SaveAs 落合成 .live.dwg 字节
+    /// （宿主收尾径，F2 下末步非 explode-native 才被调用）；FailOps 令句柄 op 抛错（阶段文案面）。
     /// </summary>
     private sealed class FakeExplodeNativeRuntime : ICadRuntime
     {
@@ -486,6 +527,8 @@ public class NativeLiveExplodeTests : IDisposable
         public List<ExplodeEvidence> ExplodeReadResults { get; } = new();
         public string? SavedPath { get; private set; }
         public bool KeepHandleAfterExplode { get; set; }
+        /// <summary>句柄 op（change-layer/move/delete）与桥替换抛 CadRuntimeException("op-fail")。</summary>
+        public bool FailOps { get; set; }
         private string? _openedPath;
 
         public RuntimeInfo GetInfo() => new("Fake", "1", true);
@@ -530,12 +573,16 @@ public class NativeLiveExplodeTests : IDisposable
         {
             Calls.Add("explode:" + hexHandle);
             if (!KeepHandleAfterExplode) ReadResults.RemoveAll(n => n.Handle == hexHandle);
+            // F1 镜像桥：EXPLODE_REPLACE 事务内 db.SaveAs(liveout) 已在替换时交付文件
+            // （宿主 epilogue 的 SaveAs 因此可跳过；文件存在性/可读性与真机同形）。
+            File.WriteAllBytes(liveOutPath, LiveBytes);
             return new ExplodeReplaceResult(hexHandle, 4, liveOutPath, true, 1e-3);
         }
 
         public void ChangeLayerByHandle(string hexHandle, string layer)
         {
             Calls.Add($"change-layer:{hexHandle}:{layer}");
+            if (FailOps) throw new CadRuntimeException("op-fail");
             int i = ReadResults.FindIndex(n => n.Handle == hexHandle);
             if (i >= 0) ReadResults[i] = ReadResults[i] with { Layer = layer };
         }
@@ -543,6 +590,7 @@ public class NativeLiveExplodeTests : IDisposable
         public void MoveByHandle(string hexHandle, double dx, double dy)
         {
             Calls.Add($"move:{hexHandle}:{dx}:{dy}");
+            if (FailOps) throw new CadRuntimeException("op-fail");
             // 读回事实镜像执行：位移落 bbox（仅凭炸开门放行的 move 以炸开证据 bbox 为基准核对）。
             int i = ReadResults.FindIndex(n => n.Handle == hexHandle);
             if (i < 0) return;
@@ -554,6 +602,7 @@ public class NativeLiveExplodeTests : IDisposable
         public void DeleteByHandle(string hexHandle)
         {
             Calls.Add("delete:" + hexHandle);
+            if (FailOps) throw new CadRuntimeException("op-fail");
             ReadResults.RemoveAll(n => n.Handle == hexHandle);
         }
 

@@ -341,14 +341,7 @@ public sealed class AcadRuntime : ICadRuntime
             // 关窗节拍须在 ROT 附着之前起：模态框会挡住 COM 调用（Gate1/附着均被拒）。
             processId = SafeProcessId(proc);
             dismissal = StartInformationalDialogDismissal(processId);
-            _app = AcadAttach.AttachOnly(Profile.ProgId);
-            // 归属校验（findings 4）：_launchedProc 恒非空于本路径（复用早退走上方 _app!=null）。
-            // 不符→清空 _app 后抛出，外层 catch 的 CleanupTArchFailure 只见 proc（不 Quit）。
-            if (!OwnershipMatches(_app, proc))
-            {
-                _app = null;
-                throw new CadRuntimeException("ROT 附着实例非本方启动（归属校验失败）");
-            }
+            _app = AttachWithOwnershipRetry(proc);
             WaitTArchGate1();
             return _app;
         }
@@ -364,6 +357,41 @@ public sealed class AcadRuntime : ICadRuntime
         {
             // Gate1 成功或放弃即停节拍（Timer.Dispose 不阻塞、不 Join 在途回调）。
             dismissal?.Dispose();
+        }
+    }
+
+    // ---- F3（最终整分支复审）：ROT 附着归属校验的有界重试 ----
+    // 真机实证（切片B 门禁 attempt2/attempt3）：桥类与前一真机类交接时，ROT 里可能残留
+    // 刚退出实例的注册——`GetActiveObject` 返回的是别人/已死的实例，归属校验伪失败。
+    // 归属判定本身同时收紧为**窗口→PID**（见 DefaultOwnershipMatches）：本方实例的闪屏/
+    // 主框架窗口差异不再被误判为他方。仍不符时按 10s 有界窗口重试（不无限挂起）：
+    //  · 归属不符只清本方**已缓存的附着引用**（_app/_doc/_bridgeLoaded），绝不 Quit 他方实例；
+    //  · 本方启动进程句柄 _launchedProc 保留（这不是失败，不得触发进程清理路径）；
+    //  · 窗口耗尽 → 沿用原响亮拒绝（外层 catch 的 CleanupTArchFailure 依既有语义清理本方进程）。
+    internal static TimeSpan OwnershipRetryWindow = TimeSpan.FromSeconds(10);
+
+    // 重试窗口测试缝（单测压到毫秒级保持确定性；生产恒走 10s 默认值）。
+    internal static TimeSpan? OwnershipRetryWindowOverride;
+
+    // 单次等待上界（规格 Thread.Sleep(1000)；剩余窗口不足时只睡剩余量，保证总时长有界）。
+    private static readonly TimeSpan OwnershipRetryDelay = TimeSpan.FromSeconds(1);
+
+    private dynamic AttachWithOwnershipRetry(Process proc)
+    {
+        TimeSpan window = OwnershipRetryWindowOverride ?? OwnershipRetryWindow;
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            dynamic app = AcadAttach.AttachOnly(Profile.ProgId);
+            if (OwnershipMatches(app, proc)) return app;
+            // 归属不符：只清本方缓存引用（我方尚未把 app 赋给 _app）；绝不 Quit/触碰他方实例。
+            _app = null;
+            _doc = null;
+            _bridgeLoaded = false;
+            if (sw.Elapsed >= window)
+                throw new CadRuntimeException("ROT 附着实例非本方启动（归属校验失败）");
+            TimeSpan remaining = window - sw.Elapsed;
+            Thread.Sleep(remaining < OwnershipRetryDelay ? remaining : OwnershipRetryDelay);
         }
     }
 
@@ -439,9 +467,12 @@ public sealed class AcadRuntime : ICadRuntime
     internal static Func<dynamic, int> HwndReader = e => (int)e.HWND;
     internal static Func<dynamic, Process, bool> OwnershipMatches = DefaultOwnershipMatches;
 
-    // 默认归属判定：实例 HWND 须等于本方进程主窗句柄（Refresh 后取实时值）。
-    // 不可判定即放行（fail-open 到既有行为）：HWND==0（实例未建主窗/无该属性面）、进程
-    // 主窗句柄==0（ShellExecute 启动后主窗尚未创建）、进程句柄未关联（fake/non-started）
+    // 默认归属判定：实例窗口须属本方启动进程。**进程 ID 优先**（F3）：窗口→PID 与
+    // proc.Id 直接比对——`Process.MainWindowHandle` 在启动期可能指向闪屏/非主框架窗口，
+    // 与实例 HWND 不同会制造"本方实例被误判他方"的伪失败（门禁实证间歇命中）。
+    // PID 不可判定（0）时回退旧口径：实例 HWND==proc.MainWindowHandle；两者皆不可判定
+    // 即放行（fail-open 到既有行为）：HWND==0（实例未建主窗/无该属性面）、进程主窗句柄==0
+    // （ShellExecute 启动后主窗尚未创建）、进程句柄未关联（fake/non-started）
     // 或 COM 读拒——此时无法否认归属，沿用旧行为（守卫 EnsureNoForeignInstance 已前置，
     // 归属校验是纵深防御，不是唯一防线）。
     private static bool DefaultOwnershipMatches(dynamic app, Process proc)
@@ -451,6 +482,11 @@ public sealed class AcadRuntime : ICadRuntime
             int hwnd = HwndReader(app);
             if (hwnd == 0) return true;
             proc.Refresh();
+            int processId;
+            try { processId = proc.Id; } catch { processId = 0; }
+            int ownerPid = AcadWindows.WindowProcessId(hwnd);
+            // 双方 PID 可判定 → 精确判定（任何本方窗口都算归属，不因闪屏/主框架差异误拒）。
+            if (ownerPid != 0 && processId != 0) return ownerPid == processId;
             long main = proc.MainWindowHandle.ToInt64();
             if (main == 0) return true;
             return hwnd == unchecked((int)main);
@@ -1198,13 +1234,27 @@ public sealed class AcadRuntime : ICadRuntime
         };
     }
 
+    // 安全框探测（F4）：仅面向本方 /p 进程 PID；异常→false（诊断增强不升级为失败）。
+    // 与看门狗同一探测缝（SecurityDialogDetector），但由 BridgeChannel 监视线程按节拍调用，
+    // 命中即让 20s 指引文案附加"（已检测到安全框）"。
+    private Func<bool> BridgeSecurityDialogProbe()
+    {
+        int pid;
+        try { pid = _launchedProc?.Id ?? 0; } catch { pid = 0; }
+        return () =>
+        {
+            try { return SecurityDialogDetector(pid); } catch { return false; }
+        };
+    }
+
     // NETLOAD+探针（同实例仅一次；成功后 _bridgeLoaded 置位）。
     private void EnsureBridgeLoaded(string channelDir)
     {
         if (_bridgeLoaded) return;
         BridgeChannel.EnsureLoaded(
             BridgeDllPath(), channelDir, BridgeNetLoadWatchdog(channelDir),
-            NetLoadTimeout, NetLoadNoProgressThreshold, NetLoadSlowGuidance);
+            NetLoadTimeout, NetLoadNoProgressThreshold, NetLoadSlowGuidance,
+            BridgeSecurityDialogProbe());
         _bridgeLoaded = true;
     }
 
