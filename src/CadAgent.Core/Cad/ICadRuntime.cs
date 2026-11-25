@@ -51,6 +51,13 @@ public interface ICadRuntime : IDisposable
     IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) =>
         Array.Empty<ExplodeEvidence>();
 
+    /// <summary>块定义内 TDb 聚合（边界补齐 B1）：**定义段**（块名+类计数），与
+    /// <see cref="ReadExplodeEvidence"/> 的模型空间实例段互不混同。契约：须紧接
+    /// <c>ReadExplodeEvidence(path)</c> 之后以同一 path 调用（实现在同一次桥会话内缓存，
+    /// 缓存命中不二次开图；无缓存由实现响亮拒绝）。无厂商/不支持→空（默认实现）。</summary>
+    IReadOnlyList<BlockDefTdbEntry> ReadExplodeBlockDefs(string drawingPath) =>
+        Array.Empty<BlockDefTdbEntry>();
+
     /// <summary>句柄级炸开替换（spec 切片B §4）：炸开后原子替换原实体并另存 liveOut。
     /// 不支持→响亮拒绝（默认实现）。</summary>
     ExplodeReplaceResult ExplodeReplaceByHandle(string hexHandle, string liveOutPath) =>

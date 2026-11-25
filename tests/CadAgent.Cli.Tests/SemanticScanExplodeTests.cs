@@ -168,8 +168,36 @@ public class SemanticScanExplodeTests : IDisposable
         public void Dispose() { }
     }
 
-    private static (int read, int fully, int partial, int failed) ExplodeCounts(string stdout)
+    /// <summary>B1（边界补齐）fake：证据一条（全炸开直墙）+ 独立块定义表两条（<c>BDEF</c> 语义的
+    /// 宿主映射产物）。用于钉住 `--explode` 的 <c>blockDefTdb</c> 加性披露与 overlay 持久化，
+    /// 且**不改变**既有 explode 四计数口径（证据列表未加行）。</summary>
+    private sealed class FakeBlockDefRuntime : ICadRuntime
     {
+        public RuntimeInfo GetInfo() => new("Fake", "1", true);
+        public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) => new[]
+        {
+            new ExplodeEvidence("21E00", "TDbWall", "ImpCurve", "0dt",
+                new[] { 0.0, 0, 0, 100.0, 300.0, 3000.0 }, true, 0, 0,
+                Array.Empty<ExplodePrimitive>(),
+                new Dictionary<string, string>(), null, DateTimeOffset.UtcNow),
+        };
+        public IReadOnlyList<BlockDefTdbEntry> ReadExplodeBlockDefs(string drawingPath) => new[]
+        {
+            new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364),
+            new BlockDefTdbEntry("门块A", "TDbEFitting", 2),
+        };
+        public void Open(string p) { } public void SaveAs(string p) { }
+        public void Close(bool s) { } public void Restart() { }
+        public void AddLine(double a, double b, double c, double d, string? l = null) { }
+        public void AddText(double x, double y, string t, double h, string? l = null) { }
+        public void AddCircle(double x, double y, double r, string? l = null) { }
+        public void AddInsert(string n, double x, double y, double s = 1, double r = 0, string? l = null) { }
+        public void EnsureBlock(string n, IReadOnlyList<BlockPrimitive> p) { }
+        public int EntityCount() => 0;
+        public void Dispose() { }
+    }
+
+    private static (int read, int fully, int partial, int failed) ExplodeCounts(string stdout)    {
         using var doc = JsonDocument.Parse(stdout);
         var root = doc.RootElement;
         return (root.GetProperty("explodeRead").GetInt32(),
@@ -490,6 +518,89 @@ public class SemanticScanExplodeTests : IDisposable
             Assert.Equal((0, 0, 0, 0), ExplodeCounts(stdout));
             Assert.Empty(SemanticOverlay.Load(OverlayPath).ExplodeEvidence);
             Assert.Null(SingleExplodeReadFailed());
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    // ---- B1（边界补齐）：块定义 TDb 独立段加性披露 ----
+
+    /// <summary>
+    /// B1：`--explode` 在证据之后读**块定义**表（<see cref="ICadRuntime.ReadExplodeBlockDefs"/>，
+    /// 与 <see cref="ICadRuntime.ReadExplodeEvidence"/> 同一次桥会话的伴生读数）。断言：
+    /// ① stdout 加性键 <c>blockDefTdb</c> 恒在且元素三键 {blockName,rxClass,count}；
+    /// ② 审计 semantic-scan 加性 <c>blockDefTdbCount</c>；
+    /// ③ overlay.BlockDefTdb 已持久化（独立表，不与 ExplodeEvidence 混同）；
+    /// ④ **旧口径不变**：explode 四计数与既有 fake 等价类一致（证据列表未加行）。
+    /// </summary>
+    [Fact]
+    public void ScanExplode_BlockDefTdb_SeparateSection_AdditiveKeys()
+    {
+        CommandRouter.RuntimeFactory = () => new FakeBlockDefRuntime();
+        try
+        {
+            var (code, stdout, stderr) = Run("semantic", "scan", "--drawing", _drawing, "--explode");
+            Assert.Equal(0, code);
+            Assert.DoesNotContain("explode-read-failed", stderr);
+
+            // ① stdout 加性键。
+            using (var doc = JsonDocument.Parse(stdout))
+            {
+                var root = doc.RootElement;
+                var defs = root.GetProperty("blockDefTdb");
+                Assert.Equal(JsonValueKind.Array, defs.ValueKind);
+                Assert.Equal(2, defs.GetArrayLength());
+                var first = defs[0];
+                Assert.Equal("$equip$00002832", first.GetProperty("blockName").GetString());
+                Assert.Equal("TDbECabletry", first.GetProperty("rxClass").GetString());
+                Assert.Equal(1364, first.GetProperty("count").GetInt32());
+                // 旧键逐字在（加性纪律）。
+                Assert.True(root.TryGetProperty("version", out _));
+                Assert.True(root.TryGetProperty("explodeSymbolCandidates", out _));
+            }
+
+            // ④ 旧口径不变：1 行证据全炸开 → 1/1/0/0。
+            Assert.Equal((1, 1, 0, 0), ExplodeCounts(stdout));
+
+            // ③ overlay 独立表落盘。
+            var overlay = SemanticOverlay.Load(OverlayPath);
+            Assert.Equal(2, overlay.BlockDefTdb.Count);
+            Assert.Single(overlay.ExplodeEvidence);
+
+            // ② 审计加性键。
+            using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+            var scan = audit.ReadAll().Single(r => r.Entry.Kind == "semantic-scan");
+            using var p = JsonDocument.Parse(scan.Entry.ParamsJson);
+            Assert.Equal(2, p.RootElement.GetProperty("blockDefTdbCount").GetInt32());
+            Assert.Equal(1, p.RootElement.GetProperty("explodeRead").GetInt32());
+            Assert.True(audit.VerifyChain(out _));
+        }
+        finally
+        {
+            CommandRouter.RuntimeFactory = _originalFactory;
+        }
+    }
+
+    /// <summary>B1 加性恒在：无 --explode（或运行时未提供块定义读数）时 <c>blockDefTdb</c> 为空数组、
+    /// 审计 <c>blockDefTdbCount</c>=0；overlay.BlockDefTdb 亦为空表（不复用上轮磁盘值）。</summary>
+    [Fact]
+    public void ScanWithoutExplode_BlockDefTdb_Empty()
+    {
+        CommandRouter.RuntimeFactory = () => throw new InvalidOperationException("不带 --explode 不得创建运行时");
+        try
+        {
+            var (code, stdout, _) = Run("semantic", "scan", "--drawing", _drawing);
+            Assert.Equal(0, code);
+            using var doc = JsonDocument.Parse(stdout);
+            Assert.Equal(0, doc.RootElement.GetProperty("blockDefTdb").GetArrayLength());
+
+            using var audit = new SqliteAuditStore(Path.Combine(_project, ".cadagent", "audit.db"));
+            var scan = audit.ReadAll().Single(r => r.Entry.Kind == "semantic-scan");
+            using var p = JsonDocument.Parse(scan.Entry.ParamsJson);
+            Assert.Equal(0, p.RootElement.GetProperty("blockDefTdbCount").GetInt32());
+            Assert.Empty(SemanticOverlay.Load(OverlayPath).BlockDefTdb);
         }
         finally
         {

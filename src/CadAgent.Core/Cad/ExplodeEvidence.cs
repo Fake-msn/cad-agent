@@ -10,7 +10,9 @@ public sealed record ExplodePrimitive(
 
 /// <summary>一实体一次深度炸开取证（spec 切片B §3）。Core 零 COM——纯数据。
 /// FullyExplodable=递归炸开到叶全部成功；NestedTdbCount=炸开后残留 TDb 叶数（0=干净）；
-/// CenterlineJson=通用轴（推导对任意≥2平行线成立；消费侧按 TDbWall/Class 过滤），可为 null；ReadAt=取证时刻。</summary>
+/// CenterlineJson=通用轴（推导对任意≥2平行线成立；消费侧按 TDbWall/Class 过滤），可为 null；ReadAt=取证时刻；
+/// FailReason=该句柄桥内首条 FAIL 原因（边界补齐 A1/A2：<c>extents:degenerate</c>=退化包围盒、
+/// <c>no-geometry:eInvalidInput</c>=几何双通道不可达；无失败行=null。JSON 加性：旧 overlay 反序列化得 null）。</summary>
 public sealed record ExplodeEvidence(
     string Handle,
     string RxClass,
@@ -23,7 +25,13 @@ public sealed record ExplodeEvidence(
     IReadOnlyList<ExplodePrimitive> Primitives,
     IReadOnlyDictionary<string, string> XData,
     string? CenterlineJson,
-    DateTimeOffset ReadAt);
+    DateTimeOffset ReadAt,
+    string? FailReason = null);
+
+/// <summary>块定义内 TDb 实体聚合（边界补齐 B1）：**定义段**按 (块名, 类) 计数——
+/// 与<see cref="ExplodeEvidence"/>（模型空间实例按句柄）是两条互不混同的事实线：
+/// 块定义计数不是实例数（同一块可零实例可多实例），嵌套块只统计定义内的直接实体（不递归展开）。</summary>
+public sealed record BlockDefTdbEntry(string BlockName, string RxClass, int Count);
 
 /// <summary>句柄级炸开替换结果（spec 切片B §4）：BboxMatch=替换前后包围盒（仅 X/Y）容差内一致。</summary>
 public sealed record ExplodeReplaceResult(

@@ -262,6 +262,9 @@ public class BridgeChannelTests : IDisposable
         r.Blocks.Add(new BlockDto("21E00", "$TWTSYS$00000508", new[] { 500700.0, 1325.0, 0.0 }));
         r.XData.Add(new XDataDto("21E00", 1001, "HYDRANT_RADIUS"));
         r.XData.Add(new XDataDto("21E00", 1000, "28"));
+        // B1：块定义行与 ENTITY（模型空间实例）分离——同一响应携带两段互不混同。
+        r.BlockDefs.Add(new BlockDefDto("$equip$00002832", "TDbECabletry", 1364));
+        r.BlockDefs.Add(new BlockDefDto("门块A", "TDbEFitting", 2));
         return r;
     }
 
@@ -344,9 +347,28 @@ public class BridgeChannelTests : IDisposable
         Assert.Null(prim.BlockName);
     }
 
+    // A2（边界补齐）：FailReason 取该句柄**首条** FAIL 行原因——桥内 explodes 失败的分类
+    //（extents:degenerate / no-geometry:eInvalidInput）由此如实透出，宿主不做二次推断。
     [Fact]
-    public void PrimitiveKind_FamiliesCollapse()
+    public void MapExplodeEvidence_FailReason_FirstFailRowPerHandle()
     {
+        var r = new BridgeResult { Status = "ok" };
+        r.Evidence.Add(new EvidenceDto("D1", "TDbWall", null, null, null, true));
+        r.Evidence.Add(new EvidenceDto("S1", "TDbSymbArrow", null, null, null, false));
+        r.Evidence.Add(new EvidenceDto("OK1", "TDbWall", null, null, null, true));
+        r.Fails.Add(new FailDto("D1", "extents:degenerate"));
+        r.Fails.Add(new FailDto("D1", "explode:Exception"));       // 后续 FAIL 不覆盖首条
+        r.Fails.Add(new FailDto("S1", "no-geometry:eInvalidInput"));
+
+        var list = AcadRuntime.MapExplodeEvidence(r);
+
+        Assert.Equal("extents:degenerate", list.Single(e => e.Handle == "D1").FailReason);
+        Assert.Equal("no-geometry:eInvalidInput", list.Single(e => e.Handle == "S1").FailReason);
+        Assert.Null(list.Single(e => e.Handle == "OK1").FailReason);   // 无 FAIL 行 → null
+    }
+
+    [Fact]
+    public void PrimitiveKind_FamiliesCollapse()    {
         Assert.Equal("line", AcadRuntime.PrimitiveKind("AcDbLine"));
         Assert.Equal("arc", AcadRuntime.PrimitiveKind("AcDbArc"));
         Assert.Equal("circle", AcadRuntime.PrimitiveKind("AcDbCircle"));
@@ -416,6 +438,44 @@ public class BridgeChannelTests : IDisposable
 
         // 同实例第二次：不重发 NETLOAD、不重跑探针——只有 开图/READ/关图。
         Assert.Equal(new[] { "Open(16#1116.dwg, ReadOnly=True)", "READ", "Close(False)" }, calls);
+    }
+
+    // B1（边界补齐）：块定义伴生读数——与 ReadExplodeEvidence 同一次桥会话的读数，
+    // 由实例缓存直接返回（**不二次开图/不发命令**；相对/绝对路径按同一实体归一）。
+    [Fact]
+    public void ReadExplodeBlockDefs_AfterReadExplodeEvidence_CacheHit_NoSecondOpen()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls);
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+
+        using var rt = new AcadRuntime();
+        rt.ReadExplodeEvidence("16#1116.dwg");
+        int afterRead = calls.Count;
+
+        var defs = rt.ReadExplodeBlockDefs("16#1116.dwg");
+
+        Assert.Equal(2, defs.Count);
+        Assert.Contains(defs, d => d.RxClass == "TDbECabletry" && d.Count == 1364);
+        Assert.Contains(defs, d => d.BlockName == "门块A" && d.RxClass == "TDbEFitting" && d.Count == 2);
+        Assert.Equal(afterRead, calls.Count);   // 缓存命中：无新增 Open/READ
+
+        // 路径形态差异（相对/绝对）按同一实体归一 → 仍命中缓存。
+        var again = rt.ReadExplodeBlockDefs(Path.GetFullPath("16#1116.dwg"));
+        Assert.Equal(defs.Count, again.Count);
+        Assert.Equal(afterRead, calls.Count);
+    }
+
+    // B1：无先读即取块定义 → 响亮拒绝（缓存缺失不得静默空表，也不得隐式二次开图）。
+    [Fact]
+    public void ReadExplodeBlockDefs_NoPriorRead_Throws()
+    {
+        using var rt = new AcadRuntime();
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeBlockDefs("16#1116.dwg"));
+        Assert.Contains("ReadExplodeEvidence", ex.Message);
     }
 
     // 复审 F1(i)：/p 启动瞬间（CreateProcess 前）环境变量必须已指向本实例通道目录——

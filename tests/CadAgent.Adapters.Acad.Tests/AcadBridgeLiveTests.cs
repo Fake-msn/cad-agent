@@ -267,6 +267,176 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
         _fx.AssertCanaries("bridge-explode-replace");
     }
 
+    // ---- 边界补齐（A1/A2/B1）真机骨架：TDbECabletry/TDbEFitting + 块定义独立段 + 退化 extents ----
+
+    private const string ElecTdbeSpecimenDirEnv = "CADAGENT_ELEC_TDBE_SPECIMEN_DIR";
+    private const string ElecCabletryRx = "TDbECabletry";
+    private const string ElecFittingRx = "TDbEFitting";
+    // spike 实证：16#1116 退化 extents 恰 47 行；下限 40 吸收标本/版本可变，精确值只记日志。
+    private const int MinDegenerateExtentsRows = 40;
+    private const int SpikeDegenerateExtentsRows = 47;
+
+    /// <summary>
+    /// T5（A2/B1 电气类）：elec-tdbe-01 副本 → ReadExplodeEvidence → 证据含
+    /// <c>TDbECabletry</c> 与 <c>TDbEFitting</c> 各至少一行（缺失即 Skip + 直方图，绝不伪造绿）；
+    /// 逐类记录 extents 可得性与炸开状态；源副本 SHA 不变 + CUIX/acad 零残留金丝雀。
+    /// </summary>
+    [SkippableFact]
+    public void T5_ElecTdbeClasses_Read()
+    {
+        RequireLiveEnvironment();
+        string copy = CreateElecCopy("elec-tdbe-01.dwg");
+        try
+        {
+            string shaBefore = AcadNativeLiveFixture.Sha256File(copy);
+            using var rt = new AcadRuntime();
+            var evidences = rt.ReadExplodeEvidence(copy);
+            rt.Dispose();
+
+            string histogram = string.Join("/", evidences
+                .GroupBy(e => e.RxClass, StringComparer.Ordinal)
+                .OrderByDescending(g => g.Count())
+                .Take(12)
+                .Select(g => $"{g.Key}:{g.Count()}"));
+            _out.WriteLine($"[T5] evidence={evidences.Count} rxClassTop={histogram}");
+
+            var cabletry = evidences.Where(e => e.RxClass == ElecCabletryRx).ToList();
+            var fitting = evidences.Where(e => e.RxClass == ElecFittingRx).ToList();
+            LogClassRows("T5", ElecCabletryRx, cabletry);
+            LogClassRows("T5", ElecFittingRx, fitting);
+
+            AssertCuixCanary("elec-tdbe-read");
+            _fx.AssertCanaries("elec-tdbe-read");
+            Assert.Equal(shaBefore, AcadNativeLiveFixture.Sha256File(copy));
+
+            Skip.If(cabletry.Count == 0,
+                $"elec-tdbe-01 未见 {ElecCabletryRx} 证据行（直方图 {histogram}）——标本缺类或桥读空，不伪造绿");
+            Skip.If(fitting.Count == 0,
+                $"elec-tdbe-01 未见 {ElecFittingRx} 证据行（直方图 {histogram}）——标本缺类或桥读空，不伪造绿");
+            Assert.All(cabletry, e => Assert.Equal(ElecCabletryRx, e.RxClass));
+            Assert.All(fitting, e => Assert.Equal(ElecFittingRx, e.RxClass));
+        }
+        finally { CleanupElecCopy(copy); }
+    }
+
+    /// <summary>
+    /// T6（B1 块定义独立段）：elec-tdbe-02 副本 → ReadExplodeEvidence + ReadExplodeBlockDefs
+    ///（同一次桥会话的伴生读数，缓存命中不二次开图）。断言块定义表非空且含电气类之一；
+    /// 块定义行（按块名）**不得**混入模型空间证据句柄集（定义 ≠ 实例，不得双计）；
+    /// (blockName,rxClass) 唯一；金丝雀同上。
+    /// </summary>
+    [SkippableFact]
+    public void T6_BlockDefTdb_SeparateSection()
+    {
+        RequireLiveEnvironment();
+        string copy = CreateElecCopy("elec-tdbe-02.dwg");
+        try
+        {
+            string shaBefore = AcadNativeLiveFixture.Sha256File(copy);
+            using var rt = new AcadRuntime();
+            var evidences = rt.ReadExplodeEvidence(copy);
+            var blockDefs = rt.ReadExplodeBlockDefs(copy);
+            rt.Dispose();
+
+            _out.WriteLine($"[T6] evidence={evidences.Count} blockDefs={blockDefs.Count}");
+            foreach (var d in blockDefs.Take(12))
+                _out.WriteLine($"[T6] BDEF block={d.BlockName} rx={d.RxClass} count={d.Count}");
+
+            AssertCuixCanary("elec-tdbe-blockdef");
+            _fx.AssertCanaries("elec-tdbe-blockdef");
+            Assert.Equal(shaBefore, AcadNativeLiveFixture.Sha256File(copy));
+
+            Skip.If(blockDefs.Count == 0,
+                "elec-tdbe-02 未见任何块定义 TDb 行（桥 BlockTable 遍历失效或标本无 TDb 块定义），不伪造绿");
+            Assert.Contains(blockDefs, d => d.RxClass == ElecCabletryRx || d.RxClass == ElecFittingRx);
+
+            // 分离段口径：块定义按块名聚合，绝不冒充模型空间实例（证据整表按句柄）。
+            var handles = new HashSet<string>(evidences.Select(e => e.Handle), StringComparer.OrdinalIgnoreCase);
+            Assert.DoesNotContain(blockDefs, d => handles.Contains(d.BlockName));
+            Assert.Equal(blockDefs.Count, blockDefs
+                .Select(d => d.BlockName + "\u0000" + d.RxClass)
+                .Distinct(StringComparer.Ordinal)
+                .Count());
+        }
+        finally { CleanupElecCopy(copy); }
+    }
+
+    /// <summary>
+    /// T7（A1 退化 extents）：16#1116 副本 → 证据中 FailReason=="extents:degenerate" 行数 ≥40
+    ///（spike 实证 47 只记日志），且每行 Bbox==null（ENTITY 行 bbox 字段留空）；
+    /// 反向不变量：任何非空 bbox 行不得六分量全近零（退化判据漏网）。
+    /// </summary>
+    [SkippableFact]
+    public void T7_DegenerateExtents_NullBbox()
+    {
+        RequireLiveEnvironment();
+
+        using var rt = new AcadRuntime();
+        var evidences = rt.ReadExplodeEvidence(_fx.CopyPath);
+        rt.Dispose();
+
+        var degenerate = evidences.Where(e => e.FailReason == "extents:degenerate").ToList();
+        _out.WriteLine($"[T7] evidence={evidences.Count} degenerate={degenerate.Count} " +
+                       $"(spike={SpikeDegenerateExtentsRows})");
+        _out.WriteLine("[T7] degenerateTop=" + string.Join("/", degenerate
+            .GroupBy(e => e.RxClass, StringComparer.Ordinal)
+            .OrderByDescending(g => g.Count())
+            .Take(6)
+            .Select(g => $"{g.Key}:{g.Count()}")));
+
+        AssertCuixCanary("degenerate-extents");
+        _fx.AssertCanaries("degenerate-extents");
+
+        Assert.True(degenerate.Count >= MinDegenerateExtentsRows,
+            $"退化 extents 行 {degenerate.Count} < 下限 {MinDegenerateExtentsRows}"
+            + $"（spike 实证 {SpikeDegenerateExtentsRows}）——A1 判据失效或标本变更，不得伪造绿");
+        foreach (var e in degenerate)
+            Assert.Null(e.Bbox);   // A1：退化 → null，不得落 0,0,0..0,0,0
+        foreach (var e in evidences.Where(x => x.Bbox != null))
+            Assert.True(e.Bbox!.Any(v => Math.Abs(v) >= 1e-6),
+                $"{e.Handle} 出现六分量全近零 bbox（应判退化→null，A1 判据漏网）");
+    }
+
+    /// <summary>逐类日志：句柄/bbox/炸开状态/FailReason（真机证据可复核）。</summary>
+    private void LogClassRows(string stage, string rx, IReadOnlyList<ExplodeEvidence> rows)
+    {
+        foreach (var r in rows.Take(5))
+            _out.WriteLine($"[{stage}] {rx} handle={r.Handle} bbox={(r.Bbox == null ? "null" : Fmt(r.Bbox))} " +
+                           $"fully={r.FullyExplodable} prims={r.PrimitiveCount} fail={r.FailReason ?? "-"}");
+    }
+
+    /// <summary>电气标本目录：环境变量 <c>CADAGENT_ELEC_TDBE_SPECIMEN_DIR</c> 覆盖，
+    /// 默认仓库 <c>outputs/specimens/elec-tdbe</c>；缺失 → Skip（标本 local-only 不入库）。</summary>
+    private string CreateElecCopy(string fileName)
+    {
+        string? dir = Environment.GetEnvironmentVariable(ElecTdbeSpecimenDirEnv);
+        if (string.IsNullOrWhiteSpace(dir))
+            dir = Path.Combine(RepoRoot(), "outputs", "specimens", "elec-tdbe");
+        string source = Path.Combine(dir, fileName);
+        Skip.If(!File.Exists(source),
+            $"电气标本不在本机: {source}（可用环境变量 {ElecTdbeSpecimenDirEnv} 覆盖目录），跳过真机测试");
+
+        string copyDir = Directory.CreateTempSubdirectory("elec-tdbe").FullName;
+        string copy = Path.Combine(copyDir, fileName);
+        File.Copy(source, copy);
+        return copy;
+    }
+
+    private static void CleanupElecCopy(string copyPath)
+    {
+        try { Directory.Delete(Path.GetDirectoryName(copyPath)!, true); }
+        catch { /* best-effort（AutoCAD 句柄释放延迟） */ }
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CadAgent.sln")))
+            dir = dir.Parent;
+        if (dir is null) throw new InvalidOperationException("未找到仓库根（CadAgent.sln）");
+        return dir.FullName;
+    }
+
     // ---- guards ----
 
     private void RequireLiveEnvironment()

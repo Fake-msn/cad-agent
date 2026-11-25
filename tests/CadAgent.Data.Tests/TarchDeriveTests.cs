@@ -247,4 +247,57 @@ public class TarchDeriveTests
         Assert.False(p.Params.ContainsKey("XData:GONE_KEY"));
         Assert.Equal("100", p.Params["PScale"]);
     }
+
+    // ---- B1（边界补齐）：块定义 TDb 独立段——全量刷新语义（重扫替换、空/缺省清空），只披露不落标注 ----
+
+    [Fact]
+    public void Enrich_BlockDefs_ReplacedOnRescan_EmptyClears()
+    {
+        var o = new SemanticOverlay();
+        var ev = new[] { Wall("21E00") };
+
+        TarchDerive.Enrich(o, ev, new[]
+        {
+            new BlockDefTdbEntry("门块A", "TDbECabletry", 3),
+        });
+        var first = Assert.Single(o.BlockDefTdb);
+        Assert.Equal("门块A", first.BlockName);
+        Assert.Equal(3, first.Count);
+
+        // 重扫（新读数）→ 整表替换，旧块名不得残留。
+        TarchDerive.Enrich(o, ev, new[]
+        {
+            new BlockDefTdbEntry("块B", "TDbEFitting", 1),
+            new BlockDefTdbEntry("块C", "TDbECabletry", 2),
+        });
+        Assert.Equal(2, o.BlockDefTdb.Count);
+        Assert.DoesNotContain(o.BlockDefTdb, e => e.BlockName == "门块A");
+
+        // 空表（桥无 BDEF 行 / 旧运行时）→ 清空，不留上轮幽灵。
+        TarchDerive.Enrich(o, ev, Array.Empty<BlockDefTdbEntry>());
+        Assert.Empty(o.BlockDefTdb);
+
+        // 缺省（null）与空表同口径：清空。
+        TarchDerive.Enrich(o, ev, new[] { new BlockDefTdbEntry("块D", "TDbECabletry", 1) });
+        TarchDerive.Enrich(o, ev);
+        Assert.Empty(o.BlockDefTdb);
+    }
+
+    [Fact]
+    public void Enrich_BlockDefs_DisclosureOnly_NoAnnotationsAndEvidenceUnchanged()
+    {
+        var o = new SemanticOverlay();
+        // 证据类不在语义类映射内（Unknown → 本身不种子）；块定义更不得造标注。
+        var ev = Wall("21E00") with { RxClass = "TDbUnmapped" };
+        TarchDerive.Enrich(o, new[] { ev }, new[]
+        {
+            new BlockDefTdbEntry("$equip$00002832", "TDbECabletry", 1364),
+        });
+
+        var row = Assert.Single(o.ExplodeEvidence);
+        Assert.Equal("21E00", row.Handle);   // 块定义（按块名）不混入实例证据表
+        // 块定义只披露：不得产生任何标注（尤其不得冒充 NativeExplode 语义种子）。
+        Assert.Empty(o.Annotations);
+        Assert.Single(o.BlockDefTdb);
+    }
 }
