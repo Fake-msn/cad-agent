@@ -775,12 +775,22 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 - **A3 bdef 按需契约**：块定义段（BDEF 行）只在请求键 `bdef=1` 时扫描/输出（`ReadExplodeEvidence(path, includeBlockDefs: true)` 才下发 `BridgeRequest.IncludeBlockDefs`）；未索取时**不输出**、宿主缓存标记"未取"，`ReadExplodeBlockDefs` 响亮拒绝（"没读"不得冒充"读了 0 行"）。旧桥（批次A 之前）对未知请求键**拒绝**——属响亮失败（拼错/旧桥部署须显式更正，不做静默忽略）。
 - **新签名（宿主面）**：`ICadRuntime.ReadExplodeEvidence(string path, bool includeBlockDefs = false)`；`TarchDerive.Enrich(overlay, evidences, blockDefs = null, drawingHash = null)`——A4：本轮图纸哈希逐行盖章到 `BlockDefTdbEntry.DrawingHash`（同名块跨图纸不混读；入参行旧哈希一律被本轮值覆盖，null 亦然）。**DrawingHash 暂无消费者**（只落盘披露；下游按图过滤/比对留后续切片）。
 - **B5 缝统一**：窗口句柄读取/窗口→PID 收敛到 `AcadWindows` 单一生产实现与同一注入点（`AcadAttach` 与 `AcadRuntime` 共用；测试只保存/还原这一对）。
-- **B6/B7 + C-I2 ROT 显示名预过滤（含安全阀）**：每轮枚举创建**一次** `IBindCtx` 读 moniker 显示名，`RotDisplayNamePolicy` 保守判据（null=不可判定→考虑；含 `.dwg`→考虑；`!` 前缀→考虑；其余跳过）。C 波补安全阀：整轮**零** moniker 通过策略 → 全部按"考虑"重查（`AcadAttach.ResolveDisplayNameConsiderations`）——预过滤只省无效查表，不可能整轮漏认；被拒项逐条发 `RotSkipDiagnostics("skip:{displayName}")`（默认 noop，宿主可接日志）。耗尽改按**类型** `RotFilterExhaustedException`（公开面仍包装 `CadRuntimeException`），不再靠消息子串。
+- **B6/B7 + C-I2 ROT 显示名预过滤（含安全阀）**：每轮枚举创建**一次** `IBindCtx` 读 moniker 显示名，`RotDisplayNamePolicy` 保守判据（null=不可判定→考虑；含 `.dwg`→考虑；`!` 前缀→考虑；其余跳过）。C 波补安全阀：整轮**零** moniker 通过策略 → 全部按"考虑"重查（`AcadAttach.ResolveDisplayNameConsiderations`）——预过滤只省无效查表，不可能整轮漏认；被拒项逐条发 `RotSkipDiagnostics("skip:{displayName}")`（默认 noop，宿主可接日志；**"逐条发"为 B/C 时点口径，已被批次D 的"每轮 ≤3 条节流"取代**，见下 D 条）。耗尽改按**类型** `RotFilterExhaustedException`（公开面仍包装 `CadRuntimeException`），不再靠消息子串。
 - **B8 + C-I1 相位预算（105 + 15）**：附着总时限 120s 切两段——相位1 `AttachByPid` 轮询上界 = 总时限 − `AttachFallbackReserve`(15s) = **105 轮**（旧 180 轮 > 120s 时限使回退分支结构性死代码）；相位1 只受"本方进程退出"中止（不逐轮判时限）。耗尽 → 相位2 **单次** `AttachOnly`（`PidFallbackAttempts=3`）吃保留、受同一 Stopwatch 硬约束；回退全局至多一次（归属重试轮次不重复）。I5 文案分路径：PID 路径 `附着总时限（{secs}s）耗尽：PID 过滤 {elapsed}s 已耗，回退{失败|未完成}`；`AttachOnly`（pid=0）路径 `附着总时限（{secs}s）耗尽：GetActiveObject 附着未完成`（无回退措辞）。
 - **B9 CLI 旗标闸**：`semantic scan --vision` 与 `--skill`/`--native`/`--explode` 并存 → 用法拒绝（exit 1，先于 relay 与一切副作用）；relay 不转发即"静默丢弃=诚实缺口"，故响亮拒绝。
 - **B10 非 acad 指引**：native-live 深读因厂商非 acad 退化时追加 `CADAGENT_RUNTIME=acad` 指引（stderr；审计载荷不变）。
 - **C-I3 非有限清洗口径**：桥侧 NaN/∞ 进 overlay JSON 会让 `System.Text.Json` 抛异常（overlay 保存静默失败）——宿主 `MapExplodeEvidence` 在边界清洗：bbox 任一分量非有限 → 整盒置 `null` + 追加 `bbox:nonfinite`（无既有 FAIL 时该原因即首条）；基元 `Points` 含非有限 → 整条丢弃并按句柄追加一次 `prims:nonfinite:{n}`。清洗留痕可复核（证据行原因），`PrimitiveCount` 只计保留基元。
 - **门禁（本波 C）**：`dotnet test CadAgent.sln --filter "Category!=RequiresAutoCAD"` 全绿（见 outputs/tech-debt/）；桥 `dotnet build src/CadAgent.TArchBridge/CadAgent.TArchBridge.csproj`（net45）0 警告 / 0 错误；本波无 RequiresAutoCAD 实跑（真机口径沿用 PR#32 终局门禁）。
+  **口径更正（记录于 D 波）**：本句"无 RequiresAutoCAD 实跑"**仅指 C 时点**；D 波已发生真机实跑（见下 D 条终局门禁）。
+
+**技术债批次 D 入册（2026-11-26 记录；fix/session-tech-debt @ 421bd18；追加式注记，旧文 0 删）**：
+
+- **D1 相位（重）入预算按剩余夹取**：相位1 轮询上界不再沿用首轮满预算——`AttachBudget.EffectivePidAttempts` 按共享时钟 `Max(1, Min(configured, Ceiling(total − elapsed − reserve)))` 夹取，归属重试**重入**相位1 时同口径（旧口径下各轮满预算相加可能越过总时限；向上取整使不足 1s 的残余仍保底 1 轮）。`EffectivePidAttachAttempts()`/3 参 `ComputeEffectivePidAttachAttempts` 为**测试口径**（生产走 `AttachBudget.EffectivePidAttempts`）。
+- **D2 安全阀留痕与 skip 节流**：整轮零 moniker 通过策略触发安全阀时经 `RotSkipDiagnostics` 发**一次** `valve:all-rejected`（区分"策略失灵整轮放行"与"ROT 空"）；正常路径 skip 诊断每轮 **≤3 条**（判定语义不变）——**取代旧"被拒项逐条发"表述**。
+- **D3 prims:nonfinite 首因对齐**：`prims:nonfinite:{n}` 与 `bbox:nonfinite` 同口径——无既有 FAIL 时**亦补为 FailReason 首条**（仅追加不覆盖）；清洗留痕可复核。
+- **D4 终局门禁**：**1752 通过 / 0 失败 / 1 设计内 Skip**（Acad 180 + 1 skip，含真机实跑；gate 日志见 outputs/tech-debt/）——真机实跑**已发生**（更正 C 条"本波无实跑"仅指 C 时点）。
+- **D5 部署顺序（运维约束）**：桥（net45 dll）须与宿主**同版/先于**新 CLI 部署；旧桥遇 `bdef` 未知请求键会**响亮失败**，CLI 走 `explode-read-failed` + exit 0 降级——块定义证据缺失是**可观测的**（不是静默 0 行），部署时按此判据排查版本错配。
+- **E 微清理（同 PR，注释级）**：`EnsureAppTArch` 删除不可达 `catch (RotFilterExhaustedException)`（包装只在 `AttachByPidWithFallback` 回退边界发生）；`AttachByPidWithFallback` 删除 `_ = proc` 残留参数；`MapExplodeEvidence` 非有限基元整条丢弃处补注（不回写 `FullyExplodable`/`PrimitiveCount` 之外元数据，当前无消费者，风险低）。
 
 
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）

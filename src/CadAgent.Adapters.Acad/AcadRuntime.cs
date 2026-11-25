@@ -138,7 +138,8 @@ public sealed class AcadRuntime : ICadRuntime
         return Math.Max(1, Math.Min(configuredAttempts, remainingSeconds));
     }
 
-    /// <summary>C-I1：按当前配置/测试缝计算的有效相位1 轮询上界。</summary>
+    /// <summary>C-I1：按当前配置/测试缝计算的有效相位1 轮询上界。
+    /// **测试口径**（生产走 <c>AttachBudget.EffectivePidAttempts</c>，按共享时钟剩余预算夹取）。</summary>
     internal static int EffectivePidAttachAttempts() => ComputeEffectivePidAttachAttempts(
         PidAttachAttempts,
         AttachTotalDeadlineOverride ?? AttachTotalDeadline,
@@ -450,13 +451,9 @@ public sealed class AcadRuntime : ICadRuntime
             WaitTArchGate1();
             return _app;
         }
-        catch (RotFilterExhaustedException ex)
-        {
-            // B7：内部终局信号在公开边界包装为 CadRuntimeException（调用方契约不变）；清理不掩盖根因。
-            DismissInformationalDialogs(processId);
-            CleanupTArchFailure(proc);
-            throw new CadRuntimeException(ex.Message, ex);
-        }
+        // M1（微修复波E）：此处不再有 `catch (RotFilterExhaustedException)`——该类型只在
+        // AttachByPidWithFallback 内部流转，包装为 CadRuntimeException 也发生在那里（回退边界），
+        // 到本方法时已不可能以原类型出现（旧 catch 为不可达死代码）；通用 catch 照旧清理并 rethrow。
         catch
         {
             // 清理前补关一次：模态框未关时优雅 Quit 会被卡住，留下孤儿进程。best-effort 吞异常，
@@ -507,7 +504,7 @@ public sealed class AcadRuntime : ICadRuntime
             // PID 不可判定（fake/未启动进程、真机 PID 读取失败）→ 既有 GetActiveObject 口径。
             // B8/C-I1：两条路径都受共享总时限约束（有 PID 时：相位预算 + 回退相位）。
             dynamic app = processId != 0
-                ? AttachByPidWithFallback(proc, processId, pidPhaseAbort, budget)
+                ? AttachByPidWithFallback(processId, pidPhaseAbort, budget)
                 : AcadAttach.AttachOnly(Profile.ProgId, abortIf: deadlineAbort);
             if (OwnershipMatches(app, proc)) return app;
             // 归属不符：只清本方缓存引用（我方尚未把 app 赋给 _app）；绝不 Quit/触碰他方实例。
@@ -528,14 +525,14 @@ public sealed class AcadRuntime : ICadRuntime
     //     回退受同一总时限约束（共享 <see cref="AttachBudget"/> 的 Stopwatch），全局至多一次。
     // I3：回退亦失败→保留原根因再拼回退诊断上抛；总时限耗尽→I5 文案原样上抛（不拼前缀，
     //     避免把"时限"根因埋进"过滤耗尽"文案）。回退结果照旧过归属校验（纵深防御不留后门）。
-    private dynamic AttachByPidWithFallback(Process proc, int processId,
+    private dynamic AttachByPidWithFallback(int processId,
         Func<bool> pidPhaseAbort, AttachBudget budget)
     {
         // D（微修复波D）：轮询上界按**共享时钟**的剩余预算夹取——首入与归属重试后的每次重入
         // 同口径（不沿用首轮满预算，避免各轮预算相加越过总时限）。
+        // M1（微修复波E）：进程句柄不经本方法（仅经 pidPhaseAbort 谓词使用），旧 `_ = proc` 残留参数已删。
         int attempts = budget.EffectivePidAttempts(
             PidAttachAttempts, AttachFallbackReserveOverride ?? AttachFallbackReserve);
-        _ = proc;   // 进程句柄经 pidPhaseAbort 谓词使用（签名保留与既有调用口径一致）
         try
         {
             return AcadAttach.AttachByPid(Profile.ProgId, processId,
@@ -1702,6 +1699,9 @@ public sealed class AcadRuntime : ICadRuntime
                 if (string.Equals(p.RxClass, "PRIM-TRUNCATED", StringComparison.Ordinal)) continue;
                 var prim = MapPrimitive(p, blockQueues);
                 if (HasNonFinite(prim.Points)) { droppedPrims++; continue; }   // C-I3：NaN/∞ 坐标不得进 overlay
+                // M6（微修复波E）：整条丢弃**不回写** FullyExplodable/PrimitiveCount 之外的元数据——
+                // PrimitiveCount 只计保留基元；FullyExplodable 保持桥原值不改。当前无消费者依赖
+                // "丢弃后 FullyExplodable 是否转 false"，风险低（如需台账可加加性字段）。
                 prims.Add(prim);
             }
             double[]? bbox = e.Bbox;
