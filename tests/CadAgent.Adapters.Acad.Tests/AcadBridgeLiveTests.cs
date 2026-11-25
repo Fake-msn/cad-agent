@@ -449,7 +449,7 @@ public class AcadBridgeLiveTests : IClassFixture<AcadNativeLiveFixture>, IDispos
     }
 
     /// <summary>PR32：副本 SHA 与标本旁注 <c>&lt;file&gt;.sha256</c>（首 token=预期 SHA256）对账。
-    /// 旁注缺失/空 → 只记录不失败（标本 local-only，旁注属可选证据）；存在则硬断言一致。</summary>
+    /// 旁注缺失 → 只记录不失败（标本 local-only，旁注属可选证据）；文件存在但为空 → 硬失败（损坏哨兵）；存在则硬断言一致。</summary>
     private void AssertElecSpecimenSha(string fileName, string copyPath)
     {
         string shaFile = ElecSpecimenSourcePath(fileName) + ".sha256";
