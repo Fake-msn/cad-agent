@@ -8,6 +8,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="CadAgent.Adapters.Acad.Tests" />
+    <!-- 切片B 复审修复波 I1/I2/I3：CLI 测试注入桥缝（BridgeDllOverride / TrustedPathsSource /
+         StubScan）以驱动"桥不可用/空桩/环境变量路径"拒绝面；生产面只用公开 CheckBridgeAvailability。 -->
+    <InternalsVisibleTo Include="CadAgent.Cli.Tests" />
   </ItemGroup>
 
   <PropertyGroup>

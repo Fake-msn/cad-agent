@@ -1034,10 +1034,24 @@ public sealed class AcadRuntime : ICadRuntime
     // 桥目录注入缝（测试指向现成占位文件；真机=部署目录）。
     internal static string? BridgeDllOverride;
 
-    // 看门狗常量（spec §5）：NETLOAD 总上限 3600s；20s 无进展指引；命令等待 120s。
+    // 生产可配置桥路径（切片B 复审修复波 I3）：覆盖缝 > 本环境变量 > 宿主部署目录。
+    internal const string BridgeDllEnvVar = "CADAGENT_BRIDGE_DLL";
+
+    // 桥产物识别标记（I2）：真桥=CommandMethod 字面量（ASCII 或 UTF-16 任一命中）；
+    // 空桩=NoAcadRefsStub.cs 的类型名（唯一编译进空桩程序集的符号）。
+    internal const string StubMarker = "NoAcadRefsStub";
+
+    /// <summary>桥缺失文案（逐字沿用；测试断言精确匹配）。</summary>
+    internal const string MissingBridgeMessage = "桥未构建（需 AutoCAD 19.1 引用）：" + BridgeDllName;
+
+    /// <summary>空桩产物文案（I2 裁定逐字）：同名空桩不得被 NETLOAD 当可加载桥（会阻塞至 3600s）。</summary>
+    internal const string StubBridgeMessage =
+        "桥未构建（空桩产物，需 CADAGENT_ACMG_DIR 与 AcMgd/AcDbMgd/AcCoreMgd 引用）";
+
+    // 看门狗常量（spec §5）：NETLOAD 总上限 3600s；20s 无进展指引；
+    // 命令等待 120s（切片B 复审修复波 I6：移到 BridgeChannel.CommandWait 测试缝，单测压到毫秒级）。
     internal static TimeSpan NetLoadTimeout = TimeSpan.FromHours(1);
     internal static TimeSpan NetLoadNoProgressThreshold = TimeSpan.FromSeconds(20);
-    internal static TimeSpan BridgeCommandTimeout = TimeSpan.FromSeconds(120);
 
     // 20s 无进展指引回调：**默认已接通**（复审 F3——此前缝恒 null，指引永不输出），写
     // stderr 并含 TRUSTEDPATHS 配置/回滚片段；测试或 CLI 可替换（null=不打印）。
@@ -1070,8 +1084,11 @@ public sealed class AcadRuntime : ICadRuntime
         return dir;
     }
 
-    // 通道收尾（仅 Dispose 调用）：先等实例退出（Quit 已在 Dispose 的 Run 内完成），再删目录、
-    // 还原宿主原环境变量（best-effort：桥残留句柄导致的删除失败不掩盖退出结论）。
+    // 通道收尾（仅 Dispose 调用）：M1（复审修复波）——**在 WaitForProcessExit 之后**调用：
+    // Quit 返回≠进程退出（CUIX 回写等退出尾段仍在跑），桥进程可能仍持通道目录内的句柄；
+    // 先删目录会与退出尾段竞态（删除失败残留/退出尾段写回孤儿文件）。故顺序固定为
+    // Close+Quit → STA 线程收敛 → WaitForProcessExit → 删目录 + 还原宿主原环境变量
+    // （best-effort：删除失败不掩盖退出结论）。
     private void CleanupChannel()
     {
         string? dir = _channelDir;
@@ -1083,14 +1100,123 @@ public sealed class AcadRuntime : ICadRuntime
         _channelEnvPrevious = null;
     }
 
-    /// <summary>桥 DLL 全路径；未构建（或测试缝缺失）→ 明确"桥未构建"（先于 NETLOAD，spec §5）。</summary>
+    /// <summary>
+    /// 桥 DLL 全路径；未构建（或测试缝缺失）→ 明确"桥未构建"（先于 NETLOAD，spec §5）。
+    /// 切片B 复审修复波 I2/I3：解析顺序=覆盖缝 → 环境变量 <see cref="BridgeDllEnvVar"/> → 宿主部署目录
+    /// （AppContext.BaseDirectory）；存在后做**空桩识别**（同名空桩产物不得被当成可加载桥）。
+    /// </summary>
     internal static string BridgeDllPath()
     {
+        var (dll, problem) = ProbeBridgeDll();
+        return problem switch
+        {
+            "dll-missing" => throw new CadRuntimeException(MissingBridgeMessage),
+            "stub" => throw new CadRuntimeException(StubBridgeMessage),
+            _ => dll,
+        };
+    }
+
+    /// <summary>桥 DLL 路径解析（I3，不做 IO 判定）：覆盖缝 → 环境变量 → 宿主部署目录。</summary>
+    internal static string ResolveBridgeDllPath()
+    {
         if (!string.IsNullOrWhiteSpace(BridgeDllOverride)) return BridgeDllOverride!;
-        string dll = Path.Combine(AppContext.BaseDirectory, BridgeDllName);
-        if (!File.Exists(dll))
-            throw new CadRuntimeException("桥未构建（需 AutoCAD 19.1 引用）：" + BridgeDllName);
-        return dll;
+        string? fromEnv = Environment.GetEnvironmentVariable(BridgeDllEnvVar);
+        if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv!;
+        return Path.Combine(AppContext.BaseDirectory, BridgeDllName);
+    }
+
+    /// <summary>
+    /// 桥 DLL 探针（I1/I2）：返回解析路径与问题词——null=可加载、"dll-missing"=不存在、
+    /// "stub"=空桩产物。纯只读（File.Exists + 字节扫描），不启动进程、不触 COM。
+    /// </summary>
+    internal static (string DllPath, string? Problem) ProbeBridgeDll()
+    {
+        string dll = ResolveBridgeDllPath();
+        if (!File.Exists(dll)) return (dll, "dll-missing");
+        if (StubScan(dll)) return (dll, "stub");
+        return (dll, null);
+    }
+
+    /// <summary>空桩扫描缝（默认=真实字节扫描；单测注入两态驱动拒绝面）。</summary>
+    internal static Func<string, bool> StubScan = IsStubAssembly;
+
+    /// <summary>
+    /// 空桩识别（I2 裁定）：读全文件（桥产物 ~几十 KB）做 ASCII 与 UTF-16 双编码标记检索——
+    /// 真桥含 READ / EXPLODE_REPLACE 命令标记**任一**即非空桩（.NET 元数据中命令字面量可能以
+    /// UTF-8 自定义特性 blob 或 UTF-16 用户串堆出现，故双编码都查）；两者皆无且含
+    /// <see cref="StubMarker"/> 才是空桩。文件不可读→false（不在此误判，交给后续 NETLOAD
+    /// 的响亮失败/指引）。
+    /// </summary>
+    internal static bool IsStubAssembly(string path)
+    {
+        byte[] bytes;
+        try { bytes = File.ReadAllBytes(path); }
+        catch { return false; }
+        string ascii = System.Text.Encoding.ASCII.GetString(bytes);
+        string utf16 = System.Text.Encoding.Unicode.GetString(bytes);
+        bool Has(string marker) => ascii.Contains(marker, StringComparison.Ordinal)
+            || utf16.Contains(marker, StringComparison.Ordinal);
+        if (Has(BridgeChannel.ReadCommand) || Has(BridgeChannel.ExplodeReplaceCommand)) return false;
+        return Has(StubMarker);
+    }
+
+    /// <summary>TRUSTEDPATHS 只读现值（注册表优先、零实例零 COM；无值→null）。I4：信息性证据。</summary>
+    public static string? CurrentTrustedPaths() => TrustedPathsSource(TArchProfileName);
+
+    /// <summary>
+    /// 信任目录判定（纯函数，无 IO 之外副作用）：TRUSTEDPATHS 分号分隔、条目可带引号/环境变量；
+    /// 条目本身或其**子目录**受信（AutoCAD 信任位置含子目录），比较 OrdinalIgnoreCase + 全路径归一。
+    /// </summary>
+    public static bool IsTrustedDirectory(string? trustedPaths, string directory)
+    {
+        if (string.IsNullOrEmpty(trustedPaths)) return false;
+        string target = NormalizeTrustedPath(directory);
+        foreach (string raw in trustedPaths.Split(';'))
+        {
+            string entry = raw.Trim().Trim('"');
+            if (entry.Length == 0) continue;
+            try { entry = Environment.ExpandEnvironmentVariables(entry); } catch { /* 保留原串 */ }
+            string trusted = NormalizeTrustedPath(entry);
+            if (trusted.Length == 0) continue;
+            if (string.Equals(target, trusted, StringComparison.OrdinalIgnoreCase)) return true;
+            if (target.StartsWith(trusted + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    private static string NormalizeTrustedPath(string path)
+    {
+        try { path = Path.GetFullPath(path); } catch { /* 非法路径→按原串比较 */ }
+        return path.TrimEnd('\\', '/');
+    }
+
+    /// <summary>
+    /// 桥可用性预检（切片B 复审修复波 I1）：起会话前 fail-fast——解析桥 DLL（覆盖缝/环境变量/
+    /// 部署目录）、识别空桩、判定桥目录是否在 TRUSTEDPATHS。**纯只读、零实例、零 COM**：
+    /// 深读（NETLOAD）一旦在桥缺失/空桩/不受信时开跑，要么"桥未构建"伪失败、要么安全框阻塞
+    /// 至 3600s——故必须在 Open/NETLOAD 之前给出可执行指引并拒绝。
+    /// </summary>
+    public static BridgeAvailability CheckBridgeAvailability()
+    {
+        var (dll, problem) = ProbeBridgeDll();
+        if (problem == "dll-missing")
+            return new BridgeAvailability(false, dll, problem,
+                "请先构建桥（需 CADAGENT_ACMG_DIR 下 AcMgd/AcDbMgd/AcCoreMgd），"
+                + "或设置 CADAGENT_BRIDGE_DLL 指向已构建的桥 DLL");
+        if (problem == "stub")
+            return new BridgeAvailability(false, dll, problem,
+                StubBridgeMessage + "；或设置 CADAGENT_BRIDGE_DLL 指向真桥产物");
+
+        string? trusted = CurrentTrustedPaths();
+        string dir;
+        try { dir = Path.GetDirectoryName(dll) ?? dll; }
+        catch { dir = dll; }
+        if (!IsTrustedDirectory(trusted, dir))
+            return new BridgeAvailability(false, dll, "untrusted",
+                "桥目录不在 TRUSTEDPATHS（桥目录：" + dir + "；当前值："
+                + (string.IsNullOrEmpty(trusted) ? "<空>" : trusted) + "）——请把桥目录加入信任位置"
+                + "（AutoCAD 选项→文件→信任位置，需重启 AutoCAD），否则 NETLOAD 安全框最长阻塞 3600s");
+        return new BridgeAvailability(true, dll, null, null);
     }
 
     // 系统变量读缝（**文档面** API；测试注入 fake，无 COM）。真机实证（TRX Skip 原因）：
@@ -1465,10 +1591,10 @@ public sealed class AcadRuntime : ICadRuntime
                 string id = BridgeChannel.WriteRequest(channel,
                     new BridgeRequest("read", Path.GetFileName(drawingPath), null, BridgeReadMaxDepth, null).Write());
                 BridgeChannel.SendCommand(BridgeChannel.ReadCommand, "cmd");
-                string? text = BridgeChannel.WaitDone(channel, id, BridgeCommandTimeout);
+                string? text = BridgeChannel.WaitDone(channel, id, BridgeChannel.CommandWait);
                 if (text == null)
                     throw new CadRuntimeException(
-                        $"桥命令超时（{(int)BridgeCommandTimeout.TotalSeconds}s）：{BridgeChannel.ReadCommand}");
+                        $"桥命令超时（{(int)BridgeChannel.CommandWait.TotalSeconds}s）：{BridgeChannel.ReadCommand}");
                 var result = BridgeResult.Parse(text);
                 if (!string.Equals(result.Status, "ok", StringComparison.Ordinal))
                     throw new CadRuntimeException("桥失败: " + (result.Error ?? result.Status));
@@ -1509,10 +1635,10 @@ public sealed class AcadRuntime : ICadRuntime
             string id = BridgeChannel.WriteRequest(channel,
                 new BridgeRequest("explode-replace", dwg, hexHandle, BridgeReadMaxDepth, liveOutPath).Write());
             BridgeChannel.SendCommand(BridgeChannel.ExplodeReplaceCommand, "cmd");
-            string? text = BridgeChannel.WaitDone(channel, id, BridgeCommandTimeout);
+            string? text = BridgeChannel.WaitDone(channel, id, BridgeChannel.CommandWait);
             if (text == null)
                 throw new CadRuntimeException(
-                    $"桥命令超时（{(int)BridgeCommandTimeout.TotalSeconds}s）：{BridgeChannel.ExplodeReplaceCommand}");
+                    $"桥命令超时（{(int)BridgeChannel.CommandWait.TotalSeconds}s）：{BridgeChannel.ExplodeReplaceCommand}");
             var result = BridgeResult.Parse(text);
             if (!string.Equals(result.Status, "ok", StringComparison.Ordinal))
                 throw new CadRuntimeException("桥失败: " + (result.Error ?? result.Status));
@@ -1544,11 +1670,20 @@ public sealed class AcadRuntime : ICadRuntime
             });
         }
         catch { /* 队列已关闭等 */ }
-        // 通道收尾只在 Dispose（复审 F1）：实例销毁=桥会话结束，删目录并还原宿主环境变量。
-        CleanupChannel();
         _queue.CompleteAdding();
         _staThread.Join(TimeSpan.FromSeconds(10));
         // Quit 返回≠进程退出：CUIX 回写发生在退出尾段（PR#17 机制，厂商无关）。
         VendorGuard.WaitForProcessExit(Profile, VendorGuard.ExitWait);
+        // M1（复审修复波）：通道收尾**必须**在进程退出之后——桥进程可能仍持通道目录句柄，
+        // 先删目录会与退出尾段竞态（删除失败残留/孤儿写回）。最后一个对象也随之退出：
+        // 实例销毁=桥会话结束，故删目录与还原环境变量固定收在退出等待之后。
+        CleanupChannel();
     }
 }
+
+/// <summary>
+/// 桥可用性预检结果（切片B 复审修复波 I1）：Available=false 时 <paramref name="Problem"/> ∈
+/// <c>dll-missing</c>|<c>stub</c>|<c>untrusted</c>，<paramref name="Guidance"/> 为用户可执行下一步。
+/// 纯只读结论（零实例、零 COM）——供 CLI 在 Open/NETLOAD 之前 fail-fast（杜绝 3600s 阻塞）。
+/// </summary>
+public sealed record BridgeAvailability(bool Available, string? DllPath, string? Problem, string? Guidance);

@@ -55,6 +55,13 @@ internal static class BridgeChannel
     internal static TimeSpan ProbeTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// 桥命令（READ / EXPLODE_REPLACE）结果等待上限（spec §5：120s）。切片B 复审修复波 I6：
+    /// 从 AcadRuntime 移到本类成统一测试缝——单测压到 200ms 即可确定性驱动"命令超时"分支，
+    /// 无需真等 120s；生产默认值不变。
+    /// </summary>
+    internal static TimeSpan CommandWait = TimeSpan.FromSeconds(120);
+
+    /// <summary>
     /// 硬超时处理器（复审 F3）：宿主（AcadRuntime）在桥入口注入，默认实现=终止**本方**经 /p
     /// 启动的进程（经既有 TarchProcessCleanup 缝）并置标志，使随后从阻塞 SendCommand 抛出的
     /// COM 异常被包装为 <see cref="NetLoadHardTimeoutMessage"/>。null=不武装硬超时

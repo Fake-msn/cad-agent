@@ -58,4 +58,15 @@ public sealed record BridgeRequest(string Op, string Dwg, string? Handle, int Ma
             throw new FormatException("explode-replace 需要 handle 与 liveout");
         return new BridgeRequest(op, dwg, handle, depth, liveout);
     }
+
+    /// <summary>
+    /// 命令侧 op 对账（复审修复波 M10）：每条命令只服务一种 op——请求 op 与当前命令不符即拒绝
+    /// （通道目录复用/旧请求残留时防"READ 命令执行 replace 请求"之类的串道）。异常由命令侧
+    /// 统一捕获成 status fail（绝不在错 op 上做任何库内动作）。
+    /// </summary>
+    public void RequireOp(string expected)
+    {
+        if (!string.Equals(Op, expected, StringComparison.Ordinal))
+            throw new InvalidOperationException("请求 op 与命令不符: 期望 " + expected + "，实际 " + Op);
+    }
 }

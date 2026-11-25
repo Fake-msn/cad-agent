@@ -72,6 +72,8 @@ namespace CadAgent.TArchBridge
                 // PendingRequest 为具名 struct（net45 无 ValueTuple）：一律用 .Value.ReqPath/.Id 具名访问。
                 var p = pending.Value;
                 var req = BridgeRequest.Parse(File.ReadAllText(p.ReqPath));
+                // M10（复审修复波）：命令只服务 op=explode-replace——错 op 请求一律拒绝（不碰库）。
+                req.RequireOp("explode-replace");
                 if (!string.Equals(Path.GetFileName(doc.Name), Path.GetFileName(req.Dwg), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("错图: 当前文档 " + doc.Name + " ≠ " + req.Dwg);
                 if (req.Handle == null || req.LiveOut == null)

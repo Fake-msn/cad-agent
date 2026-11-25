@@ -61,6 +61,19 @@ public class ExplodeEvidenceModelTests
     }
 
     [Fact]
+    public void Overlay_UpsertExplode_MixedCaseHandle_SingleRow()
+    {
+        // M6（复审修复波）：句柄是 hex 标识（AutoCAD 原样大写，计划/手写来源可能小写）——
+        // 大小写不同即同一实体，必须覆盖而不是并存两行（消费侧 FirstOrDefault 会读到陈旧行）。
+        var o = new SemanticOverlay();
+        o.UpsertExplode(E("21E00"));
+        o.UpsertExplode(E("21e00", full: false));
+        var row = Assert.Single(o.ExplodeEvidence);
+        Assert.Equal("21e00", row.Handle);        // 后写整条替换
+        Assert.False(row.FullyExplodable);
+    }
+
+    [Fact]
     public void Overlay_Json_Additive_And_RoundTrip()
     {
         var dir = Directory.CreateTempSubdirectory("explode").FullName;

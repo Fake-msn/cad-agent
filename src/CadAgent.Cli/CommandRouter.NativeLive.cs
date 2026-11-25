@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CadAgent.Adapters.Acad;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
 using CadAgent.Data;
@@ -21,11 +22,12 @@ namespace CadAgent.Cli;
 /// **kind 词汇归一**（最终复审 finding 1）：产品计划 kind 是 `move-entity`/`delete-entity`
 /// （HandlerRegistry/EditHandlers），Replay 通道 case 是 `move`/`delete`——准入侧两套词汇
 /// 全收，克隆 Replay 计划时改写为运行时词汇（不改 ComReplayService 既有 case）。
-/// **会话顺序**（@T10 修复 + 切片B 前插）：先 ReadExplodeEvidence(path)（拉起 TArch+NETLOAD、
-/// 契约要求无打开文档）→ ReadNativeParams(path≠null)（经 EnsureAppTArch 以 /p 拉起天正并缓存
-/// _app，返回值即准入重读；该形态以 ReadOnly=true 打开原图不另建副本）→ Open 原图读改写
-/// （执行侧需要；复用同一 _app）→ 执行 → ReadNativeParams()（null 形态读当前活文档）。
-/// 颠倒会令默认 profile 缓存使 TArch 永不加载。
+/// **会话顺序**（@T10 修复 + 切片B 前插 + I1 按需深读修复波）：先 ReadNativeParams(path≠null)
+/// （经 EnsureAppTArch 以 /p 拉起天正并缓存 _app，返回值即准入重读；该形态以 ReadOnly=true
+/// 打开原图不另建副本、读完即关）→ **需要深读时** ReadExplodeEvidence(path)（拉起/复用
+/// TArch+NETLOAD、契约要求无打开文档）→ Open 原图读改写（执行侧需要；复用同一 _app）→
+/// 执行 → ReadNativeParams()（null 形态读当前活文档）。Open 必须先于参数重读会令默认 profile
+/// 缓存使 TArch 永不加载（@T10 教训）；炸开取证则必须早于 Open 且晚于读参。
 /// **原图零写入**（源件 SHA256 前后比对，两侧空哈希均按验证失败 fail-closed；唯一写出是
 /// .live.dwg 新文件）。**证据窗口闭合**（复审 finding 2）：交付后源件 SHA 复核推迟到
 /// SaveAs/Close 之后且运行时 Dispose（内部 Close+Quit+等待进程退出）之后——文档关闭且实例
@@ -33,10 +35,12 @@ namespace CadAgent.Cli;
 /// 作为证据但诚实报失败）。
 /// 不创建 tx 快照、不调 StepEngine（native-live 独执行）。审计全部落 area "run"
 /// （同 store/session/op/planId）：
-/// native-gate-pass{handles,sourceSha,rereadHash,explodeGateHandles}/native-gate-refused{verdicts|reason}/
+/// native-gate-pass{handles,sourceSha,rereadHash,explodeGateHandles,deepRead,trustedPaths}/
+/// native-gate-refused{verdicts|reason}/native-bridge-unavailable{reason,guidance}/
 /// native-explode-step{hex,newCount,savedPath,bboxMatch}/native-live-step{kind,handle}/
 /// native-live-committed{outPath,sourceSha,liveSha}/
-/// native-live-failed{step?,error|readback|reason}。
+/// native-live-failed{step?,error|readback|reason}/
+/// native-load-denied|native-load-timeout{reason,error}（NETLOAD 类失败的桥通道归因，additive）。
 /// native-gate-refused 的 verdicts 逐条 {handle,verdict(=合并判据结论),paramsVerdict(参数门结论)}。
 /// 成功路径 stdout 收据（finding 11）：{"ok":true,"outPath":...,"handles":[...]}。
 /// R11（句柄歧义防护）：先"剥 0x+大写"原串查 overlay（全数字串可能是 hex，如 "21000"），
@@ -47,17 +51,20 @@ namespace CadAgent.Cli;
 /// 同句柄多步读回按**终态聚合**：delete 支配 / change-layer 末步层名胜出 / move 位移求和。
 /// 句柄形态解析异常（bool/数组/超 ulong 数值等）→ native-gate-refused{MalformedHandle}。
 /// **切片B 炸开门**（spec §4，R16 裁定）：kind 白名单扩 `explode-native`——桥事务替换原实体为
-/// 炸开叶（rt.ExplodeReplaceByHandle(hex, &lt;drawing&gt;.live.dwg)）。准入对**全部**步骤一律用
-/// `EvaluateCombined`（参数门 ∨ 炸开门，spec §4.2 附加证据："change-layer/move/delete 准入扩为
-/// 参数门 ∨ 炸开门"），不再按 kind 分派门；R14：合并判据永不返回参数门拒因、炸开门拒因优先，
-/// 故并行调 Evaluate 把参数门 verdict 以 `paramsVerdict` 加性落 native-gate-refused，准入
-/// 文案/审计不得宣称"参数已读全"。仅凭炸开门放行的句柄逐字落 native-gate-pass.explodeGateHandles。
+/// 炸开叶（rt.ExplodeReplaceByHandle(hex, &lt;drawing&gt;.live.dwg)）。准入对**需要炸开门的步骤**
+/// 一律用 `EvaluateCombined`（参数门 ∨ 炸开门，spec §4.2 附加证据："change-layer/move/delete
+/// 准入扩为参数门 ∨ 炸开门"），不按 kind 分派门；参数门已放行者直接用参数门结论（合并判据对
+/// 参数门 Pass 短路，等价）。R14：合并判据永不返回参数门拒因、炸开门拒因优先，故并行调
+/// Evaluate 把参数门 verdict 以 `paramsVerdict` 加性落 native-gate-refused，准入文案/审计不得
+/// 宣称"参数已读全"。仅凭炸开门放行的句柄逐字落 native-gate-pass.explodeGateHandles。
 /// **R16 子裁定（change-layer 需参数门）**：change-layer 的读回期望是层名，参数行缺失时既无
 /// before 佐证也无 after 对照（层名只能从参数面读回），仅凭炸开证据放行属不可对账放行 →
 /// 准入即 fail-closed 拒绝 `native-gate-refused{reason:"change-layer-requires-params"}`；
 /// move（bbox 基准可回退炸开证据 bbox）与 delete（只验句柄消失）允许仅凭炸开门放行。
-/// 会话开路序扩为**三段**：ReadExplodeEvidence(path)（拉起 TArch+NETLOAD、
-/// 契约要求无打开文档）→ ReadNativeParams(path)（拉起 TArch profile 的参数门重读）→ Open。
+/// 会话开路序（切片B 起为**三段**，I1 复审修复波起为**按需**）：ReadNativeParams(path)（拉起
+/// TArch profile 的参数门重读，最先）→ **仅当**计划含 explode-native 或参数门有未放行者时
+/// ReadExplodeEvidence(path)（桥深度取证，契约要求无打开文档）→ Open。纯参数门放行的句柄
+/// 计划不触桥（切片A 契约保持）。
 /// 执行由"一次性 Replay"改为**按计划顺序逐 step**：explode-native → 桥替换 + 审计
 /// native-explode-step{hex,newCount,savedPath,bboxMatch}；其余句柄类 kind → 单步计划过
 /// ComReplayService（shadow-agnostic；不消费 skill 包）。读回：参数面聚合**排除**
@@ -73,6 +80,20 @@ namespace CadAgent.Cli;
 /// **F2 收尾 SaveAs 去重（同轮）**：宿主 epilogue 仅在**末步 kind≠explode-native** 时
 /// rt.SaveAs（末步炸开=终态已由桥交付，跳过重复写出）；混合计划保留单次宿主 SaveAs
 /// （炸开后仍有句柄步改动保存后状态；同路径 SaveAs=AutoCAD SAVE 语义，真机待验）。
+/// **I1 按需深读（ISTQB 合并前审查修复波）**：会话开路序改为 ReadNativeParams(path) **最先**
+/// → 逐 step 求参数门结论 → 仅当（计划含 explode-native）∨（任一参数门未放行）才
+/// ReadExplodeEvidence(path) 并用 EvaluateCombined；全部参数门放行的纯句柄计划**不触桥**
+/// （不 NETLOAD、无需桥产物/信任配置——切片A 契约逐字保持）。native-gate-pass 加性披露
+/// `deepRead`。深读需求确定后、Open/NETLOAD 之前做**桥可用性预检**（AcadRuntime.
+/// CheckBridgeAvailability：dll-missing|stub|untrusted）——不可用即 native-bridge-unavailable
+/// + stderr 指引 + exit 1，绝不让 NETLOAD 在不受信目录挂到 3600s。
+/// **I2 空桩识别**：桥判定从"文件存在"升级为"存在 + 非空桩"（字节扫描真桥命令标记 vs
+/// NoAcadRefsStub 类型名）。**I3 路径可配**：桥路径=覆盖缝 → CADAGENT_BRIDGE_DLL → 宿主目录。
+/// **I4 装载失败归因**：Bridge 错误消息含"NETLOAD 被拒绝"/"NETLOAD 超时"→ 加性审计
+/// native-load-denied / native-load-timeout（generic native-live-failed 照旧）。native-gate-pass
+/// 另加性披露 `trustedPaths`（深读会话的信任位置快照；未深读=null）。
+/// **M9 拒绝载荷语义**：`verdict`=合并判据结论、`paramsVerdict`=参数门独立结论；
+/// change-layer-requires-params 载荷加性带 `refused:true`（verdict 仍如实保留 Pass）。
 /// </summary>
 public static partial class CommandRouter
 {
@@ -141,12 +162,15 @@ public static partial class CommandRouter
         // R16 子裁定：change-layer 仅凭炸开门（参数门未过）→ 准入 fail-closed。
         // 独立 reason（不与逐实体 verdict 混淆）：这是"该 kind 的读回面不可对账"的政策拒绝，
         // verdict 仍逐条保留合并/参数门双结论供复核（合并可能已是 Pass）。
+        // M9（复审修复波）：verdict=合并判据结论的语义在载荷中加性标注 refused:true——
+        // 消费侧不必再靠 reason 猜"verdict=Pass 为何被拒"（旧字段逐字保留，additive）。
         int RefuseLayerNoParams(IReadOnlyList<(string Handle, string Verdict, string? ParamsVerdict)> rows)
         {
             string detail = string.Join(", ", rows.Select(v => $"{v.Handle}={v.Verdict}/参数门 {v.ParamsVerdict}"));
             Audit("native-gate-refused", drawingPath, new
             {
                 reason = "change-layer-requires-params",
+                refused = true,
                 verdicts = rows.Select(v => new
                 {
                     handle = v.Handle,
@@ -155,6 +179,21 @@ public static partial class CommandRouter
                 }).ToArray()
             });
             stderr.WriteLine($"native-live 拒绝: change-layer 需参数门放行（仅凭炸开证据无参数面记录，层名读回无从核对；{detail}）");
+            return 1;
+        }
+
+        // I1（复审裁定）：桥不可用（dll-missing|stub|untrusted）→ 专用 kind + stderr 指引 + exit 1。
+        // 必须在 Open/NETLOAD 之前：桥缺失只会得到"桥未构建"伪失败，不受信目录会让 NETLOAD
+        // 安全框阻塞至 3600s（硬超时只能杀本方实例，代价是整轮会话）。
+        int RefuseBridge(BridgeAvailability bridge)
+        {
+            Audit("native-bridge-unavailable", drawingPath, new
+            {
+                reason = bridge.Problem,
+                dllPath = bridge.DllPath,
+                guidance = bridge.Guidance
+            });
+            stderr.WriteLine($"native-live 拒绝: 桥不可用（{bridge.Problem}）——{bridge.Guidance}");
             return 1;
         }
 
@@ -237,26 +276,63 @@ public static partial class CommandRouter
             catch { return false; }
         }
 
+        // I1（复审裁定）静态可判的一半：计划含 explode-native 时深读需求在准入分类即已确定
+        // （与参数门结论无关）。此处 fail-fast → 运行时**零副作用**（不建实例、不 Open、不
+        // NETLOAD）；纯句柄计划不做此检查（不必有桥，切片A 契约保持），其深读需求在
+        // RunSession 内按参数门结论判定并于 NETLOAD 之前同样预检。
+        if (plan.Steps.Any(s => NormalizeKind(s.Kind) == "explode-native"))
+        {
+            var bridgeStatic = AcadRuntime.CheckBridgeAvailability();
+            if (!bridgeStatic.Available) return RefuseBridge(bridgeStatic);
+        }
+
         // 会话工作（4a–7）收进局部函数：各失败早退只返回码，不再绕过零写入复核
         // （I3 复审修复）——运行时一旦创建（存在副作用可能），成功/失败路径一律在
         // Dispose（Close+Quit+进程退出）之后重算源件 SHA 并与初值比对；失败文案不得
         // 仅凭声称"原图零写入"而未经复核。
         int RunSession(ICadRuntime rt)
         {
-            // 4a-0. 炸开取证开路（切片B，必须最先）：ReadExplodeEvidence(path) 契约=以 /p
-            // 拉起 TArch+NETLOAD 并在**无打开文档**时逐实体递归取证（Task 4 守卫对"已有打开
-            // 的图纸"响亮拒绝）；先 Open 或先读参都会让通道/实例缓存错位（镜像 @T10 教训）。
-            var rereadExplode = rt.ReadExplodeEvidence(drawingPath);
-            // 4a. 天正会话开路（@T10 修复，顺序不可颠倒）：随后 path 形态读参——
-            // ReadNativeParams(path≠null) 内部经 EnsureAppTArch 以 /p 拉起 TArch profile
-            // 并把 _app 缓存；返回值即准入重读事实（以 ReadOnly=true 打开原图读完即关，
-            // 不另建副本——复审 finding 3）。
-            // 若先 Open（EnsureApp 默认 profile 先缓存 _app），EnsureAppTArch 将早退复用
-            // 默认实例、TArch 永不加载→真机 TDb 目标全 StaleMismatch（通道失效）。
+            // 4a. 参数门重读**最先**（I1 复审裁定；@T10 教训仍在）：ReadNativeParams(path≠null)
+            // 内部经 EnsureAppTArch 以 /p 拉起 TArch profile 并把 _app 缓存，返回值即准入重读
+            // 事实（以 ReadOnly=true 打开原图读完即关，不另建副本；读完 _doc 归 null，为随后的
+            // 炸开取证留出"无打开文档"契约）。若先 Open（EnsureApp 默认 profile 先缓存 _app），
+            // EnsureAppTArch 将早退复用默认实例、TArch 永不加载→真机 TDb 目标全 StaleMismatch。
             var reread = rt.ReadNativeParams(drawingPath);
-            // 准入判据（R16 裁定，spec §4.2 附加证据为约束）：**全部**步骤一律用合并判据
+
+            // 4a-1. 参数门逐 step 独立结论（R14：合并判据永不返回参数门拒因，故必须并行取；
+            // 台账 T7 守卫：重读记录句柄须等于查询句柄，不等/缺失→null→参数门判 StaleMismatch）。
+            var paramsVerdicts = new NativeGateVerdict[plan.Steps.Count];
+            for (int i = 0; i < plan.Steps.Count; i++)
+                paramsVerdicts[i] = NativeGateRefinement.Evaluate(overlay, matched[i]!,
+                    FindRereadByHandle(reread, matched[i]!));
+
+            // 4a-2. 深读判据（I1 复审裁定）：深读=桥取证，只有两种需求来源——
+            //   ① 计划含 explode-native：执行侧必走桥替换（与参数门结论无关）；
+            //   ② 任一 step 参数门未放行：须用合并判据（参数门 ∨ 炸开门）判。
+            // 全部参数门放行的纯句柄计划**不触桥**：不起 NETLOAD、不需要桥产物/信任配置
+            // （切片A 契约逐字保持；无条件深读曾让"桥未构建"或未受信目录的 3600s 安全框
+            // 阻塞污染的每一条 native-live）。
+            bool deepRead = plan.Steps.Any(s => NormalizeKind(s.Kind) == "explode-native")
+                || paramsVerdicts.Any(v => v != NativeGateVerdict.Pass);
+            IReadOnlyList<ExplodeEvidence> rereadExplode = Array.Empty<ExplodeEvidence>();
+            // I4（信息性）：信任位置快照只在深读会话取（零实例零 COM 的注册表优先读）。
+            string? trustedPaths = null;
+            if (deepRead)
+            {
+                // I1：桥不可用（缺失/空桩/不受信）→ 事实清楚且无挂起风险地拒绝（NETLOAD 在
+                // 不受信目录会弹安全框并阻塞至 3600s）。此检查仍在 Open/NETLOAD 之前。
+                var bridge = AcadRuntime.CheckBridgeAvailability();
+                if (!bridge.Available) return RefuseBridge(bridge);
+                trustedPaths = AcadRuntime.CurrentTrustedPaths();
+                // 4a-3. 炸开取证（桥 READ，拉起/复用 TArch + NETLOAD）：契约=无打开文档，
+                // ReadNativeParams(path) 已读完即关；必须早于 Open（镜像 @T10 教训）。
+                rereadExplode = rt.ReadExplodeEvidence(drawingPath);
+            }
+
+            // 准入判据（R16 裁定，spec §4.2 附加证据为约束）：需要炸开门的 step 一律用合并判据
             // （参数门 ∨ 炸开门）——change-layer/move/delete 与 explode-native 同门，不存在
-            // "句柄编辑类只认参数门"的按 kind 分派。
+            // "句柄编辑类只认参数门"的按 kind 分派；参数门已放行的 step 直接用参数门结论
+            // （合并判据对参数门 Pass 短路，二者等价，省一次 overlay 查找）。
             // R14：合并判据永不返回参数门拒因（炸开门拒因优先），故并行调 Evaluate 取得参数门
             // 独立结论，以 paramsVerdict 加性落 refused/pass 证据；准入文案不得宣称"参数已读全"。
             var gateVerdicts = new List<(string Handle, string Verdict, string? ParamsVerdict)>();
@@ -269,14 +345,17 @@ public static partial class CommandRouter
                 // 台账 T7 守卫：重读记录句柄须等于查询句柄（防管道错配误放行）；
                 // 不等/缺失 → null → 参数门判 StaleMismatch。
                 var rec = FindRereadByHandle(reread, handle);
-                // 参数门独立结论：R14 合并判据**永不**返回参数门拒因（炸开门拒因优先），
-                // 故审计必须并行调 Evaluate 才能说清"参数门为何没放行"。
-                var paramsVerdict = NativeGateRefinement.Evaluate(overlay, handle, rec);
-                // 炸开取证行（Ordinal 精确匹配；错配/缺失即不取用 → ExplodeNotRead/StaleExplode 兜底）。
-                var ev = rereadExplode.FirstOrDefault(e =>
-                    string.Equals(e.Handle, handle, StringComparison.Ordinal));
-                // 合并准入（参数门 ∨ 炸开门），任一 Pass 即 Pass；两门均不过时炸开门拒因优先。
-                var combined = NativeGateRefinement.EvaluateCombined(overlay, handle, rec, ev);
+                // 参数门独立结论（4a-1 已算，同输入同结论，确定性）。
+                var paramsVerdict = paramsVerdicts[i];
+                NativeGateVerdict combined = paramsVerdict;
+                if (paramsVerdict != NativeGateVerdict.Pass)
+                {
+                    // 炸开取证行（Ordinal 精确匹配；错配/缺失即不取用 → ExplodeNotRead/StaleExplode 兜底）。
+                    var ev = rereadExplode.FirstOrDefault(e =>
+                        string.Equals(e.Handle, handle, StringComparison.Ordinal));
+                    // 合并准入（参数门 ∨ 炸开门），任一 Pass 即 Pass；两门均不过时炸开门拒因优先。
+                    combined = NativeGateRefinement.EvaluateCombined(overlay, handle, rec, ev);
+                }
                 if (combined != NativeGateVerdict.Pass)
                 {
                     gateVerdicts.Add((handle, combined.ToString(), paramsVerdict.ToString()));
@@ -305,7 +384,11 @@ public static partial class CommandRouter
                 handles = matched,
                 sourceSha,
                 rereadHash,
-                explodeGateHandles = explodeGateHandles.Distinct(StringComparer.Ordinal).ToArray()
+                explodeGateHandles = explodeGateHandles.Distinct(StringComparer.Ordinal).ToArray(),
+                // I1：本次准入是否用深读（炸开证据）。false=仅参数门结论、全程未触桥。
+                deepRead,
+                // I4：深读会话的信任位置快照（未深读=null；信息性，供复核 NETLOAD 免弹窗前提）。
+                trustedPaths
             });
 
             // 4b. 执行窗口：Open 原图读改写（执行侧需要）——EnsureApp 复用 4a 已缓存的
@@ -431,9 +514,9 @@ public static partial class CommandRouter
             // 4. 活会话对准**原图**（原生 DWG，TDb 存活）。运行时获取镜像 T6 R8 裁定：
             // 测试注入优先；否则按 ResolveRuntimeName 直构（不调 CreateRuntimeIfAvailable——
             // 其 GetInfo 预激活/降级文案与 native-live 语义不符；构造/Open 失败经下方 catch
-            // 响亮留痕）。会话顺序（切片B 三段）：ReadExplodeEvidence(path) 炸开取证（拉起
-            // TArch+NETLOAD、须无打开文档）→ ReadNativeParams(path)（拉起 TArch profile）→
-            // Open 原图 → null 形态读回。
+            // 响亮留痕）。会话顺序（I1 起）：计划含 explode-native 时先做桥预检（下）→
+            // ReadNativeParams(path)（拉起 TArch profile、参数门重读）→ 需要深读时
+            // ReadExplodeEvidence(path) → Open 原图 → null 形态读回。
             ICadRuntime? rt = RuntimeFactory != null ? RuntimeFactory() : CreateRuntimeInstance(ResolveRuntimeName());
             if (rt == null)
             {
@@ -455,6 +538,16 @@ public static partial class CommandRouter
         }
         catch (Exception ex)
         {
+            // I4（复审修复波）：NETLOAD 类失败按桥通道归因单独留痕（generic 条目**照旧保留**）——
+            // 误拒（命令未注册/用户点了【不加载】）与硬超时（本方会话已被终止）是两种不同的
+            // 处置面，混进 generic error 会让复核分不清"该改信任配置"还是"该查实例健康"。
+            // 文案/退出码不变（stderr 原文 + exit 1）。
+            if (ex.Message.Contains("NETLOAD 被拒绝", StringComparison.Ordinal))
+                Audit("native-load-denied", drawingPath,
+                    new { reason = "netload-denied", error = ex.Message, liveOutExists = LiveOutExists() });
+            else if (ex.Message.Contains("NETLOAD 超时", StringComparison.Ordinal))
+                Audit("native-load-timeout", drawingPath,
+                    new { reason = "netload-timeout", error = ex.Message, liveOutExists = LiveOutExists() });
             // F1：异常同样按阶段诚实报（REPLACED 后桥已交付 liveout，不得宣称"未交付"）。
             Audit("native-live-failed", drawingPath,
                 new { error = ex.Message, liveOutExists = LiveOutExists() });

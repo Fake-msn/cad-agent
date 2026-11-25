@@ -774,9 +774,11 @@ public static partial class CommandRouter
         {
             void ExplodeReadFailed(Exception ex)
             {
+                // M5（复审修复波）：审计键统一小写 error（与 native-read-failed / native-gate-refused
+                // 等条目口径一致；旧键名 Error 大小写不一让消费侧按键名取不到）。
                 audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
                     session, "semantic", "explode-read-failed", drawingPath,
-                    JsonSerializer.Serialize(new { Error = ex.Message }), hash, hash, "", ""));
+                    JsonSerializer.Serialize(new { error = ex.Message }), hash, hash, "", ""));
                 stderr.WriteLine($"--explode: 深度读失败（{ex.Message}），理解侧降级");
             }
 

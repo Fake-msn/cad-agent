@@ -682,6 +682,7 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
 
 - **桥通道闭环（真机固化；R17/R18 根因修复入内）**：
   - **NETLOAD 经 TRUSTEDPATHS 免弹窗**：用户批准的**一次性配置**（实际写入值见 `outputs/trustedpaths-after.txt`：`C:\Tangent\TElecT20V5\SYS;C:\Tangent\TElecT20V5\SYS19x64;C:\Tangent\TElecT20V5\lisp;"E:\随机任务 ·Qoder·\src\CadAgent.TArchBridge\bin\Debug\net45"`）；**SECURELOAD 保持默认 1**——不降级、不自动写配置（变更由用户执行）。
+  - **部署口径（消除歧义，ISTQB 合并前审查修复波 I3）**：NETLOAD 的信任判定针对**部署中桥 DLL 所在目录**，不是仓库源码目录。测试经 `AcadRuntime.BridgeDllOverride` 指向仓库构建产物 `src/CadAgent.TArchBridge/bin/<Debug|Release>/net45`——**当前 TRUSTEDPATHS 值信任的正是这个「测试」桥目录**，不代表生产已就绪；**生产必须把 `CadAgent.TArchBridge.dll` 与 `CadAgent.TArchBridge.Protocol.dll` 部署到 CLI 可执行目录（`AppContext.BaseDirectory`）并信任该目录，或设环境变量 `CADAGENT_BRIDGE_DLL` 指向桥 DLL 并信任其目录**（桥路径解析顺序：`BridgeDllOverride` → `CADAGENT_BRIDGE_DLL` → 部署目录）。桥可用性由 `AcadRuntime.CheckBridgeAvailability` 在 Open/NETLOAD 之前预检（缺失/空桩/不受信 → `native-bridge-unavailable` 拒绝，绝不进 3600s 安全框）。
   - **TRUSTEDPATHS 读取＝注册表优先**：`HKCU\Software\Autodesk\AutoCAD\R19.1\ACAD-*\Profiles\TElec20V5\Variables` 的 REG_SZ（只读、**零实例、零 COM**）；注册表无该值才回退 COM **文档面** `GetVariable("TRUSTEDPATHS")`（活动文档取用同走忙重试）。根因（真机）：COM 实读必须先 `/p` 拉起整实例，而启动初始化期 `Quit` 被忽略 → 孤儿 acad.exe，随后守卫只会自跳过"残留进程"，真因被残留掩盖。
   - **桥 SendCommand 全部忙重试**：NETLOAD／注册探针／正式命令三处发送经同一注入缝走 `RetryBusy`（`RPC_E_CALL_REJECTED` 0x80010001，TArch 启动窗真机 run7 实证；被拒＝命令未执行故重试无副作用；与既有 30s 预算共享）。
   - **通道目录＝实例级**：`EnsureChannelDir` 在本实例**首次启动前**创建目录并注入 `CADAGENT_TARCH_CHANNEL`（子进程只在 `CreateProcess` 时**快照**环境变量），READ 与 EXPLODE_REPLACE 全程复用；目录删除与环境变量还原只在 `Dispose`；写请求前先放弃目录内"有 req 无 done"的历史请求（否则桥 `NextPending` 恒拾最早旧请求→第二次桥操作必超时）。
@@ -714,7 +715,24 @@ profile 可设 token 套餐（总额度、重置周期、会话/单任务上限�
   - **F3 ROT 归属校验有界重试 + 判定精确化**：归属判定改「窗口→PID」（`AcadWindows.WindowProcessId`）——本方实例的闪屏/主框架窗口差异不再伪失败；仍不符则按 10s 有界窗口（`OwnershipRetryWindow`，1s 节拍）重试 AttachOnly+归属，耗尽才沿用原响亮拒绝；全程不 Quit 他方实例、本方启动进程句柄保留。
   - **F4 20s 指引诊断拼接**：NETLOAD 监视线程按节拍探测安全框（首发立即 + 500ms），命中至少一次 → 指引文案附加「（已检测到安全框）」（只一次；未检出/快速返回文案逐字不变）。
   - **F5 文档口径更正**：门禁工程标签 `TArchBridge.Protocol 13` → `TArchBridge.Tests 13`；前序失败三处（attempt1 11 例/attempt2 4 例/attempt3 1 例）；设计 §7.1(a) 只引 §4.1、§7.1(e) 改「环境新增事实」；真机测试 `NetLoadTimeout` 覆写 **10min**（生产 3600s 不变）。
-  - **门禁**：`outputs/fixwave-gate-sln-2.log` — **1596 通过 / 0 失败 / 1 跳过**（= TArchBridge.Tests 13 + Llm 33 + Core 260 + Data 443 + View 381 + Zwcad 16 真机实跑 + Cli 328 + **Acad 123**（122 通过 / 1 跳过——桥 4 真机：T1/A4/T3 实跑绿 + T2 设计性 Skip））；本波 +6 测试（Cli +1 / Acad +5）。门禁前后 `tasklist` **0 acad**。诚实记录：本波**首跑**（`outputs/fixwave-gate-sln.log`）Acad 1 例失败＝`BusyWindow_…` 命中既有类间交接 ROT 残留（10s 重试窗内未恢复），据此加「窗口→PID」精确归属后**第二次全 sln 全绿**——残留竞态收窄但未根除，记观察项。
+  - **门禁**：`outputs/fixwave-gate-sln-2.log` — **1596 通过 / 0 失败 / 1 跳过**（= TArchBridge.Tests 13 + Llm 33 + Core 260 + Data 443 + View 381 + Zwcad 16 真机实跑 + Cli 328 + **Acad 123**（122 通过 / 1 跳过——桥 4 真机：T1/A4/T3 实跑绿 + T2 设计性 Skip））；本波 +7 测试（Cli +1 / Acad +6）；全量 1596。门禁前后 `tasklist` **0 acad**。诚实记录：本波**首跑**（`outputs/fixwave-gate-sln.log`）Acad 1 例失败＝`BusyWindow_…` 命中既有类间交接 ROT 残留（10s 重试窗内未恢复），据此加「窗口→PID」精确归属后**第二次全 sln 全绿**——残留竞态收窄但未根除，记观察项。
+
+**切片 B ISTQB 合并前审查修复波（2026-11-26 记录；代码+测试+文档同波；追加式，旧文 0 删）**：
+
+- **I1 按需深读（最重要）**：native-live 曾**无条件**先 `ReadExplodeEvidence`——参数门全放行的纯句柄计划也被拖进桥通道：桥未构建即得到"桥未构建"伪失败，桥目录未受信则 NETLOAD 安全框可阻塞至 **3600s**。修复=会话开路序改为 `ReadNativeParams(path)` **最先**（拉起 TArch profile、页内只读读完即关）→ 逐 step 参数门结论 → **仅当**（计划含 `explode-native` ∨ 任一参数门未放行）才深读并使用 `EvaluateCombined`；纯参数门放行计划**全程不触桥**（切片A 契约逐字保持，零 NETLOAD）。深读需求确定后、Open/NETLOAD 之前做 `AcadRuntime.CheckBridgeAvailability` 预检（纯只读：路径解析 + 空桩扫描 + TRUSTEDPATHS 判定），不可用 → 加性审计 `native-bridge-unavailable{reason: dll-missing|stub|untrusted, dllPath, guidance}` + stderr 指引 + exit 1，**零运行时副作用**（不建实例/不 Open/不 NETLOAD）。`native-gate-pass` 加性披露 `deepRead`（深读会话另带 `trustedPaths` 快照）。
+- **I2 空桩识别**：桥判定从"文件存在"升级为"存在 + 非空桩"——全文件 ASCII/UTF-16 双编码扫描：真桥含 `CADAGENT_TARCH_READ` / `CADAGENT_TARCH_EXPLODE_REPLACE` **任一**即非空桩；两者皆无且含 `NoAcadRefsStub` 才判空桩（文案逐字"桥未构建（空桩产物，需 CADAGENT_ACMG_DIR 与 AcMgd/AcDbMgd/AcCoreMgd 引用）"）。**真机实证**：本机真桥产物元数据里同样出现 `NoAcadRefsStub` 字串——只按 stub 标记判空桩会**误杀真桥**，判据必须是"无 TArch 标记 ∧ 有 stub 标记"（双编码亦因 .NET 用户串堆为 UTF-16）。
+- **I3 生产可配路径 + 部署口径**：桥 DLL 解析顺序=`BridgeDllOverride` → 环境变量 `CADAGENT_BRIDGE_DLL` → `AppContext.BaseDirectory/CadAgent.TArchBridge.dll`；§12 桥通道块已加"部署口径"子条（当前 TRUSTEDPATHS 值覆盖的是**仓库测试桥目录**，生产须部署桥+协议 DLL 到 CLI 目录并信任该目录，或设 `CADAGENT_BRIDGE_DLL` 并信任其目录）。
+- **I4 装载失败归因**：Bridge 异常消息含"NETLOAD 被拒绝"/"NETLOAD 超时" → 加性审计 `native-load-denied` / `native-load-timeout`（各带 reason/error；generic `native-live-failed` 照旧保留，stderr 原文 + exit 1 不变）——误拒（改信任配置）与硬超时（查实例健康）处置面分开。
+- **I5 会话序测试失真**：旧断言"首个运行时调用=read-native:path"与生产（无条件深读=read-explode 最先）不符，且被 `ICadRuntime` 的默认实现掩盖（fake 未覆写 `ReadExplodeEvidence`，深读静默返回空表）。修复=fake 如实记录该调用并可配置"一调即抛"，测试钉两场景：① 全参数门放行 → 无 read-explode、`deepRead=false`（生产若再无条件深读必炸）；② 参数门漂移 → 顺序 read-native:path → read-explode → open。
+- **I6 覆盖补齐（+35 测试）**：`BridgeRequest.Parse` 6 类拒绝（缺 dwg/未知键/坏 maxdepth/单列行/replace 缺 handle/replace 缺 liveout）、`BridgeResult.Parse` 5 类拒绝（缺 status/列数/0-1 标记/整数/浮点）、炸开读回两分支（`NewCount≤0`、`BboxMatch=false`）、编排（命令超时——新增 `BridgeChannel.CommandWait` 测试缝可压到毫秒级；桥缺 REPLACED）、`ExplodeReplaceByHandle` 三守卫（无打开文档/空句柄/空 liveout）。
+- **M1**：`Dispose` 的通道目录清理移到 `WaitForProcessExit` **之后**（Quit 返回≠进程退出，桥进程可能仍持目录句柄；先删会与退出尾段竞态）。
+- **M5**：`explode-read-failed` 审计键 `Error` → `error`（与 native-* 条目同口径，消费侧按键名可取）。
+- **M6**：`SemanticOverlay.UpsertExplode` 句柄比较改 `OrdinalIgnoreCase`（同一实体的 `21E00`/`21e00` 曾并存两行，消费侧可能读到陈旧行）。
+- **M8 口径更正**：上一波"+6 测试（Cli +1 / Acad +5）"→"+7（Cli +1 / Acad +6）；全量 1596"。
+- **M9 拒绝载荷语义**：`native-gate-refused.verdict` 自本切片起=**合并判据结论**，参数门结论在 `paramsVerdict`；`change-layer-requires-params` 载荷加性带 `refused:true`（verdict 仍如实保留 Pass，拒绝原因在 reason）——消费侧不再靠 reason 猜"verdict=Pass 为何被拒"。
+- **M10 桥命令 op 对账**：新增 `BridgeRequest.RequireOp`——READ 只接受 `op=read`、EXPLODE_REPLACE 只接受 `op=explode-replace`（通道目录复用/旧请求残留时防串道执行错 op），拒绝即 status fail 且不碰库；协议单测钉住。
+- **门禁**：`outputs/istqb-fixwave/gate-sln.log` — **1631 通过 / 0 失败 / 1 跳过**（= TArchBridge.Tests 27 + Llm 33 + Core 261 + Data 443 + View 381 + Zwcad 16 真机实跑 + Cli 336 + **Acad 135**（134 通过 / 1 跳过——桥 4 真机：T1/A4/T3 实跑绿 + T2 设计性 Skip））；本波 +35 测试（Cli +8 / Acad +12 / TArchBridge.Tests +14 / Core +1）；门禁前后 `tasklist` **0 acad**（中途一次被中止的重跑遗留的**自家** acad.exe 已按 PID 清理后重跑全绿）。
+
 
 ## 13. 块级纠偏清单（块几何指纹匹配 skill 符号库，2026-11-23 设计批准）
 

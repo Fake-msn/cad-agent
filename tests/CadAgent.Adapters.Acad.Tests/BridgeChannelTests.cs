@@ -27,7 +27,8 @@ public class BridgeChannelTests : IDisposable
     private readonly Action<string>? _origGuidance = AcadRuntime.NetLoadSlowGuidance;
     private readonly TimeSpan _origNetLoadTimeout = AcadRuntime.NetLoadTimeout;
     private readonly TimeSpan _origThreshold = AcadRuntime.NetLoadNoProgressThreshold;
-    private readonly TimeSpan _origCmdTimeout = AcadRuntime.BridgeCommandTimeout;
+    // I6（复审修复波）：命令等待缝迁到 BridgeChannel.CommandWait（测试压到毫秒级）。
+    private readonly TimeSpan _origCmdWait = BridgeChannel.CommandWait;
     private readonly Func<string, Process?> _origLauncher = AcadRuntime.ProcessLauncher;
     private readonly Func<string, string?> _origTrustedSource = AcadRuntime.TrustedPathsSource;
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
@@ -43,7 +44,7 @@ public class BridgeChannelTests : IDisposable
         BridgeChannel.PollInterval = TimeSpan.FromMilliseconds(10);
         BridgeChannel.NetLoadTimeoutOverride = null;
         BridgeChannel.HardTimeoutHandler = null;
-        AcadRuntime.BridgeCommandTimeout = TimeSpan.FromSeconds(2);
+        BridgeChannel.CommandWait = TimeSpan.FromSeconds(2);
         AcadRuntime.SecurityDialogDetector = _ => false;
         VendorGuard.ProcessNames = () => Array.Empty<string>();
     }
@@ -61,7 +62,7 @@ public class BridgeChannelTests : IDisposable
         AcadRuntime.NetLoadSlowGuidance = _origGuidance;
         AcadRuntime.NetLoadTimeout = _origNetLoadTimeout;
         AcadRuntime.NetLoadNoProgressThreshold = _origThreshold;
-        AcadRuntime.BridgeCommandTimeout = _origCmdTimeout;
+        BridgeChannel.CommandWait = _origCmdWait;
         AcadRuntime.ProcessLauncher = _origLauncher;
         AcadRuntime.TrustedPathsSource = _origTrustedSource;
         AcadAttach.ActiveObjectResolver = _origActive;
@@ -443,7 +444,7 @@ public class BridgeChannelTests : IDisposable
     {
         string channelDir = Path.Combine(_dir, "channel");
         string dll = Path.Combine(_dir, "CadAgent.TArchBridge.dll");
-        File.WriteAllText(dll, "stub");
+        WriteRealBridgeMarker(dll);   // I2：占位桥必须含真桥命令标记（否则被判空桩）
         AcadRuntime.BridgeDllOverride = dll;
         int factoryCalls = 0;
         AcadRuntime.ChannelDirFactory = () => { factoryCalls++; return channelDir; };
@@ -681,11 +682,204 @@ public class BridgeChannelTests : IDisposable
         Assert.Equal("桥未构建（需 AutoCAD 19.1 引用）：CadAgent.TArchBridge.dll", ex.Message);
     }
 
+    // ---- 切片B 复审修复波（I2 空桩识别 / I3 可配路径 / I6 编排超时与缺 REPLACED）----
+
+    /// <summary>占位桥文件：含真桥 READ 命令标记（ASCII）——I2 的空桩扫描据此判"非空桩"。</summary>
+    private static void WriteRealBridgeMarker(string path)
+        => File.WriteAllBytes(path, System.Text.Encoding.ASCII.GetBytes(BridgeChannel.ReadCommand));
+
+    /// <summary>I2：同名空桩产物（只有 NoAcadRefsStub 类型名、无任何真桥命令标记）→ 逐字拒绝，
+    /// 绝不当作可加载桥（否则 NETLOAD 会在 AutoCAD 里静默失败/挂起）。</summary>
+    [Fact]
+    public void BridgeDllPath_StubAssembly_MessageExact()
+    {
+        string dll = Path.Combine(_dir, "CadAgent.TArchBridge.dll");
+        File.WriteAllBytes(dll, System.Text.Encoding.ASCII.GetBytes("NoAcadRefsStub"));
+        AcadRuntime.BridgeDllOverride = dll;
+
+        var ex = Assert.Throws<CadRuntimeException>(() => AcadRuntime.BridgeDllPath());
+
+        Assert.Equal("桥未构建（空桩产物，需 CADAGENT_ACMG_DIR 与 AcMgd/AcDbMgd/AcCoreMgd 引用）", ex.Message);
+    }
+
+    /// <summary>I2 对照：真桥命令标记（UTF-16 形态亦算）+ 空桩类型名共存 → 判非空桩
+    /// （真桥产物元数据里可能同时出现 stub 符号串，故只按"无 TArch 标记且有 stub 标记"判空桩）。</summary>
+    [Fact]
+    public void BridgeDllPath_RealMarkerPresentButAlsoStubSymbol_NotStub()
+    {
+        string dll = Path.Combine(_dir, "CadAgent.TArchBridge.dll");
+        var bytes = System.Text.Encoding.Unicode.GetBytes(BridgeChannel.ExplodeReplaceCommand)
+            .Concat(System.Text.Encoding.ASCII.GetBytes("NoAcadRefsStub")).ToArray();
+        File.WriteAllBytes(dll, bytes);
+        AcadRuntime.BridgeDllOverride = dll;
+
+        Assert.Equal(dll, AcadRuntime.BridgeDllPath());
+    }
+
+    /// <summary>I3：生产可配路径——无覆盖缝时读 CADAGENT_BRIDGE_DLL（测试后还原环境变量）。</summary>
+    [Fact]
+    public void BridgeDllPath_EnvVar_HonoredWhenNoOverride()
+    {
+        string dll = Path.Combine(_dir, "deployed", "CadAgent.TArchBridge.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(dll)!);
+        WriteRealBridgeMarker(dll);
+        string? orig = Environment.GetEnvironmentVariable(AcadRuntime.BridgeDllEnvVar);
+        AcadRuntime.BridgeDllOverride = null;
+        Environment.SetEnvironmentVariable(AcadRuntime.BridgeDllEnvVar, dll);
+        try
+        {
+            Assert.Equal(dll, AcadRuntime.BridgeDllPath());
+            Assert.Equal(dll, AcadRuntime.ResolveBridgeDllPath());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AcadRuntime.BridgeDllEnvVar, orig);
+        }
+    }
+
+    /// <summary>I1/I2：预检把"缺失"翻译成 dll-missing（覆盖缝指向不存在文件，不启动任何进程）。</summary>
+    [Fact]
+    public void CheckBridgeAvailability_DllMissing_ReportsProblem()
+    {
+        AcadRuntime.BridgeDllOverride = Path.Combine(_dir, "nope", "CadAgent.TArchBridge.dll");
+
+        var b = AcadRuntime.CheckBridgeAvailability();
+
+        Assert.False(b.Available);
+        Assert.Equal("dll-missing", b.Problem);
+        Assert.Contains("CADAGENT_BRIDGE_DLL", b.Guidance);
+    }
+
+    /// <summary>I1：桥存在且非空桩但目录不在 TRUSTEDPATHS → untrusted（NETLOAD 会弹安全框）。</summary>
+    [Fact]
+    public void CheckBridgeAvailability_UntrustedDir_ReportsUntrusted()
+    {
+        string dll = Path.Combine(_dir, "bridge", "CadAgent.TArchBridge.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(dll)!);
+        WriteRealBridgeMarker(dll);
+        AcadRuntime.BridgeDllOverride = dll;
+        AcadRuntime.TrustedPathsSource = _ => @"C:\other";
+
+        var b = AcadRuntime.CheckBridgeAvailability();
+
+        Assert.False(b.Available);
+        Assert.Equal("untrusted", b.Problem);
+        Assert.Contains("TRUSTEDPATHS", b.Guidance);
+    }
+
+    /// <summary>I1 正例：桥目录（或其子目录）在 TRUSTEDPATHS → Available，且 DllPath 为解析结果。</summary>
+    [Fact]
+    public void CheckBridgeAvailability_TrustedDir_Available()
+    {
+        string dll = Path.Combine(_dir, "bridge", "CadAgent.TArchBridge.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(dll)!);
+        WriteRealBridgeMarker(dll);
+        AcadRuntime.BridgeDllOverride = dll;
+        // 条目带引号（真机实际值形态）+ 环境变量形态都要能判中。
+        AcadRuntime.TrustedPathsSource = _ => "\"C:\\nothing\";" + _dir + "\\";
+
+        var b = AcadRuntime.CheckBridgeAvailability();
+
+        Assert.True(b.Available);
+        Assert.Null(b.Problem);
+        Assert.Equal(dll, b.DllPath);
+    }
+
+    /// <summary>信任判定纯函数（I1）：条目本身/子目录/引号/环境变量；不相关目录不受信；空值不受信。</summary>
+    [Fact]
+    public void IsTrustedDirectory_EntryAndSubdirectory_QuotedAndExpanded()
+    {
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:\a", @"C:\a"));
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"C:\a", @"C:\a\b\c"));
+        Assert.True(AcadRuntime.IsTrustedDirectory(@"""C:\a;C:\z""", @"C:\z\bridge"));
+        Assert.False(AcadRuntime.IsTrustedDirectory(@"C:\aa", @"C:\a\b"));
+        Assert.False(AcadRuntime.IsTrustedDirectory("", @"C:\a"));
+        Assert.False(AcadRuntime.IsTrustedDirectory(null, @"C:\a"));
+        Assert.True(AcadRuntime.IsTrustedDirectory("%TEMP%", Path.GetTempPath()));
+    }
+
+    /// <summary>I6：桥命令永不写 .done → 命令等待（BridgeChannel.CommandWait 压到 200ms）超时响亮上抛，
+    /// 不挂到生产 120s；失败路径仍只读关闭本文档。</summary>
+    [Fact]
+    public void ReadExplodeEvidence_CommandNeverDone_ThrowsCommandTimeout()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls) { TimeoutRealRead = true };
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProcessLauncher = _ => new Process();
+        AcadAttach.ActiveObjectResolver = _ => app;
+        BridgeChannel.CommandWait = TimeSpan.FromMilliseconds(200);
+
+        using var rt = new AcadRuntime();
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ReadExplodeEvidence("16#1116.dwg"));
+
+        Assert.Contains("桥命令超时", ex.Message);
+        Assert.Contains(BridgeChannel.ReadCommand, ex.Message);
+        Assert.Contains("Close(False)", calls);
+    }
+
+    /// <summary>I6：桥回 status ok 但缺 REPLACED/VERIFY 行 → 不得空结果扮成功，逐字上抛。</summary>
+    [Fact]
+    public void ExplodeReplaceByHandle_MissingReplaceRecord_Throws()
+    {
+        PrepareBridge();
+        var calls = new List<string>();
+        var doc = new FakeBridgeDoc(calls) { OmitReplaceRecord = true };
+        var app = new FakeBridgeApp(doc);
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => app;
+
+        using var rt = new AcadRuntime();
+        rt.Open("live.dwg");
+        var ex = Assert.Throws<CadRuntimeException>(() =>
+            rt.ExplodeReplaceByHandle("21E00", Path.Combine(_dir, "out.live.dwg")));
+
+        Assert.Equal("桥未返回 REPLACED", ex.Message);
+    }
+
+    /// <summary>I6 守卫①：无打开文档 → 逐字拒绝（不触通道/不发命令）。</summary>
+    [Fact]
+    public void ExplodeReplaceByHandle_NoOpenDocument_Throws()
+    {
+        using var rt = new AcadRuntime();
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ExplodeReplaceByHandle("21E00", "x.live.dwg"));
+        Assert.Contains("无打开的图纸", ex.Message);
+    }
+
+    /// <summary>I6 守卫②：空/空白句柄 → 逐字拒绝（空句柄会让桥去炸"空句柄"实体）。</summary>
+    [Fact]
+    public void ExplodeReplaceByHandle_EmptyHexHandle_Throws()
+    {
+        using var rt = new AcadRuntime();
+        OpenFakeDocument(rt, new FakeBridgeDoc(new List<string>()));
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ExplodeReplaceByHandle(" ", "x.live.dwg"));
+        Assert.Contains("无句柄参数", ex.Message);
+    }
+
+    /// <summary>I6 守卫③：空/空白 liveout 路径 → 逐字拒绝（桥内 db.SaveAs 空路径无意义）。</summary>
+    [Fact]
+    public void ExplodeReplaceByHandle_EmptyLiveOut_Throws()
+    {
+        using var rt = new AcadRuntime();
+        OpenFakeDocument(rt, new FakeBridgeDoc(new List<string>()));
+        var ex = Assert.Throws<CadRuntimeException>(() => rt.ExplodeReplaceByHandle("21E00", " "));
+        Assert.Contains("无 liveout 参数", ex.Message);
+    }
+
+    /// <summary>以 COM 假件打开一份"活文档"（守卫用例共用的起步状态）。</summary>
+    private static void OpenFakeDocument(AcadRuntime rt, FakeBridgeDoc doc)
+    {
+        AcadRuntime.ProgIdResolver = _ => typeof(object);
+        AcadRuntime.CreateComInstance = _ => new FakeBridgeApp(doc);
+        rt.Open("live.dwg");
+    }
+
     // 公共编排前奏：桥 DLL 占位 + 固定通道目录（fake 文档经环境变量定位该目录）。
     private string PrepareBridge()
     {
         string dll = Path.Combine(_dir, "CadAgent.TArchBridge.dll");
-        File.WriteAllText(dll, "stub");
+        WriteRealBridgeMarker(dll);   // I2：占位桥必须含真桥命令标记（否则被判空桩）
         AcadRuntime.BridgeDllOverride = dll;
         string channelDir = Path.Combine(_dir, "channel");
         AcadRuntime.ChannelDirFactory = () => channelDir;
@@ -712,6 +906,10 @@ public class BridgeChannelTests : IDisposable
         public int BusyRejectionsRemaining { get; set; }
         /// <summary>NETLOAD 发送尝试次数（含被拒重试；"有界重试次数"断言用）。</summary>
         public int NetLoadAttempts { get; private set; }
+        /// <summary>正式 READ 永不写 res/.done（I6：命令等待超时分支；探针照常回 fail）。</summary>
+        public bool TimeoutRealRead { get; set; }
+        /// <summary>EXPLODE_REPLACE 只回 status ok，不写 REPLACED/VERIFY（I6：缺替换记录分支）。</summary>
+        public bool OmitReplaceRecord { get; set; }
         public string Name => "16#1116.dwg";
         public string LastRequest { get; private set; } = "";
         /// <summary>最近一次文档面系统变量读取（GetVariable）的变量名（TRUSTEDPATHS 口径观测）。</summary>
@@ -755,10 +953,15 @@ public class BridgeChannelTests : IDisposable
             if (id == null) return;
             string req = File.ReadAllText(Path.Combine(channel, "req-" + id + ".txt"));
             LastRequest = req;
+            bool probe = req.Contains("dwg\t" + BridgeChannel.ProbeDwg, StringComparison.Ordinal);
+            // I6：正式 READ 永不回写结果（探针照常回 fail——否则 EnsureLoaded 先一步判误拒）。
+            if (read && !probe && TimeoutRealRead) return;
             string body;
             if (!read)
-                body = SampleReplace(liveOut: LastLiveOut(req)).Write();
-            else if (req.Contains("dwg\t" + BridgeChannel.ProbeDwg, StringComparison.Ordinal))
+                body = OmitReplaceRecord
+                    ? "status\tok\n"                              // I6：缺 REPLACED/VERIFY
+                    : SampleReplace(liveOut: LastLiveOut(req)).Write();
+            else if (probe)
                 body = "status\tfail\nerror\tInvalidOperationException: 错图\n";
             else if (FailRealRead)
                 body = "status\tfail\nerror\tInvalidOperationException: 炸开失败\n";

@@ -14,7 +14,7 @@ namespace CadAgent.Cli.Tests;
 /// R8 —— 测试注入 RuntimeFactory 优先；否则 ResolveRuntimeName()!=acad → stderr 警示
 /// "--explode 需 CADAGENT_RUNTIME=acad"并跳过（计数全 0）；acad → 直接 CreateRuntimeInstance("acad")
 /// （不走 CreateRuntimeIfAvailable 的 GetInfo 预激活）。
-/// R9 —— 构造/读证据任何异常 → 审计 explode-read-failed(params{Error}) + stderr 降级提示，
+/// R9 —— 构造/读证据任何异常 → 审计 explode-read-failed(params{error}) + stderr 降级提示，
 /// 计数/候选保持 0/空，扫描继续到正常 stdout/审计/exit 0（理解侧诚实降级）。
 /// 顺序 —— Enrich 必须在 SemanticScanner.Scan 之后且恰一次调用全量证据（增量调用会回收他行标注）。
 /// 全用 fake runtime（绝不起真厂商进程）；静态 seam/环境变量用完即还原（本程序集已禁并行）。
@@ -258,7 +258,7 @@ public class SemanticScanExplodeTests : IDisposable
         }
     }
 
-    /// <summary>R9：RuntimeFactory 抛 → exit 0 + stderr 降级提示 + 审计 explode-read-failed(Error)
+    /// <summary>R9：RuntimeFactory 抛 → exit 0 + stderr 降级提示 + 审计 explode-read-failed(error)
     /// + 五键 0/空 + 无证据行/无 NativeExplode 标注（理解侧诚实降级）。</summary>
     [Fact]
     public void ScanExplode_RuntimeFactoryThrows_AuditsExplodeReadFailed_ExitZero()
@@ -277,7 +277,7 @@ public class SemanticScanExplodeTests : IDisposable
             var rec = SingleExplodeReadFailed();
             Assert.NotNull(rec);
             using (var p = JsonDocument.Parse(rec!.Entry.ParamsJson))
-                Assert.Contains("fake 构造失败（激活异常）", p.RootElement.GetProperty("Error").GetString());
+                Assert.Contains("fake 构造失败（激活异常）", p.RootElement.GetProperty("error").GetString());   // M5：审计键统一小写
 
             var overlay = SemanticOverlay.Load(OverlayPath);
             Assert.Empty(overlay.ExplodeEvidence);

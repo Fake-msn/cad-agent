@@ -63,9 +63,11 @@ public sealed class SemanticOverlay
     }
 
     // 切片B：按句柄覆盖（同句柄再取证时整条替换，ReadAt/基元/XData 随之更新）。
+    // M6（复审修复波）：句柄比较 OrdinalIgnoreCase——句柄是 hex 标识（AutoCAD 原样大写，
+    // 计划/手写来源可能小写），大小写不同即同一实体；Ordinal 曾把 "21e00" 与 "21E00" 存成两行。
     public void UpsertExplode(ExplodeEvidence e)
     {
-        int i = ExplodeEvidence.FindIndex(x => x.Handle == e.Handle);
+        int i = ExplodeEvidence.FindIndex(x => string.Equals(x.Handle, e.Handle, StringComparison.OrdinalIgnoreCase));
         if (i >= 0) ExplodeEvidence[i] = e; else ExplodeEvidence.Add(e);
     }
 
