@@ -86,6 +86,19 @@ public class CanvasCenterlineTests
         Assert.Null(vm.SelectedIndex);
     }
 
+    [Fact]
+    public void HitTest_OnCenterlineOverlayMidpoint_ReturnsNoEntity()
+    {
+        // 真实图元在 y=10，中心线叠加在 y=5：叠加中点不得命中任何图元（只读叠加不参与命中）。
+        var vm = new CanvasViewModel(new[] { Line(0, 10, 10, 10, "A1") });
+        vm.Fit((0, 0, 10, 10), 800, 600);
+        vm.SetCenterlines(new[] { new CenterlineSeg("A1", 0, 5, 10, 5) });
+        vm.ShowCenterlines = true;
+
+        Assert.Equal(0, vm.HitTest(5, 10, 0.2)); // 对照：真实图元命中
+        Assert.Null(vm.HitTest(5, 5, 0.2)); // 中心线叠加中点 → 无命中
+    }
+
     [AvaloniaFact]
     public void Canvas_RendersDashedCenterlineOverlay_WhenShown()
     {

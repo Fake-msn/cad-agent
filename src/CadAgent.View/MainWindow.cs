@@ -84,7 +84,10 @@ namespace CadAgent.View;
 /// 天读证据（只读）：左栏第五 tab——DeepReadViewModel 从 .cadagent/semantic.json
 /// 重建五区（原生参数/炸开证据/符号候选/块定义/证据状态）+ 中心线叠加开关
 /// （Canvas.ShowCenterlines，有中心线才可勾选）；a/b/e 区行点击 → Canvas.SelectByHandle
-/// 定位。刷新=初始 / 语义扫描·映射完成（SemanticChanged）/ 编辑后 RefreshAfterEdit；
+/// 定位；未命中（TDb 实体仅存在于深读证据）→ 清画布选中/高亮 + 状态栏提示
+/// （下一次成功定位/选中接管清除）。块定义区来源哈希不一致 → 行内明示"图纸可能
+/// 已编辑或来自他图"（tooltip 同口径），哈希缺失 → "—"（不猜）。
+/// 刷新=初始 / 语义扫描·映射完成（SemanticChanged）/ 编辑后 RefreshAfterEdit；
 /// 面板只读（不写审计、不落盘），overlay 损坏 → 行内错误 + 五区清空。
 /// </summary>
 public sealed class MainWindow : Window
@@ -179,6 +182,13 @@ public sealed class MainWindow : Window
     /// <summary>§4.1④ 零勾选兜底状态栏提示（镜像 _editWarning 机制：OnCanvasInvalidated
     /// 拼接待显文本；checked 路径/新填充动作清除，避免陈旧提示误导）。</summary>
     private string _fillIntentNote = "";
+
+    /// <summary>行点击定位失败提示文案：句柄只存在于深读证据（TDb 实体不在渲染图元）。</summary>
+    internal const string LocateMissNote = "该句柄不在当前渲染图元中（TDb 实体仅存在于深读证据）";
+
+    /// <summary>天读证据行点击定位失败提示（镜像 _editWarning 机制：OnCanvasInvalidated
+    /// 拼接到状态栏尾部；下一次成功定位/选中态接管时清除，避免陈旧提示误导）。</summary>
+    private string _deepReadLocateNote = "";
 
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null,
         PlanPreviewViewModel? planPreview = null)
@@ -898,10 +908,11 @@ public sealed class MainWindow : Window
             + (r.FailReasonsSummary is null ? "" : $"{Environment.NewLine}{r.FailReasonsSummary}"));
         ListBox symbolList = DeepReadSection<SymbolCandidateRow>(deepRead.SymbolRows, r =>
             $"{r.Handle} · {r.BlockName} · {r.Kind} · {r.ClassHint}");
-        ListBox blockDefList = DeepReadSection<BlockDefRow>(deepRead.BlockDefRows, r =>
-            $"{r.BlockName} · {r.RxClass} · {r.Count}"
-            + $" · {r.IsCurrentDrawing switch { true => "本图", false => "异图", null => "—" }}"
-            + (r.DrawingHash is null ? "" : $" · {r.DrawingHash}"));
+        ListBox blockDefList = DeepReadSection<BlockDefRow>(deepRead.BlockDefRows,
+            FormatBlockDefRow,
+            r => r.IsCurrentDrawing == false
+                ? "来源哈希不一致（图纸可能已编辑或来自他图）：块定义计数不得与当前图纸混读"
+                : null);
         ListBox evidenceList = DeepReadSection<EvidenceStateRow>(deepRead.EvidenceRows, r =>
             $"{r.Handle} · 参数 {r.ParamsState} · 炸开 {r.ExplodeState}{Environment.NewLine}{r.Advisory}");
         DeepReadNativeList = nativeList;
@@ -913,15 +924,15 @@ public sealed class MainWindow : Window
         // 行点击 → 画布按句柄定位（a/b/e 区有句柄；块定义区无句柄不接）。
         nativeList.SelectionChanged += (_, _) =>
         {
-            if (nativeList.SelectedItem is NativeParamRow row) Canvas?.SelectByHandle(row.Handle);
+            if (nativeList.SelectedItem is NativeParamRow row) LocateDeepReadHandle(row.Handle);
         };
         explodeList.SelectionChanged += (_, _) =>
         {
-            if (explodeList.SelectedItem is ExplodeRow row) Canvas?.SelectByHandle(row.Handle);
+            if (explodeList.SelectedItem is ExplodeRow row) LocateDeepReadHandle(row.Handle);
         };
         evidenceList.SelectionChanged += (_, _) =>
         {
-            if (evidenceList.SelectedItem is EvidenceStateRow row) Canvas?.SelectByHandle(row.Handle);
+            if (evidenceList.SelectedItem is EvidenceStateRow row) LocateDeepReadHandle(row.Handle);
         };
 
         _deepReadSectionHeaders[0] = DeepReadSectionHeader("原生参数");
@@ -1402,6 +1413,8 @@ public sealed class MainWindow : Window
         if (Status is not null)
         {
             RenderItem? selected = Canvas!.SelectedItem;
+            // 天读证据定位失败提示：任一选中态接管（成功定位/画布点击选择）即清除。
+            if (selected is not null) _deepReadLocateNote = "";
             // T10 状态栏收尾：图纸名/实体计数（_baseStatus）+ 缩放 + 选择 + 审计摘要。
             // T5：幅面名（当前选中幅面）。
             string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}";
@@ -1415,6 +1428,8 @@ public sealed class MainWindow : Window
             if (_editWarning.Length > 0) status += $" | {_editWarning}";
             // §4.1④：零勾选兜底填充提示（checked 路径/新填充动作清除）。
             if (_fillIntentNote.Length > 0) status += $" | {_fillIntentNote}";
+            // 天读证据：行点击定位失败提示（下一次成功定位/选中接管时清除）。
+            if (_deepReadLocateNote.Length > 0) status += $" | {_deepReadLocateNote}";
             Status.Text = status;
         }
         if (LayerList is not null)
@@ -1698,6 +1713,43 @@ public sealed class MainWindow : Window
         DeepReadError.IsVisible = message is not null;
     }
 
+    /// <summary>
+    /// 天读证据行点击定位：命中 → 清定位失败提示；未命中（句柄只存在于深读证据——
+    /// TDb 实体不在当前渲染图元）→ 清画布选中/定位高亮（Select(null)，无独立
+    /// deselect API）+ 状态栏提示。提示在下一次成功定位或画布选中接管时清除
+    /// （OnCanvasInvalidated），避免陈旧提示误导。
+    /// </summary>
+    private void LocateDeepReadHandle(string handle)
+    {
+        if (Canvas is null) return;
+        if (Canvas.SelectByHandle(handle))
+        {
+            SetDeepReadLocateNote("");
+            return;
+        }
+        Canvas.Select(null);
+        SetDeepReadLocateNote(LocateMissNote);
+    }
+
+    /// <summary>天读证据定位失败提示入状态栏（空串=清除）。</summary>
+    private void SetDeepReadLocateNote(string note)
+    {
+        _deepReadLocateNote = note;
+        Canvas?.Invalidate();
+    }
+
+    /// <summary>块定义行文本：来源哈希比对——true="本图"；false=来源哈希不一致
+    /// （图纸可能已编辑或来自他图，计数不得混读）；null=不可比（"—"，不猜）。</summary>
+    internal static string FormatBlockDefRow(BlockDefRow r) =>
+        $"{r.BlockName} · {r.RxClass} · {r.Count}"
+        + $" · {r.IsCurrentDrawing switch
+        {
+            true => "本图",
+            false => "来源哈希不一致（图纸可能已编辑或来自他图）",
+            null => "—"
+        }}"
+        + (r.DrawingHash is null ? "" : $" · {r.DrawingHash}");
+
     /// <summary>天读证据：当前图纸哈希（块定义来源比对）；不可得 → null（不猜来源）。</summary>
     private static string? SafeDrawingHash(MainViewModel vm)
     {
@@ -1705,18 +1757,26 @@ public sealed class MainWindow : Window
         catch (Exception) { return null; } // 只读面板：哈希不可得不阻断面板
     }
 
-    /// <summary>天读证据区列表：ItemsSource=区集合，行模板=单 TextBlock（换行自适应）。</summary>
-    private static ListBox DeepReadSection<T>(System.Collections.IEnumerable rows, Func<T, string> text)
+    /// <summary>天读证据区列表：ItemsSource=区集合，行模板=单 TextBlock（换行自适应）；
+    /// tooltip 可选（块定义来源哈希不一致提示）。</summary>
+    private static ListBox DeepReadSection<T>(System.Collections.IEnumerable rows, Func<T, string> text,
+        Func<T, string?>? tooltip = null)
         where T : class => new()
     {
         ItemsSource = rows,
         Height = 110,
-        ItemTemplate = new FuncDataTemplate<T>((row, _) => row is null ? new Control() : new TextBlock
+        ItemTemplate = new FuncDataTemplate<T>((row, _) =>
         {
-            Text = text(row),
-            FontSize = 11,
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(4, 2)
+            if (row is null) return new Control();
+            var block = new TextBlock
+            {
+                Text = text(row),
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(4, 2)
+            };
+            if (tooltip is not null) ToolTip.SetTip(block, tooltip(row));
+            return block;
         })
     };
 
