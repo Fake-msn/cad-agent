@@ -19,6 +19,7 @@ public class AcadDialogDismissTests : IDisposable
     private readonly Action<IntPtr> _origClose = AcadWindows.CloseWindow;
     private readonly Func<string, Process?> _origLauncher = AcadRuntime.ProcessLauncher;
     private readonly Func<string, object?> _origActive = AcadAttach.ActiveObjectResolver;
+    private readonly Func<string, int, object?> _origRot = AcadAttach.RotAttachByPid;
     private readonly Func<string[]> _origNames = VendorGuard.ProcessNames;
     private readonly int _origAttempts = AcadRuntime.StartupRetryAttempts;
     private readonly TimeSpan _origDelay = AcadRuntime.StartupRetryDelay;
@@ -40,6 +41,7 @@ public class AcadDialogDismissTests : IDisposable
         AcadWindows.CloseWindow = _origClose;
         AcadRuntime.ProcessLauncher = _origLauncher;
         AcadAttach.ActiveObjectResolver = _origActive;
+        AcadAttach.RotAttachByPid = _origRot;
         VendorGuard.ProcessNames = _origNames;
         AcadRuntime.StartupRetryAttempts = _origAttempts;
         AcadRuntime.StartupRetryDelay = _origDelay;
@@ -133,9 +135,17 @@ public class AcadDialogDismissTests : IDisposable
     public void EnsureAppTArch_Gate1_RunsDismissalLoopAgainstOwnProcessOnly()
     {
         // 真进程句柄（本测试宿主）以取得有效 PID；不上抛 acad.exe、不触真实窗口（缝全段注入）。
+        // fix/acad-rot-pid-filter：宿主 PID 可判定 → EnsureAppTArch 走"按 PID 过滤"附着通道，
+        // 故此处注入 ROT 过滤缝（真 ROT 里没有本宿主 PID 的 AutoCAD 实例，不得触真 COM/真轮询）。
         using var host = Process.GetCurrentProcess();
         AcadRuntime.ProcessLauncher = _ => host;
-        AcadAttach.ActiveObjectResolver = _ => new ReadyGateApp();
+        var attachedPids = new List<int>();
+        AcadAttach.RotAttachByPid = (_, pid) =>
+        {
+            attachedPids.Add(pid);
+            return pid == host.Id ? new ReadyGateApp() : null;
+        };
+        AcadAttach.ActiveObjectResolver = _ => throw new InvalidOperationException("PID 可判定时不得走 GetActiveObject");
         var observedPids = new List<int>();
         AcadWindows.WindowTitlesOfProcess = pid => { observedPids.Add(pid); return Array.Empty<string>(); };
         AcadWindows.WindowsOfProcess = _ => Array.Empty<AcadWindows.TopLevelWindow>();
@@ -144,6 +154,7 @@ public class AcadDialogDismissTests : IDisposable
         var app = (object)rt.EnsureAppTArch("TElec20V5");
 
         Assert.IsType<ReadyGateApp>(app);
+        Assert.Equal(new[] { host.Id }, attachedPids);        // 附着按本方 PID 过滤
         Assert.NotEmpty(observedPids);                       // 关窗节拍确实跑过（首发同步调用）
         Assert.All(observedPids, pid => Assert.Equal(host.Id, pid));   // 只针对本方启动的 PID
 

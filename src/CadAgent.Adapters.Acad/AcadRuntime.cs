@@ -70,6 +70,11 @@ public sealed class AcadRuntime : ICadRuntime
     internal static Func<string, Process?> ProcessLauncher = profileName =>
         Process.Start(BuildStartInfo(profileName, AcadExecutableResolver() ?? DefaultAcadExecutableName));
 
+    // 本方启动进程 PID 读取缝（fix/acad-rot-pid-filter）：ROT 按 PID 过滤附着需要本方 PID。
+    // 默认 SafeProcessId（未 Start/已退出句柄→0）；单测注入固定 PID 以驱动"PID 可判定"路径
+    // （fake Process 拿不到真实 PID，不得为测此路径去 Start 真进程）。
+    internal static Func<Process, int> ProcessIdReader = p => SafeProcessId(p);
+
     // /p 启动参数构造（纯函数，单测钉住 FileName/Arguments/UseShellExecute，不拉起进程）。
     internal static ProcessStartInfo BuildStartInfo(string profileName, string executable) =>
         new ProcessStartInfo
@@ -302,9 +307,13 @@ public sealed class AcadRuntime : ICadRuntime
     // ---- 切片A §4.1：天正 profile 感知启动（/p 启动 + ROT 附着 + Gate1）----
     // 与既有 EnsureApp（普通 COM 激活→默认 profile，无 TArch）互斥：_app 已存在即复用，
     // 不得再拉起第二实例（双实例共享用户 profile 会竞态损坏 CUIX，VendorGuard 语义）。
-    // 流程：守卫→/p "profileName" 启动 acad.exe→ROT 附着（AcadAttach）→归属校验→Gate1 就绪等待。
-    // 归属校验（复审 finding 4）：ROT AttachOnly 取的是"当前注册的活动实例"——若用户同时
-    // 开了 AutoCAD，可能附着到他方实例；此时后续 Cleanup/Dispose 的 Quit 会误杀外人实例并
+    // 流程：守卫→/p "profileName" 启动 acad.exe→**按本方 PID 过滤** ROT 附着（AcadAttach.AttachByPid）
+    // →归属校验→Gate1 就绪等待。PID 不可判定（fake/未启动进程）时回退既有 AttachOnly（GetActiveObject）。
+    // fix/acad-rot-pid-filter（真机实证 3/4 全量失败）：类间交接时前一真机类刚 Quit 的实例注册可能
+    // 仍在 ROT——AttachOnly 取"当前活动对象"会附着到他方/已退出实例，造成"ROT 附着实例非本方启动
+    // （归属校验失败）"伪失败。故本方 PID 可判定时只认"窗口 PID==本方 PID 且进程存活"的实例；
+    // 归属校验与有界重试保留为**纵深防御**（注册时序/窗口归属仍在启动期，理论上应恒通过）。
+    // 归属校验（复审 finding 4）：若仍附着到他方实例，后续 Cleanup/Dispose 的 Quit 会误杀外人实例并
     // 留下本方孤儿进程。故附着后比对实例 HWND 与本方进程主窗句柄，不符→只清本方进程、
     // 置空 _app 并响亮拒绝（绝不 Quit 附着实例）。
     // 失败路径不残留进程（spec §5）：经 CleanupTArchFailure 优雅 Quit / 兜底 Kill 本方进程。
@@ -339,9 +348,9 @@ public sealed class AcadRuntime : ICadRuntime
                 throw new CadRuntimeException("天正实例启动失败");
             _launchedProc = proc;
             // 关窗节拍须在 ROT 附着之前起：模态框会挡住 COM 调用（Gate1/附着均被拒）。
-            processId = SafeProcessId(proc);
+            processId = ProcessIdReader(proc);
             dismissal = StartInformationalDialogDismissal(processId);
-            _app = AttachWithOwnershipRetry(proc);
+            _app = AttachWithOwnershipRetry(proc, processId);
             WaitTArchGate1();
             return _app;
         }
@@ -376,13 +385,17 @@ public sealed class AcadRuntime : ICadRuntime
     // 单次等待上界（规格 Thread.Sleep(1000)；剩余窗口不足时只睡剩余量，保证总时长有界）。
     private static readonly TimeSpan OwnershipRetryDelay = TimeSpan.FromSeconds(1);
 
-    private dynamic AttachWithOwnershipRetry(Process proc)
+    private dynamic AttachWithOwnershipRetry(Process proc, int processId)
     {
         TimeSpan window = OwnershipRetryWindowOverride ?? OwnershipRetryWindow;
         var sw = Stopwatch.StartNew();
         while (true)
         {
-            dynamic app = AcadAttach.AttachOnly(Profile.ProgId);
+            // PID 可判定→按本方 PID 过滤的 ROT 附着（不会被交接残留的他方/已退出实例截胡）；
+            // PID 不可判定（fake/未启动进程、真机 PID 读取失败）→ 回退既有 GetActiveObject 口径。
+            dynamic app = processId != 0
+                ? AcadAttach.AttachByPid(Profile.ProgId, processId)
+                : AcadAttach.AttachOnly(Profile.ProgId);
             if (OwnershipMatches(app, proc)) return app;
             // 归属不符：只清本方缓存引用（我方尚未把 app 赋给 _app）；绝不 Quit/触碰他方实例。
             _app = null;
