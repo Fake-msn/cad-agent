@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using CadAgent.Core;
 using CadAgent.Core.Cad;
+using CadAgent.TArchBridge.Protocol;
 
 namespace CadAgent.Adapters.Acad;
 
@@ -36,6 +38,10 @@ public sealed class AcadRuntime : ICadRuntime
     // AutoCAD 块名大小写不敏感（与 insert-symbol 符号匹配同口径 OrdinalIgnoreCase）；
     // Open 换文档即清空：跨文档同名块不属于本文档会话的"本方残留"。
     private readonly HashSet<string> _createdBlocks = new(StringComparer.OrdinalIgnoreCase);
+
+    // 切片B：NETLOAD 只对本实例的 AutoCAD 进程有效——成功加载后同实例后续桥操作跳过 NETLOAD；
+    // 实例被 Quit/重启（Restart/失败清理）时复位（新进程未加载桥）。
+    private bool _bridgeLoaded;
 
     internal static Func<string, Type?> ProgIdResolver = Type.GetTypeFromProgID;
     internal static Func<Type, object?> CreateComInstance = t => Activator.CreateInstance(t);
@@ -337,6 +343,7 @@ public sealed class AcadRuntime : ICadRuntime
         _app = null;
         _doc = null;
         _launchedProc = null; // 失败清理后下次 EnsureAppTArch 须真正重启（不残留失效句柄）
+        _bridgeLoaded = false; // 进程级 NETLOAD 注册随实例销毁失效（新进程须重装）
         bool quit;
         if (app != null)
         {
@@ -488,6 +495,7 @@ public sealed class AcadRuntime : ICadRuntime
         _doc = null;
         try { RetryBusy(() => { _app?.Quit(); }); } catch (Exception ex) when (!IsBusyRejection(ex)) { /* 崩溃后 Quit 可能失败，忽略 */ }
         _app = null;
+        _bridgeLoaded = false;   // Quit 后新实例未 NETLOAD：桥注册随进程销毁
     });
 
     private dynamic ModelSpace()
@@ -904,6 +912,352 @@ public sealed class AcadRuntime : ICadRuntime
         try { return RetryBusy(() => (int)ModelSpace().Count); }
         catch (Exception ex) when (ex is not CadRuntimeException)
         { throw new CadRuntimeException($"EntityCount 失败: {ex.Message}", ex); }
+    });
+
+    // ---- 切片B §3/§4：深度炸开桥通道（Task 5）----
+    // 编排：建通道目录并注入环境变量（须先于 /p 启动，桥进程经继承读取）→ EnsureAppTArch(/p)
+    // → Open(ReadOnly) → NETLOAD+探针（看门狗）→ 写请求 → SendCommand → 轮询 .done（120s）
+    // → 解析 TSV → DTO→Core 映射 → Close(false) → 清通道。
+    // 桥内不做任何裁决：解析失败/status fail 一律响亮上抛（绝不空结果扮成功）。
+    private const int BridgeReadMaxDepth = 4;
+
+    // 桥程序集名（与桥工程输出名一致）；默认位于宿主 AppContext.BaseDirectory。
+    internal const string BridgeDllName = "CadAgent.TArchBridge.dll";
+
+    // 桥目录注入缝（测试指向现成占位文件；真机=部署目录）。
+    internal static string? BridgeDllOverride;
+
+    // 看门狗常量（spec §5）：NETLOAD 总上限 3600s；20s 无进展指引；命令等待 120s。
+    internal static TimeSpan NetLoadTimeout = TimeSpan.FromHours(1);
+    internal static TimeSpan NetLoadNoProgressThreshold = TimeSpan.FromSeconds(20);
+    internal static TimeSpan BridgeCommandTimeout = TimeSpan.FromSeconds(120);
+
+    // 20s 无进展指引回调（CLI 注入打印；null=不打印）。只回调一次，文案由 BridgeChannel 给出。
+    internal static Action<string>? NetLoadSlowGuidance;
+
+    // 安全框检出缝（默认 user32 枚举；测试注入 fake——单元测试不得触真机窗口）。
+    internal static Func<int, bool> SecurityDialogDetector = AcadWindows.HasSecurityDialog;
+
+    // 通道目录创建缝（默认系统临时目录下的唯一新目录；测试注入固定目录以驱动 fake 桥）。
+    internal static Func<string> ChannelDirFactory = () =>
+        Path.Combine(Path.GetTempPath(), "cadagent-bridge-" + Guid.NewGuid().ToString("N"));
+
+    // 桥进程读取的通道目录环境变量（spec §2：/p 启动时注入，子进程继承）。
+    internal const string BridgeChannelEnvVar = "CADAGENT_TARCH_CHANNEL";
+
+    /// <summary>桥 DLL 全路径；未构建（或测试缝缺失）→ 明确"桥未构建"（先于 NETLOAD，spec §5）。</summary>
+    internal static string BridgeDllPath()
+    {
+        if (!string.IsNullOrWhiteSpace(BridgeDllOverride)) return BridgeDllOverride!;
+        string dll = Path.Combine(AppContext.BaseDirectory, BridgeDllName);
+        if (!File.Exists(dll))
+            throw new CadRuntimeException("桥未构建（需 AutoCAD 19.1 引用）：" + BridgeDllName);
+        return dll;
+    }
+
+    /// <summary>TRUSTEDPATHS 现值（TRUSTEDPATHS 预检=信息性；真机测试据此决定 Skip/运行）。</summary>
+    internal string GetTrustedPaths() => Run(() =>
+    {
+        try { return (string)EnsureApp().GetSystemVariable("TRUSTEDPATHS"); }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"读取 TRUSTEDPATHS 失败: {ex.Message}", ex); }
+    });
+
+    /// <summary>
+    /// 桥注入缝（R6）：静态 SendCommand 在每次公开入口赋值——委托捕获本实例文档。
+    /// SendCommand 返回 void（ActiveX 口径），故回显恒空串；"是否注册"由探针握手判定
+    /// （BridgeChannel.EnsureLoaded），不依赖回显文本（Ruling R3 修订）。
+    /// </summary>
+    private void InstallBridgeSendCommand()
+    {
+        BridgeChannel.SendCommand = (cmd, _) =>
+        {
+            _doc!.SendCommand(cmd + "\n");
+            return "";
+        };
+    }
+
+    // 看门狗回调：进展=NETLOAD 已返回（netload.sent）/安全框检出/通道出现结果文件。
+    // 返回后的首轮必然因 sent 标记放行（同步 SendCommand 语义）；3600s 上限由 BridgeChannel 施加。
+    private Func<TimeSpan, bool> BridgeNetLoadWatchdog(string channelDir)
+    {
+        int pid;
+        try { pid = _launchedProc?.Id ?? 0; } catch { pid = 0; }
+        return _ =>
+        {
+            if (BridgeChannel.NetLoadSent(channelDir)) return true;
+            bool dialog;
+            try { dialog = SecurityDialogDetector(pid); } catch { dialog = false; }
+            return dialog || BridgeChannel.AnyDone(channelDir);
+        };
+    }
+
+    // NETLOAD+探针（同实例仅一次；成功后 _bridgeLoaded 置位）。
+    private void EnsureBridgeLoaded(string channelDir)
+    {
+        if (_bridgeLoaded) return;
+        BridgeChannel.EnsureLoaded(
+            BridgeDllPath(), channelDir, BridgeNetLoadWatchdog(channelDir),
+            NetLoadTimeout, NetLoadNoProgressThreshold, NetLoadSlowGuidance);
+        _bridgeLoaded = true;
+    }
+
+    // 桥结果 → Core 证据列表（纯映射：无 COM、无文件 IO，可单测）。
+    // 口径：PrimitiveCount=该句柄 PRIM 行数（PRIM-TRUNCATED 截断标记不计）；
+    //       NestedTdbCount=该句柄"递归超深/非实体产物"失败行数（桥不输出残留 TDb 行，
+    //       这两类失败即"炸不动的残留"上界；其余失败为 extents/xdata/explode 类，不计残留）；
+    //       CenterlineJson 由宿主推导（TarchDerive，Task 6）——此处恒 null；
+    //       XData：1001 行=天正键名（探针实证 HYDRANT_RADIUS），随后各值行归入该键。
+    internal static IReadOnlyList<ExplodeEvidence> MapExplodeEvidence(BridgeResult result)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var list = new List<ExplodeEvidence>(result.Evidence.Count);
+        foreach (var e in result.Evidence)
+        {
+            var prims = new List<ExplodePrimitive>();
+            foreach (var p in result.Prims)
+            {
+                if (!HandleEquals(p.Handle, e.Handle)) continue;
+                if (string.Equals(p.RxClass, "PRIM-TRUNCATED", StringComparison.Ordinal)) continue;
+                prims.Add(MapPrimitive(p, result.Blocks));
+            }
+            list.Add(new ExplodeEvidence(
+                e.Handle, e.RxClass, e.WrapperType, e.Layer, e.Bbox, e.FullyExplodable,
+                prims.Count, CountResidualTdb(result.Fails, e.Handle),
+                prims, MapXData(result.XData, e.Handle), null, now));
+        }
+        return list;
+    }
+
+    // 单基元映射：Kind 按 RxClass 家族；Points 尽力解析（取不到→空数组，诚实降级）；
+    // Text/BlockName 取 token 或 BLOCK 行（桥对 AcDbBlockReference 只给 extents token，
+    // 块名与插入点来自 BLOCK 记录）。
+    internal static ExplodePrimitive MapPrimitive(PrimDto prim, IReadOnlyList<BlockDto> blocks)
+    {
+        var points = new List<double>();
+        string? text = null;
+        string? blockName = null;
+        foreach (string token in prim.GeomTokens)
+        {
+            int eq = token.IndexOf('=');
+            if (eq <= 0)
+            {
+                // 无键 token：多边形顶点等裸坐标（"x,y,z"）；解析失败即忽略（best-effort）。
+                if (TryParsePoint(token) is double[] bare) points.AddRange(bare);
+                continue;
+            }
+            string key = token.Substring(0, eq);
+            string value = token.Substring(eq + 1);
+            switch (key)
+            {
+                case "start":
+                case "end":
+                case "center":
+                case "pos":
+                case "loc":
+                    if (TryParsePoint(value) is double[] pt) points.AddRange(pt);
+                    break;
+                case "text":
+                case "mtext":
+                    text = value;
+                    break;
+                case "block":
+                    blockName = value;
+                    break;
+                default:
+                    // r=/ang=/verts=/extents=/geom=? 无对应 Core 字段（或组合串）：忽略。
+                    break;
+            }
+        }
+        if (blockName == null)
+        {
+            foreach (var b in blocks)
+            {
+                if (!HandleEquals(b.Handle, prim.Handle)) continue;
+                blockName = b.Name;
+                if (points.Count == 0) points.AddRange(b.Position);
+                break;
+            }
+        }
+        return new ExplodePrimitive(PrimitiveKind(prim.RxClass), points.ToArray(), text, blockName);
+    }
+
+    // RxClass→Core Kind（小写家族名；AcDb 前缀可省）。折叠与 3D 多边形统一为 polyline。
+    internal static string PrimitiveKind(string rxClass)
+    {
+        string family = rxClass.StartsWith("AcDb", StringComparison.OrdinalIgnoreCase)
+            ? rxClass.Substring(4)
+            : rxClass;
+        switch (family.ToLowerInvariant())
+        {
+            case "line": return "line";
+            case "arc": return "arc";
+            case "circle": return "circle";
+            case "text": return "text";
+            case "mtext": return "mtext";
+            case "polyline":
+            case "lwpolyline":
+            case "2dpolyline":
+            case "3dpolyline":
+                return "polyline";
+            case "hatch": return "hatch";
+            case "blockreference": return "block";
+            default:
+                return family.IndexOf("polyline", StringComparison.OrdinalIgnoreCase) >= 0
+                    ? "polyline"
+                    : "other";
+        }
+    }
+
+    // XData 映射：1001（注册应用名，天正用作键名）开启键；之后的值行归入当前键（同键多值取首个，
+    // 保证 KEY→单值 契约确定）；无键名先行值行→以类型码为键（不丢证据）；只有键名无值→空串留痕。
+    internal static IReadOnlyDictionary<string, string> MapXData(IReadOnlyList<XDataDto> rows, string handle)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+        var keyOnly = new List<string>();
+        string? key = null;
+        foreach (var x in rows)
+        {
+            if (!HandleEquals(x.Handle, handle)) continue;
+            if (x.TypeCode == 1001)
+            {
+                key = x.Value;
+                if (!keyOnly.Contains(key)) keyOnly.Add(key);
+                continue;
+            }
+            string k = key ?? x.TypeCode.ToString(CultureInfo.InvariantCulture);
+            if (!dict.ContainsKey(k)) dict[k] = x.Value;
+        }
+        foreach (string k in keyOnly)
+            if (!dict.ContainsKey(k)) dict[k] = "";
+        return dict;
+    }
+
+    // 残留 TDb 上界（见 MapExplodeEvidence 注释）：递归超深/非实体产物失败行。
+    internal static int CountResidualTdb(IReadOnlyList<FailDto> fails, string handle)
+    {
+        int n = 0;
+        foreach (var f in fails)
+        {
+            if (!HandleEquals(f.Handle, handle)) continue;
+            if (f.Reason.StartsWith("递归超深", StringComparison.Ordinal)
+                || f.Reason.StartsWith("非实体产物", StringComparison.Ordinal))
+                n++;
+        }
+        return n;
+    }
+
+    private static bool HandleEquals(string? a, string? b) =>
+        string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    // "x,y,z"（0.### 不变文化）→ double[3]；非 3 元/非数值→null。
+    private static double[]? TryParsePoint(string value)
+    {
+        string[] parts = value.Split(',');
+        if (parts.Length != 3) return null;
+        var pt = new double[3];
+        for (int i = 0; i < 3; i++)
+        {
+            if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out pt[i]))
+                return null;
+        }
+        return pt;
+    }
+
+    /// <summary>
+    /// 深度炸开取证（spec 切片B §3/§4.1）：自启天正实例→只读开图→桥 READ→映射。
+    /// 与 ReadNativeParams(path) 同守卫：已有打开文档时响亮拒绝（不得覆盖 _doc 锚点）。
+    /// 注意：通道目录经环境变量 <see cref="BridgeChannelEnvVar"/> 于 /p 启动时注入，桥进程
+    /// 继承读取——若本实例此前已由别的路径（如切片A 读参，未注入通道）启动，桥进程无此
+    /// 环境变量，探针会超时并按"NETLOAD 被拒绝"归因；需 Restart（重新 /p 启动）后再读。
+    /// </summary>
+    public IReadOnlyList<ExplodeEvidence> ReadExplodeEvidence(string drawingPath) =>
+        Run<IReadOnlyList<ExplodeEvidence>>(() =>
+        {
+            if (drawingPath == null) throw new CadRuntimeException("无打开的图纸参数");
+            if (_doc != null)
+                throw new CadRuntimeException("已有打开的图纸；ReadExplodeEvidence(path) 须在无打开文档时调用");
+
+            // 通道目录须先于 /p 启动确定：桥进程经继承的环境变量读取同一目录（启动后设置无效）。
+            string channel = ChannelDirFactory();
+            Directory.CreateDirectory(channel);
+            string? previousChannel = Environment.GetEnvironmentVariable(BridgeChannelEnvVar);
+            Environment.SetEnvironmentVariable(BridgeChannelEnvVar, channel);
+            try
+            {
+                var app = EnsureAppTArch(TArchProfileName);   // /p 启动+ROT 附着+归属校验+Gate1
+                try
+                {
+                    _doc = RetryBusy<object?>(() => app.Documents.Open(drawingPath, true));
+                    _createdBlocks.Clear();                  // 换文档即失效本方创建块名集合
+                    InstallBridgeSendCommand();
+                    EnsureBridgeLoaded(channel);
+                    string id = BridgeChannel.WriteRequest(channel,
+                        new BridgeRequest("read", Path.GetFileName(drawingPath), null, BridgeReadMaxDepth, null).Write());
+                    BridgeChannel.SendCommand(BridgeChannel.ReadCommand, "cmd");
+                    string? text = BridgeChannel.WaitDone(channel, id, BridgeCommandTimeout);
+                    if (text == null)
+                        throw new CadRuntimeException(
+                            $"桥命令超时（{(int)BridgeCommandTimeout.TotalSeconds}s）：{BridgeChannel.ReadCommand}");
+                    var result = BridgeResult.Parse(text);
+                    if (!string.Equals(result.Status, "ok", StringComparison.Ordinal))
+                        throw new CadRuntimeException("桥失败: " + (result.Error ?? result.Status));
+                    var list = MapExplodeEvidence(result);
+                    CloseTArchDoc();                         // 读完即关（失败响亮上抛）
+                    return list;
+                }
+                catch (Exception ex) when (ex is not CadRuntimeException)
+                {
+                    // 解析失败（FormatException）/COM 读失败等一律按运行时契约包装上抛。
+                    CloseTArchDocBestEffort();
+                    throw new CadRuntimeException($"深度炸开读取失败: {ex.Message}", ex);
+                }
+                catch
+                {
+                    // 失败路径仅关本方本次开启的文档（best-effort），不掩盖读根因。
+                    CloseTArchDocBestEffort();
+                    throw;
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(BridgeChannelEnvVar, previousChannel);
+                BridgeChannel.Cleanup(channel);
+            }
+        });
+
+    /// <summary>
+    /// 句柄级炸开替换（spec 切片B §4.2）：在当前已开文档内执行桥 EXPLODE_REPLACE，
+    /// 桥内单事务校验+替换+另存 liveOut；宿主只做编排与结果映射（裁决全在桥内）。
+    /// </summary>
+    public ExplodeReplaceResult ExplodeReplaceByHandle(string hexHandle, string liveOutPath) => Run(() =>
+    {
+        if (_doc == null) throw new CadRuntimeException("无打开的图纸");
+        if (string.IsNullOrWhiteSpace(hexHandle)) throw new CadRuntimeException("无句柄参数");
+        if (string.IsNullOrWhiteSpace(liveOutPath)) throw new CadRuntimeException("无 liveout 参数");
+        string channel = ChannelDirFactory();
+        Directory.CreateDirectory(channel);
+        try
+        {
+            string dwg = RetryBusy(() => (string)_doc.Name);   // 桥按名防错图（Path.GetFileName 两侧同口径）
+            InstallBridgeSendCommand();
+            EnsureBridgeLoaded(channel);
+            string id = BridgeChannel.WriteRequest(channel,
+                new BridgeRequest("explode-replace", dwg, hexHandle, BridgeReadMaxDepth, liveOutPath).Write());
+            BridgeChannel.SendCommand(BridgeChannel.ExplodeReplaceCommand, "cmd");
+            string? text = BridgeChannel.WaitDone(channel, id, BridgeCommandTimeout);
+            if (text == null)
+                throw new CadRuntimeException(
+                    $"桥命令超时（{(int)BridgeCommandTimeout.TotalSeconds}s）：{BridgeChannel.ExplodeReplaceCommand}");
+            var result = BridgeResult.Parse(text);
+            if (!string.Equals(result.Status, "ok", StringComparison.Ordinal))
+                throw new CadRuntimeException("桥失败: " + (result.Error ?? result.Status));
+            var rep = result.Replace ?? throw new CadRuntimeException("桥未返回 REPLACED");
+            return new ExplodeReplaceResult(rep.Handle, rep.NewCount, rep.SavedPath, rep.BboxMatch, rep.Tolerance);
+        }
+        catch (Exception ex) when (ex is not CadRuntimeException)
+        { throw new CadRuntimeException($"EXPLODE_REPLACE 失败: {ex.Message}", ex); }
+        finally { BridgeChannel.Cleanup(channel); }
     });
 
     public void Dispose()
