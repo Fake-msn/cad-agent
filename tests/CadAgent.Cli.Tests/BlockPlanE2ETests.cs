@@ -6,6 +6,7 @@ using ACadSharp.Objects;
 using ACadSharp.Tables;
 using CadAgent.Core;
 using CadAgent.Data;
+using CadAgent.Data.Handlers;
 using CadAgent.Data.Tests;
 using CSMath;
 
@@ -27,7 +28,8 @@ public class BlockPlanE2ETests : IDisposable
     private const string BlockTextValue = "块图名";
     private const string AdefTag = "图号";
     private const string AdefValue = "JS-02";
-    private const string AddBlockUnsupportedMessage = "add-* 不支持写入块定义（block 仅 insert-block 用作块名）";
+    // add-* 拒绝文案单一来源（Data 内部常量，InternalsVisibleTo CadAgent.Cli.Tests）。
+    private const string AddBlockUnsupportedMessage = HandlerHelpers.AddBlockUnsupportedMessage;
 
     private readonly string _project = Path.Combine(Path.GetTempPath(), $"blockplan-{Guid.NewGuid():N}");
     private readonly List<string> _drawings = new();
@@ -274,6 +276,44 @@ public class BlockPlanE2ETests : IDisposable
         Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
         Assert.True(audit.VerifyChain(out _));
         Assert.Equal(0, Assert.Single(Probe.Read(_drawing).Block.Entities.OfType<Line>()).StartPoint.X, 6);
+    }
+
+    [Fact]
+    public void TwoStepPlan_FirstStepValidSecondUnknownBlock_NoPartialWriteNoCommit()
+    {
+        // 两步部分写入：首步（change-layer）处理器已改内存，次步未知块失败 → 单事务整体失败，
+        // 不得半写落盘（RunPlan 失败分支 Reload 回滚内存），审计仅一条 step-failed、无 tx-commit。
+        var before = Probe.Read(_drawing);
+        string preLayer = before.BlockText.Layer.Name;
+        byte[] preBytes = File.ReadAllBytes(_drawing);
+        string planPath = WritePlan("blk-partial", new[]
+        {
+            Step("change-layer", new
+            {
+                block = TitleName, handle = before.BlockText.Handle.ToString(), layer = "T-半写"
+            }),
+            Step("move-entity", new
+            {
+                block = "不存在的块", handle = before.BlockLine.Handle.ToString(), dx = 1, dy = 1
+            }),
+        }, "partial.json");
+
+        var (code, stdout, _) = Run("run", planPath, "--drawing", _drawing);
+        Assert.NotEqual(0, code);
+        Assert.Contains("\"ok\":false", stdout.Replace(" ", ""));
+        Assert.Equal(preBytes, File.ReadAllBytes(_drawing)); // 首步内存变更不得落盘
+
+        var after = Probe.Read(_drawing);
+        Assert.Equal(preLayer, after.BlockText.Layer.Name); // 首步改动随事务失败丢弃
+
+        using var audit = OpenAudit();
+        var records = audit.ReadAll();
+        var failed = Assert.Single(records, r => r.Entry.Kind == "step-failed");
+        using (var failedParams = JsonDocument.Parse(failed.Entry.ParamsJson))
+            Assert.Contains("未知块名", failedParams.RootElement.GetProperty("Error").GetString());
+        Assert.Single(records, r => r.Entry.Kind == "step"); // 首步在失败前确已执行（非未跑）
+        Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
+        Assert.True(audit.VerifyChain(out _));
     }
 
     [Fact]

@@ -648,10 +648,10 @@ public class BlockEditHeadlessTests
         finally { Cleanup(window, path, projectDir); }
     }
 
-    // ---- 13. 状态栏目标空间：块定义 / 纸面 / 模型 ----
+    // ---- 13. 状态栏目标空间：块定义（模式开/关）/ 纸面 / 模型 / 锁定框 ----
 
     [AvaloniaFact]
-    public void ToggleOn_StatusBar_ShowsTargetSpace()
+    public void StatusBar_ShowsTargetSpace_ToggleOnOffPaperModelAndLocked()
     {
         (MainWindow window, string path, string projectDir) = Show(TwoInsertLayoutWithPaperDxf());
         try

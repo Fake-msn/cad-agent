@@ -120,7 +120,7 @@ public sealed class SetTextHandler : IStepHandler
 /// <summary>
 /// set-attribute：实例属性改值。主形态 {handle,value} 直指 ATTRIB；次形态 {insert,tag,value}
 /// 在顶层 Insert（模型/纸面）按 tag 精确（Ordinal，CAD tag 大小写敏感）定位，
-/// 同 insert 同 tag 多条 fail-closed 要求句柄形态；Plan-3 仅文字/几何，块内属性仍拒绝。
+/// 同 insert 同 tag 多条 fail-closed 要求句柄形态；块内属性编辑未支持（block 参数拒绝）。
 /// </summary>
 public sealed class SetAttributeHandler : IStepHandler
 {
@@ -128,7 +128,7 @@ public sealed class SetAttributeHandler : IStepHandler
     public const string NotFoundInsertMessage = "insert 句柄不存在（已检索：模型/纸面顶层）";
     public const string NotAttributeMessage = "目标不是实例属性";
     public const string MissingFormMessage = "set-attribute 需要 handle 或 insert+tag";
-    public const string BlockUnsupportedMessage = "块内属性编辑未支持（Plan-3 仅文字/几何）";
+    public const string BlockUnsupportedMessage = "块内属性编辑未支持";
 
     public string Kind => "set-attribute";
 

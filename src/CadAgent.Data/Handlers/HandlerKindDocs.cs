@@ -18,7 +18,7 @@ public static class HandlerKindDocs
         insert-symbol: 跨文档导入 skill 符号并插入 {symbol: string(符号名,须 --skill 包内), x,y: number, scale?: number, rotation?: number(弧度), layer?: string}（建块/复用块；Line/Circle/Arc/Text 白名单）
         通用可选参数 sheetId: string（幅面 ID=图框 Insert 句柄）——携带时语义闸口按该幅面作用域校验（跨幅未确认→拒绝留痕）；缺省=legacy 全局作用域
         通用可选参数 attribute: true（仅 delete-entity/move-entity/change-layer/set-text 可用；attribute:true=仅匹配 Insert 属性，不匹配实体本身；set-attribute 句柄形态经解析器亦接受该标志，可省）
-        通用可选参数 block: string（仅 delete-entity/move-entity/change-layer/set-text；块名 → 块定义内一层直接实体，全实例生效；move 的 dx/dy 为块局部增量；匿名/外部参照/动态/未加载块拒绝；与 space/layout/attribute 互斥；add-line/add-text/add-circle 与 set-attribute 不接受 block）
-        纸面隐含：add-line/add-text/add-circle/insert-block 省略 space 仅给 layout 时，解析器按该布局纸面写入（等价 space:"paper"）
+        通用可选参数 block: string（仅 delete-entity/move-entity/change-layer/set-text；块名 → 块定义内一层直接实体，全实例生效；move 的 dx/dy 为块局部增量；匿名/外部参照/动态/未加载块拒绝；与 space/layout/attribute 互斥；add-line/add-text/add-circle 与 set-attribute 不接受 block；layout-lighting/label-luminaires 的 block 另有语义（布灯块/符号块），见各自行）
+        纸面隐含：新建族 add-line/add-text/add-circle/insert-block 与句柄编辑 delete-entity/move-entity/change-layer/set-text 及 set-attribute 的 insert+tag 形态，省略 space 仅给 layout 时均按该布局纸面解析（等价 space:"paper"）
         """;
 }

@@ -434,7 +434,7 @@ public class SetTextAttributeTests : IDisposable
             handle = attr!.Handle.ToString(), value = "新值", block = "图框"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内属性编辑未支持（Plan-3 仅文字/几何）", r.Error);
+        Assert.Equal("块内属性编辑未支持", r.Error);
         Assert.Equal("栖贤雅庭", attr.Value);
     }
 

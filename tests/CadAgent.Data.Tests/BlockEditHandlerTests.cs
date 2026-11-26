@@ -239,7 +239,7 @@ public class BlockEditHandlerTests : IDisposable
             block = block.Name, value = "新值"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内属性编辑未支持（Plan-3 仅文字/几何）", r.Error);
+        Assert.Equal("块内属性编辑未支持", r.Error);
     }
 
     [Fact]
@@ -252,7 +252,7 @@ public class BlockEditHandlerTests : IDisposable
             insert = nested.Handle.ToString(), tag = "内属性", value = "新值", block = block.Name
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内属性编辑未支持（Plan-3 仅文字/几何）", r.Error);
+        Assert.Equal("块内属性编辑未支持", r.Error);
         Assert.Equal("内值", nested.Attributes.First().Value);
     }
 
