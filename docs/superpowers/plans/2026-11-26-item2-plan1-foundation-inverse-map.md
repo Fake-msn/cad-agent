@@ -655,18 +655,49 @@ public void Hash_Changes_WhenInsertAttributeValueChanges()
 }
 
 [Fact]
-public void Hash_IsStable_AcrossSaveAndReload()
+public void Hash_IsStable_AcrossSaveWorkingReload_AndCaptureRestore()
 {
     string path = DxfFixture.CreateTempDxf(doc =>
     {
         var layout = new ACadSharp.Objects.Layout("布局1");
         doc.Layouts.Add(layout);
+        layout.AddViewport(new Viewport { Center = new XYZ(500, 350, 0), Width = 1000, Height = 700, ViewHeight = 200 });
         layout.AssociatedBlock.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
-        doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(5, 0, 0) });
+        var block = new BlockRecord("图框");
+        block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+        doc.BlockRecords.Add(block);
+        var ins = new Insert(block) { InsertPoint = new XYZ(0, 0, 0) };
+        ins.Attributes.Add(new AttributeEntity { Tag = "T", Value = "V" });
+        doc.Entities.Add(ins);
     });
-    string h1 = DrawingSession.Load(path).ComputeHash();
-    string h2 = DrawingSession.Load(path).ComputeHash();
-    Assert.Equal(h1, h2);
+    try
+    {
+        var session = DrawingSession.Load(path);
+        string h0 = session.ComputeHash();
+        session.SaveWorking();
+        session.Reload();
+        Assert.Equal(h0, session.ComputeHash()); // B|/P| 排除依赖 BlockRecord.Layout 跨 DXF 往返保持
+        byte[] state = session.CaptureState();
+        session.RestoreState(state);
+        Assert.Equal(h0, session.ComputeHash()); // undo 快照同口径
+    }
+    finally { File.Delete(path); } // .dxf 源：working 即自身
+}
+
+[Fact]
+public void Hash_Changes_WhenInsertAttributeMoves()
+{
+    var s = NewSession(doc =>
+    {
+        var b = new BlockRecord("图框");
+        doc.BlockRecords.Add(b);
+        var ins = new Insert(b) { InsertPoint = new XYZ(0, 0, 0) };
+        ins.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "A" });
+        doc.Entities.Add(ins);
+    });
+    string before = s.ComputeHash();
+    s.Doc.Entities.OfType<Insert>().First().Attributes.First().InsertPoint = new XYZ(5, 5, 0);
+    Assert.NotEqual(before, s.ComputeHash());
 }
 ```
 
@@ -688,7 +719,8 @@ public string ComputeHash()
     {
         foreach (var layout in Doc.Layouts.OrderBy(l => l.Name, StringComparer.Ordinal))
         {
-            if (layout.AssociatedBlock is null) continue;
+            // 只投影纸面布局；模型布局（IsPaperSpace=false）与 E| 行是同一集合，重复投影浪费且语义错误。
+            if (!layout.IsPaperSpace || layout.AssociatedBlock is null) continue;
             foreach (var e in layout.AssociatedBlock.Entities.OrderBy(e => e.Handle))
                 ProjectEntity(sb, "P|" + layout.Name, e);
         }
@@ -712,7 +744,8 @@ private void ProjectEntity(StringBuilder sb, string prefix, Entity e)
     switch (e)
     {
         case AttributeDefinition adef:
-            sb.Append(FormattableString.Invariant($"|ADEF|{adef.Tag}|{adef.Value}|{adef.InsertPoint.X:R}|{adef.InsertPoint.Y:R}"));
+            sb.Append(FormattableString.Invariant(
+                $"|ADEF|{adef.Tag}|{adef.Value}|{adef.Height:R}|{adef.Rotation:R}|{adef.InsertPoint.X:R}|{adef.InsertPoint.Y:R}"));
             break;
         case Line line:
             sb.Append(FormattableString.Invariant($"|{line.StartPoint.X:R}|{line.StartPoint.Y:R}|{line.StartPoint.Z:R}|{line.EndPoint.X:R}|{line.EndPoint.Y:R}|{line.EndPoint.Z:R}"));
@@ -741,7 +774,8 @@ private void ProjectEntity(StringBuilder sb, string prefix, Entity e)
         case Insert insert:
             sb.Append(FormattableString.Invariant($"|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));
             foreach (var attr in insert.Attributes.OrderBy(a => a.Tag, StringComparer.Ordinal))
-                sb.Append(FormattableString.Invariant($"|A|{attr.Tag}|{attr.Value}"));
+                sb.Append(FormattableString.Invariant(
+                    $"|A|{attr.Tag}|{attr.Value}|{attr.Layer?.Name ?? "0"}|{attr.InsertPoint.X:R},{attr.InsertPoint.Y:R}|{attr.Height:R}"));
             break;
         case Hatch hatch:
             sb.Append(FormattableString.Invariant($"|{hatch.IsSolid}|{hatch.Paths.Count}"));
