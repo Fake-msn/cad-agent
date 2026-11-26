@@ -29,6 +29,8 @@ public static class EditTargetResolver
 {
     public const string NotFoundMessage = "句柄不存在（已检索：模型/纸面/顶层属性）";
     public const string AmbiguousMessage = "句柄在多个空间出现，请用 space/layout/attribute 限定";
+    public const string BlockNameNotFoundMessage = "未知块名: {0}";
+    public const string BlockIllegalParamMessage = "非法 block 参数: {0}（期望块名或整数）";
     public const string BlockNotFoundMessage = "块定义中未找到句柄: {0}（块 {1}）";
     public const string BlockProtectedMessage = "块不可编辑（匿名/外部参照/动态/未加载）: {0}";
     public const string BlockScopeConflictMessage = "block 不能与 space/layout/attribute 同时使用";
@@ -100,11 +102,17 @@ public static class EditTargetResolver
     public static EditTarget? ResolveBlockTarget(DrawingSession s, JsonElement p, out string? error)
     {
         error = null;
+        // 块名缺失/非法形态（非字符串、非整数）与"块不存在"分开报：前者是参数错，后者是查无此块。
         string? blockName = ReadBlockName(p);
-        BlockRecord? block = blockName is null ? null : FindBlock(s, blockName);
+        if (blockName is null)
+        {
+            error = string.Format(BlockIllegalParamMessage, Raw(p, "block"));
+            return null;
+        }
+        BlockRecord? block = FindBlock(s, blockName);
         if (block is null)
         {
-            error = string.Format(BlockNotFoundMessage, Raw(p, "handle"), blockName ?? Raw(p, "block"));
+            error = string.Format(BlockNameNotFoundMessage, blockName);
             return null;
         }
         if (!IsBlockEditable(block))

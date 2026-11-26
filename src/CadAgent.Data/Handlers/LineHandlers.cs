@@ -52,6 +52,18 @@ internal static class HandlerHelpers
         p.TryGetProperty("block", out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
 
     /// <summary>
+    /// block 与 space/layout/attribute 互斥入口守卫：必须先于 space 通用预校验
+    /// （否则 block+space:"model" 会误报"space 仅支持 paper"、block+space:"paper" 误报缺 layout）。
+    /// </summary>
+    public static StepResult? RejectBlockScopeConflict(JsonElement p) =>
+        HasBlockParam(p) && (HasParam(p, "space") || HasParam(p, "layout") || HasParam(p, "attribute"))
+            ? new StepResult(false, EditTargetResolver.BlockScopeConflictMessage, "")
+            : null;
+
+    private static bool HasParam(JsonElement p, string name) =>
+        p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+
+    /// <summary>
     /// 句柄编辑统一目标解析（Plan-3）：block 显式 → 块定义专用文案（未知/受保护/互斥/非法句柄/未命中）；
     /// 否则默认三空间解析（模型→纸面→顶层属性）。
     /// </summary>

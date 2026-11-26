@@ -132,9 +132,9 @@ public class PaperEditHandlersTests : IDisposable
     }
 
     [Fact]
-    public void Move_UnknownBlockName_RejectedAsBlockMiss()
+    public void Move_UnknownBlockName_RejectedAsUnknownBlock()
     {
-        // Plan-3 Task 5：block 已接通块定义；未知块名 → 块定义专用失败文案（不回落到纸面实体）。
+        // Plan-3 Task 5：block 已接通块定义；未知块名 → 专用"未知块名"文案（不回落到纸面实体）。
         var (s, layout) = New();
         var line = PaperLine(layout);
         var r = new MoveEntityHandler().Apply(s, P(new
@@ -142,7 +142,7 @@ public class PaperEditHandlersTests : IDisposable
             handle = line.Handle.ToString(), dx = 1, dy = 1, block = "不存在的块"
         }));
         Assert.False(r.Ok);
-        Assert.Contains("块定义中未找到句柄", r.Error);
+        Assert.Equal("未知块名: 不存在的块", r.Error);
         Assert.Equal(0, line.StartPoint.X, 6);
     }
 
@@ -222,9 +222,9 @@ public class PaperEditHandlersTests : IDisposable
     }
 
     [Fact]
-    public void Delete_UnknownBlockName_RejectedAsBlockMiss()
+    public void Delete_UnknownBlockName_RejectedAsUnknownBlock()
     {
-        // Plan-3 Task 5：block 已接通块定义；未知块名 → 纸面实体不在该块，不得删除。
+        // Plan-3 Task 5：block 已接通块定义；未知块名 → "未知块名"文案，纸面实体不得删除。
         var (s, layout) = New();
         var line = PaperLine(layout);
         var r = new DeleteEntityHandler().Apply(s, P(new
@@ -232,7 +232,7 @@ public class PaperEditHandlersTests : IDisposable
             handle = line.Handle.ToString(), block = "不存在的块"
         }));
         Assert.False(r.Ok);
-        Assert.Contains("块定义中未找到句柄", r.Error);
+        Assert.Equal("未知块名: 不存在的块", r.Error);
         Assert.Contains(line, layout.AssociatedBlock!.Entities);
     }
 

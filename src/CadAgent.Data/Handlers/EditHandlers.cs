@@ -11,6 +11,7 @@ public sealed class DeleteEntityHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockScopeConflict(p) is { } blockConflict) return blockConflict;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
         var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);
@@ -72,6 +73,7 @@ public sealed class MoveEntityHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockScopeConflict(p) is { } blockConflict) return blockConflict;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
         var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);
@@ -198,6 +200,7 @@ public sealed class ChangeLayerHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockScopeConflict(p) is { } blockConflict) return blockConflict;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
         var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);

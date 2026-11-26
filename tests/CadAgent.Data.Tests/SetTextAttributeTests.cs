@@ -232,9 +232,9 @@ public class SetTextAttributeTests : IDisposable
     }
 
     [Fact]
-    public void SetText_UnknownBlockName_RejectedAsBlockMiss()
+    public void SetText_UnknownBlockName_RejectedAsUnknownBlock()
     {
-        // Plan-3 Task 5：block 已接通块定义；模型顶层句柄不在该块 → 块定义未命中，原值不变。
+        // Plan-3 Task 5：block 已接通块定义；未知块名 → "未知块名"文案，原值不变。
         TextEntity? text = null;
         var (s, _) = New(doc => text = AddModelText(doc, "原文"));
         var r = new SetTextHandler().Apply(s, P(new
@@ -242,7 +242,7 @@ public class SetTextAttributeTests : IDisposable
             handle = text!.Handle.ToString(), text = "改", block = "不存在的块"
         }));
         Assert.False(r.Ok);
-        Assert.Contains("块定义中未找到句柄", r.Error);
+        Assert.Equal("未知块名: 不存在的块", r.Error);
         Assert.Equal("原文", text.Value);
     }
 
