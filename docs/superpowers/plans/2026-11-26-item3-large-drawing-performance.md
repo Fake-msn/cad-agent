@@ -257,25 +257,28 @@ public interface IHashRevision { long Revision { get; } void InvalidateHash(); }
 | T4 快照 Refined | `a3cfd42 feat(view): 快照改走 Refined 绘制器（LOD）` |
 | T5 空信任/异步 | `e54d5ca feat: 空 census 信任与异步加载`、`5d1411c fix: 异步 UI 线程/状态注记时序/空 census 披露（评审修复）` |
 | T6 哈希修订缓存 | `e69a612 feat(core,data): ComputeHash 修订缓存（IHashRevision）`、`1252b64 fix(data): 哈希缓存条目带修订并 Volatile 存取（评审修复）` |
-| T7 工具/门禁/注记 | `dc6d95e feat(tools): 大图性能基线工具`、`b67de26 fix(tools): 快照重复测量与口径注记`、`docs(spec): 项3 大图性能闭环注记` |
+| T7 工具/门禁/注记 | `dc6d95e feat(tools): 大图性能基线工具`、`b67de26 fix(tools): 快照重复测量与口径注记`、`840eb65 docs(plan): …`、`fix(tools): 交互档重建实测与输出健壮性`（fix round 1）、`docs(spec): 项3 验收边界与口径修正`（fix round 1） |
 
 T1..T6 区间：`3fd2747..1252b64`（13 提交）。T7 工具入 `CadAgent.sln`（`tools` 解决方案文件夹）。
 
-### Task 7 数字（`tools/CadAgent.PerfBaseline`，headless Skia 1600×1000，2026-11-27）
+### Task 7 数字（`tools/CadAgent.PerfBaseline`，headless Skia 1600×1000，2026-11-27；fix round 1 复测）
 
-| case | 交互帧 | 命中/次 | Refined 冷（+编码） | 快照（重复） | hash 冷/重复 | 二开 working | 内存 |
-|---|---|---|---|---|---|---|---|
-| 接地图 54,929 items | 2.09 / 2.82ms | 0.004ms | 96.2ms（+65.7） | 483ms（214） | 358.5 / 0.062ms | 4297ms（源 6566） | 494MB |
-| 强电图 76,589 items | 3.22 / 2.61ms | 0.008ms | 122.8ms（+55.9） | 301ms（198） | 187.8 / 0.001ms | 2015ms（源 2288） | 349MB |
-| synth 200k | 2.96 / 2.3ms | 0.259ms | 279.5ms（+257） | 772ms（556） | 405.3 / 0.051ms | 3199ms | 291MB |
+| case | 交互帧（3 次中位） | 失效重建（中位） | 命中/次 | Refined 冷（+编码） | 快照（冷/重复最小） | hash 冷/重复 | 二开 working | 内存 |
+|---|---|---|---|---|---|---|---|---|
+| 接地图 54,929 items | 1.95ms（1.36–2.35） | 77.6ms（TARGET） | 0.005ms | 88.6ms（+65.9 = 154.5） | 434 / 182ms | 333.5 / 0.060ms | 4230ms（源 6463） | 494MB |
+| 强电图 76,589 items | 2.44ms（2.26–3.71） | 120.4ms（TARGET） | 0.006ms | 119.9ms（+56.2 = 176.1） | 193 / 191ms | 346.6 / 0.002ms | 2089ms（源 2151） | 248MB |
+| synth 200k | 2.04ms（1.77–3.13） | 200.7ms（仅记录） | 0.194ms | 272.7ms（+257.1） | 751 / 535ms | 395.2 / 0.056ms | 3103ms | 291MB |
 
-- 目标判定：交互/命中/哈希重复/二开不重读源 **PASS**；Refined 渲染 PASS（含编码 162/178.7ms 超 150→TARGET）；
-  **快照 150ms 未达**（冷 483/301ms，重复 214/198ms）——记录不 hard fail，残留在 spec §12.6。
-- 二开证据：`sourceUntouched=True`（源 size/mtime 不变）且源移走后再载成功（`noSourceReread=True`，3809/2322ms）；
-  census 状态 `persisted non-empty (342/7557)`。
+- 目标判定：交互/命中/哈希重复/二开不重读源 **PASS**；Refined 渲染 PASS（含编码 154.5/176.1ms 超 150→TARGET）；
+  **交互档失效重建 77.6/120.4ms 未达 <50ms**（同状态 Refined 暖重建 82/138ms，交互档 LOD 只省 5%/13%；
+  `<50ms` 仅平移 blit/缩放仿射的缓存复用路径成立）→ TARGET；
+  **快照 150ms 未达**（冷 434/193ms、重复 182/191ms，即 +21%/+27%；上一轮 214/198 = +43%/+32%）——记录不 hard fail，
+  残留在 spec §12.6。
+- 二开证据：`sourceUntouched=True`（源 size/mtime 不变）且源移走后再载成功（`noSourceReread=True`，4729/1931ms）；
+  census 状态 `persisted non-empty (342/7557)`（Yellow，不触发 verified-empty，见 spec §12.4 边界）。
 - 运行命令（输出均在 `outputs/perf-baseline/`，标本目录零写入）：
   `--drawing specimens/地下室接地平面图.dwg --drawing specimens/地下室强电系统图.dwg --out after-real.md`；
-  `--synth 200k --out after-synth.md`；冒烟 `--synth 20k --out <temp>.md`（非空指标）。
+  `--synth 200k --out after-synth.md`；冒烟 `--synth 20k --out outputs/perf-baseline/smoke-20k.md`（非空指标）。
 
 ### 门禁
 
@@ -296,3 +299,8 @@ T1..T6 区间：`3fd2747..1252b64`（13 提交）。T7 工具入 `CadAgent.sln`�
 
 跳过 2 例均为设计性 skip（真实标本/真实换源 TCH 用例）。**无 flake**（单次全绿，未触发隔离复跑）；
 无 Acad/ZWCAD 残留进程（`tasklist` 核查为空）。
+
+**Fix round 1 门禁复跑**（`dotnet build CadAgent.sln` 成功后；日志 `outputs/perf-baseline/t7r1-*.log`）：
+Core 290 / Cli 371（1 skip）一次全绿；Data 681、View 626 首次各 1 例失败
+（`InsertMove_ChangesHash`、`RefreshAsync_CorruptAdjudications_WritesFailedCheckRunAudit`），
+单测隔离与整批复跑均通过 → 判为 flake，与本次改动（工具 + View `InternalsVisibleTo`）无关联。
