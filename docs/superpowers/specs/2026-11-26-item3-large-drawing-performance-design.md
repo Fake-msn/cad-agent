@@ -95,13 +95,12 @@
 
 ## 6. §5 ComputeHash 修订缓存
 
-- `IDrawingSession` 增：
+- Core 新增**可选能力接口** `IHashRevision`（不改 `IDrawingSession`，避免全部测试 fake 爆改）：
   ```csharp
-  long Revision { get; }
-  void InvalidateHash();   // 语义：文档内容已变
+  public interface IHashRevision { long Revision { get; } void InvalidateHash(); }
   ```
-- `DrawingSession`：缓存 `(Revision, hash)`；`InvalidateHash` 递增 Revision 并清缓存。
-- 失效点：StepEngine 每步 handler 成功后（含 undo/rollback 后 `RestoreState`/`Reload` 自身递增）、`Reload`、`RestoreState`、`SaveWorking` 不改内容不递增；`MarkModified` 供直接变更（handlers 内已由引擎统一调用，无需逐个改）。
+- `DrawingSession : IDrawingSession, IHashRevision`：缓存 `(Revision, hash)`；`InvalidateHash` 递增 Revision 并清缓存。
+- 失效点：StepEngine 每步 handler 成功后 `(session as IHashRevision)?.InvalidateHash()`；`Reload`/`RestoreState` 自身递增；`SaveWorking` 不改内容不递增。非 `IHashRevision` 会话（测试 fake）永不走缓存，行为不变。
 - 契约：任何绕过 StepEngine 的直接 Doc 变更必须调用 `InvalidateHash()`；Data/View 现有直接变更测试同步调用（披露）。
 - 哈希投影口径**不变**；冷哈希成本保留（194–524ms），重复哈希（审计/闸口/回归）降为 O(1)。
 
