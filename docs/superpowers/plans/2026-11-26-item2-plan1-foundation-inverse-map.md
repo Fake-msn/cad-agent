@@ -1085,4 +1085,26 @@ git commit -m "docs(spec): 项2 Plan-1（F+A）闭环注记"
 
 ## 执行记录（执行中追加）
 
-（待执行者按 SDD ledger 记录 ruling/commit/门禁数字。）
+**里程碑 commits（分支 `feat/cad-agent-view-deepread`，BASE `c6de895`；逐任务 commit + 聚焦门禁，评审修复单独 commit）**：
+
+- Task 1（RenderItem 空间/来源字段）：`7b4e92d`；RenderModelTests 58/58。
+- Task 2（属性渲染+图元来源戳记）：`4fdc1fc` → 评审修复 `c99f1bc`（ATTRIB 已放置坐标+AlignmentPoint）；聚焦 62/62 + 下游 28/28。
+- Task 3（纸面空间渲染+视口框+布局合成，R8 ATTDEF 排除）：`f814242`。
+- Task 4（纸→模型逆映射+退化上下文）：`85e6307` → `158ad6a` → `5c1f22c`；Core.Tests 284/284。
+- Task 5（ComputeHash 全空间扩面，承重修复）：`b2a13ce` → `174d62e`；Data.Tests 459/459。
+- Task 6（EditRouting 纯函数+上下文工厂）：`8a51263` → `2b9cb11`；EditRoutingTests 23/23（含后续补强）。
+- Task 7（MainWindow 布局编辑接线）：`ee6d904` → `6aff88d`；View.Tests 441/441。
+- 文档对齐（非功能 milestone）：`95a843e`、`121b270`、`dfeb74a`、`57c73b8`、`d6252df`、`98cbeef`、`f804361`、`e9fcb58`。
+- **门禁修复 commits：无**——Task 8 四套件首跑即全绿（属性渲染项数/纸面合成项数/路由守卫文案/哈希投影的旧事实断言已在 Task 2/3/5/7 内按 Ruling R1/R2/R3 同 commit 修正并披露，无遗留漂移）。
+
+**Task 8 门禁（2026-11-26，证据 `outputs/plan1-gates/`）**：
+
+- `dotnet test tests/CadAgent.Core.Tests/...` → **284 通过 / 0 失败 / 0 跳过**（core.log）
+- `dotnet test tests/CadAgent.Data.Tests/...` → **459 / 0 / 0**（data.log）
+- `dotnet test tests/CadAgent.View.Tests/...` → **441 / 0 / 0**（view.log）
+- `dotnet test tests/CadAgent.Cli.Tests/...` → **356 / 0 / 0**（cli.log，2m7s）
+- 全 sln `dotnet test CadAgent.sln --nologo` → **1863 例：通过 1861 / 失败 1 / 跳过 1**（sln.log；TArchBridge 76 / Report 17 / Llm 33 / Core 284 / Data 459 / View 440+1 / Zwcad 16 / Cli 356 / Acad 180+1skip（含 5 真机，16m37s））。唯一失败=View `AdjudicationViewModelTests.Adjudicate_Exempt_IssueGoneAfterIssuesRefresh` **已知 audit.db teardown flake**（Fixture.Dispose 删临时目录时 audit.db 占用）→ 隔离复跑 **441/441 全绿**（view-rerun-isolated.log），非回归。基线 1796/1skip → 净增 66 例。
+- **性能**：ComputeHash 镜像夹具（20k 模型线+2k 纸面线+300 块定义线+200 带属性 Insert）实测 **≈65 ms/call（Release）/ 60.7 ms/call（Debug）**，确定性（同图两次相等，SHA-256 64 hex）；实现者报 ≈92 ms 未复现（同量级差异，见 `outputs/plan1-gates/hashbench{,-debug}.log`；临时夹具已清理）。不改产品代码。
+- 闭环注记：spec §12 追加「项2 Plan-1（F+A）闭环」条（2026-11-26）。
+
+**遗留（明示）**：纸面空间实体编辑=Plan-2；块定义编辑=Plan-3；twist 视口模型编辑拒绝；非矩形视口裁剪不可检测（API 未暴露）；ATTDEF 不渲染；哈希值与旧版不同（旧 overlay 可能提示来源哈希不一致）；ComputeHash 模型布局双投影成本（降本候选已注记，未做）；视口实体几何未入哈希（R12）。
