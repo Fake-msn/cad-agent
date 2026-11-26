@@ -36,8 +36,7 @@ public static class EditTargetResolver
     public const string BlockScopeConflictMessage = "block 不能与 space/layout/attribute 同时使用";
     public const string IllegalHandleMessage = "非法句柄: {0}（块内编辑须为已分配句柄）";
 
-    // 处理器入口预拒 block 的专用文案（Task 5 接通块内编辑后仅 add-* 新建仍用它）。
-    public const string BlockDeferredMessage = "块内编辑将在后续切片提供（Plan-3）";
+    // add-* 新建族的 block 拒绝文案在 HandlerHelpers.AddBlockUnsupportedMessage（块内编辑已接通，无"未支持"措辞）。
 
     public static EditTarget? Resolve(DrawingSession s, JsonElement p) => TryResolve(s, p, out _);
 

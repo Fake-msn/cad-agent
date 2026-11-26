@@ -41,10 +41,16 @@ internal static class HandlerHelpers
         return layer;
     }
 
-    /// <summary>新建族（add-*）块内编辑仍不提供：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
+    /// <summary>
+    /// add-* 新建族不支持写入块定义（含 block 参数一律拒绝，fail-closed 防静默落到模型顶层）；
+    /// block 仅 insert-block 用作被插入块名。
+    /// </summary>
+    public const string AddBlockUnsupportedMessage = "add-* 不支持写入块定义（block 仅 insert-block 用作块名）";
+
+    /// <summary>新建族（add-*）不含块定义新建：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
     public static StepResult? RejectBlockParam(JsonElement p) =>
         HasBlockParam(p)
-            ? new StepResult(false, EditTargetResolver.BlockDeferredMessage, "")
+            ? new StepResult(false, AddBlockUnsupportedMessage, "")
             : null;
 
     /// <summary>block 参数存在且非 null（与解析器 HasValue 同口径）。</summary>

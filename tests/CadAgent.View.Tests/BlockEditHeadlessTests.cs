@@ -665,6 +665,21 @@ public class BlockEditHeadlessTests
             window.Canvas!.Select(blockIndex);
             Dispatcher.UIThread.RunJobs();
             Assert.Contains($"目标 块定义 {TitleBlockName}", window.Status!.Text);
+            // R6：模式开=块定义目标本体；模式关=同目标 + 需子图元模式提示。
+            Assert.DoesNotContain("需子图元模式", window.Status.Text);
+            window.SubEntityToggle!.IsChecked = false;
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains("（需子图元模式）", window.Status.Text);
+            window.SubEntityToggle.IsChecked = true;
+            Dispatcher.UIThread.RunJobs();
+
+            // R6：锁定视口框只读（不得冒充纸面可编辑目标）。
+            int lockedIndex = window.Canvas.Items.ToList().FindIndex(i => i.Locked);
+            Assert.True(lockedIndex >= 0, "夹具锁定视口框未渲染");
+            window.Canvas.Select(lockedIndex);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains("目标 视口框（只读）", window.Status.Text);
+            Assert.DoesNotContain("目标 纸面", window.Status.Text);
 
             int paperIndex = window.Canvas.Items.ToList().FindIndex(i =>
                 i.Space == RenderSpace.PaperSpace && !i.Locked);

@@ -1700,9 +1700,12 @@ public sealed class MainWindow : Window
             if (selected is not null)
             {
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
-                // 项2 Plan-3 T6：目标空间（块内→块定义名；否则按纸面/模型空间）。
-                status += selected.BlockName is not null ? $" | 目标 块定义 {selected.BlockName}"
-                    : selected.Space == RenderSpace.PaperSpace ? " | 目标 纸面" : " | 目标 模型";
+                // 项2 Plan-3 T6/R6：目标空间——锁定框（只读）> 块子图元（模式关提示）> 纸面/模型。
+                bool subEntityMode = SubEntityToggle?.IsChecked == true;
+                status += selected.Locked ? " | 目标 视口框（只读）"
+                    : selected.BlockName is not null
+                        ? $" | 目标 块定义 {selected.BlockName}" + (subEntityMode ? "" : "（需子图元模式）")
+                        : selected.Space == RenderSpace.PaperSpace ? " | 目标 纸面" : " | 目标 模型";
             }
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
             if (_diffSummary.Length > 0) status += $" | {_diffSummary}";

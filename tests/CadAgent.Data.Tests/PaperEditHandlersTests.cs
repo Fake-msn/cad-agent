@@ -377,7 +377,7 @@ public class PaperEditHandlersTests : IDisposable
     [Theory]
     [InlineData("add-line")]
     [InlineData("add-text")]
-    public void Add_BlockParam_RejectedAsPlan3(string kind)
+    public void Add_BlockParam_RejectedAsUnsupported(string kind)
     {
         var (s, _) = New();
         var p = kind == "add-line"
@@ -387,7 +387,8 @@ public class PaperEditHandlersTests : IDisposable
             ? new AddLineHandler().Apply(s, p)
             : new AddTextHandler().Apply(s, p);
         Assert.False(r.Ok);
-        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+        // add-* 不支持块定义新建（block 仅 insert-block 用作块名）；不得复用"后续切片"过时措辞。
+        Assert.Equal("add-* 不支持写入块定义（block 仅 insert-block 用作块名）", r.Error);
     }
 
     // ---- add-circle 纸面化 ----
@@ -417,7 +418,7 @@ public class PaperEditHandlersTests : IDisposable
     }
 
     [Fact]
-    public void AddCircle_BlockParam_RejectedAsPlan3()
+    public void AddCircle_BlockParam_RejectedAsUnsupported()
     {
         var (s, _) = New();
         var r = new AddCircleHandler().Apply(s, P(new
@@ -425,7 +426,7 @@ public class PaperEditHandlersTests : IDisposable
             x = 3, y = 4, radius = 2, block = "图框"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+        Assert.Equal("add-* 不支持写入块定义（block 仅 insert-block 用作块名）", r.Error);
     }
 
     [Fact]
@@ -624,6 +625,12 @@ public class PaperEditHandlersTests : IDisposable
 /// </summary>
 public class HandlerKindDocsTests
 {
+    private static string DocumentedLine(string kind) =>
+        HandlerKindDocs.Default
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .Single(l => l.StartsWith(kind + ":", StringComparison.Ordinal));
+
     [Fact]
     public void Default_DocumentsEveryRegisteredKind()
     {
@@ -634,4 +641,45 @@ public class HandlerKindDocsTests
         foreach (string kind in HandlerRegistry.All().Select(h => h.Kind))
             Assert.Contains(lines, l => l.StartsWith(kind + ":", StringComparison.Ordinal));
     }
+
+    // Plan-3 Task 7：四类块编辑 kind 的契约行必须声明 block（块名语义/全实例/互斥/块守卫）。
+    [Theory]
+    [InlineData("delete-entity")]
+    [InlineData("move-entity")]
+    [InlineData("change-layer")]
+    [InlineData("set-text")]
+    public void Default_BlockEditKindsDeclareBlock(string kind)
+    {
+        string line = DocumentedLine(kind);
+        Assert.Contains("block", line);
+        Assert.Contains("全实例生效", line);
+        Assert.Contains("互斥", line);
+        Assert.Contains("匿名", line);
+    }
+
+    // 各 kind 的块语义要点（局部增量 / ATTDEF 保护 / 块内 ATTRIB 不可达）不得被文案批处理抹掉。
+    [Theory]
+    [InlineData("move-entity", "块局部增量")]
+    [InlineData("delete-entity", "ATTDEF")]
+    [InlineData("set-text", "ATTRIB 不可达")]
+    public void Default_BlockEditKindDocumentsSpecifics(string kind, string token) =>
+        Assert.Contains(token, DocumentedLine(kind));
+
+    // add-* 新建族与 set-attribute 不接受 block；不得残留"后续切片"过时措辞。
+    [Theory]
+    [InlineData("add-line")]
+    [InlineData("add-text")]
+    [InlineData("add-circle")]
+    [InlineData("set-attribute")]
+    public void Default_NonBlockEditKindsRejectBlock(string kind)
+    {
+        string line = DocumentedLine(kind);
+        Assert.Contains("block 不接受", line);
+        Assert.DoesNotContain("后续切片", line);
+    }
+
+    // insert-block 的 block 是被插入块名（非块定义定位），须与四类编辑口径区分。
+    [Fact]
+    public void Default_InsertBlockDocSaysBlockIsInsertedName() =>
+        Assert.Contains("被插入块名", DocumentedLine("insert-block"));
 }
