@@ -257,7 +257,7 @@ public interface IHashRevision { long Revision { get; } void InvalidateHash(); }
 | T4 快照 Refined | `a3cfd42 feat(view): 快照改走 Refined 绘制器（LOD）` |
 | T5 空信任/异步 | `e54d5ca feat: 空 census 信任与异步加载`、`5d1411c fix: 异步 UI 线程/状态注记时序/空 census 披露（评审修复）` |
 | T6 哈希修订缓存 | `e69a612 feat(core,data): ComputeHash 修订缓存（IHashRevision）`、`1252b64 fix(data): 哈希缓存条目带修订并 Volatile 存取（评审修复）` |
-| T7 工具/门禁/注记 | `dc6d95e feat(tools): 大图性能基线工具` + `docs(spec): 项3 大图性能闭环注记` |
+| T7 工具/门禁/注记 | `dc6d95e feat(tools): 大图性能基线工具`、`b67de26 fix(tools): 快照重复测量与口径注记`、`docs(spec): 项3 大图性能闭环注记` |
 
 T1..T6 区间：`3fd2747..1252b64`（13 提交）。T7 工具入 `CadAgent.sln`（`tools` 解决方案文件夹）。
 
