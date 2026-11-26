@@ -3,8 +3,10 @@ using System.Text.Json;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using CadAgent.Core;
+using CadAgent.Data;
 using CadAgent.Data.Tests;
 using CSMath;
+using Microsoft.Data.Sqlite;
 
 namespace CadAgent.Cli.Tests;
 
@@ -138,5 +140,66 @@ public sealed class ReportExportTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_project, "reports")));
         var rejected = Assert.Single(AuditRecords().Where(r => r.Entry.Kind == "intake-rejected"));
         Assert.Equal("report", rejected.Entry.Source);
+    }
+
+    // ===== 合并前 ISTQB 加固 B：只读不变量 / 断链上报 / 用法路径 =====
+
+    /// <summary>
+    /// 只读不变量：导出前后图纸哈希一致（report 不得改图），且 report-exported 审计
+    /// Before/After 哈希（= 报告 DrawingHash 口径）等于该哈希——报告与审计同源可核。
+    /// </summary>
+    [Fact]
+    public void Export_IsReadOnly_PreservesDrawingHashAndAuditsIt()
+    {
+        string before = DrawingSession.Load(_drawing).ComputeHash();
+
+        var (code, _, stderr) = Run("report", "export", "--drawing", _drawing);
+
+        Assert.True(code == 0, stderr);
+        Assert.Equal(before, DrawingSession.Load(_drawing).ComputeHash());
+        var entry = Assert.Single(AuditRecords().Where(r => r.Entry.Kind == "report-exported"));
+        Assert.Equal(before, entry.Entry.BeforeHash);
+        Assert.Equal(before, entry.Entry.AfterHash);
+    }
+
+    /// <summary>
+    /// 断链上报：先导出一次，再以原始 SQLite 篡改末行 hash（模拟链损坏），二次导出
+    /// 仍须成功（报告照出），stdout auditChainOk=false——断链不得被"已生成"掩盖。
+    /// </summary>
+    [Fact]
+    public void Export_AfterTamperedChain_ReportsAuditChainOkFalse_StillExports()
+    {
+        var (first, _, firstErr) = Run("report", "export", "--drawing", _drawing);
+        Assert.True(first == 0, firstErr);
+
+        string dbPath = Path.Combine(_project, ".cadagent", "audit.db");
+        SqliteConnection.ClearAllPools();
+        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE audit SET hash='BROKEN' WHERE seq=(SELECT MAX(seq) FROM audit)";
+            Assert.Equal(1, cmd.ExecuteNonQuery());
+        }
+        SqliteConnection.ClearAllPools();
+
+        var (code, stdout, stderr) = Run("report", "export", "--drawing", _drawing);
+
+        Assert.True(code == 0, stderr);
+        using var json = JsonDocument.Parse(stdout);
+        Assert.True(json.RootElement.GetProperty("ok").GetBoolean());
+        Assert.False(json.RootElement.GetProperty("auditChainOk").GetBoolean());
+        Assert.True(File.Exists(json.RootElement.GetProperty("path").GetString()));
+    }
+
+    /// <summary>用法路径：report 无子命令 → exit 1 + stderr 用法指引（不产报告）。</summary>
+    [Fact]
+    public void Report_WithoutSubcommand_ReportsUsage()
+    {
+        var (code, _, stderr) = Run("report");
+
+        Assert.Equal(1, code);
+        Assert.Contains("report 需要子命令", stderr);
+        Assert.False(Directory.Exists(Path.Combine(_project, "reports")));
     }
 }

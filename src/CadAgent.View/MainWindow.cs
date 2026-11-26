@@ -1565,7 +1565,8 @@ public sealed class MainWindow : Window
 
             try
             {
-                _reportAuditStore.Append(new AuditEntry(DateTimeOffset.UtcNow,
+                // 审计先行（spec §9 无审计旁路）：失败即撤销本次报告（与 CLI 共用 helper）。
+                ReportAuditCommit.Commit(_reportAuditStore, new AuditEntry(DateTimeOffset.UtcNow,
                     op.Account, op.Role.ToString(), "view", "view-report", "report-exported",
                     _session.SourcePath,
                     JsonSerializer.Serialize(new
@@ -1576,13 +1577,11 @@ public sealed class MainWindow : Window
                         auditChainOk = result.AuditChainOk,
                         thumbnail = thumbnail is not null
                     }),
-                    hash, hash, "", ""));
+                    hash, hash, "", ""), result.Path);
             }
-            catch (Exception ex)
+            catch (ReviewReportException ex)
             {
-                // 审计先行（spec §9 无审计旁路）：审计失败→撤销本次报告（自家生成文件）
-                try { File.Delete(result.Path); } catch { /* 撤销清理失败不掩盖审计错误 */ }
-                SetReportStatus($"审计写入失败，已撤销报告: {ex.Message}", error: true);
+                SetReportStatus(ex.Message, error: true);
                 return;
             }
 
