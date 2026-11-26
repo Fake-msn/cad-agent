@@ -464,7 +464,7 @@ public class EditPanelHeadlessTests
     }
 
     // ---- 最终审查 Imp#3：子图元后缀句柄（"{parent}:{i}"）编辑入口剥后缀 ----
-    // 语义 = 编辑父实体/块整体（独立子图元编辑 deferred，spec §12 注记）。
+    // 默认语义 = 编辑父实体/块整体（独立子图元编辑经「子图元」模式，项2 Plan-3）。
 
     [AvaloniaFact]
     public async Task Move_InsertSubEntitySelected_MovesParentInsert()

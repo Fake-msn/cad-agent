@@ -349,7 +349,7 @@ public class IntegrationHeadlessTests
         try
         {
             List<Button> buttons = window.EditToolbar!.Children.OfType<Button>().ToList();
-            Assert.Equal(9, buttons.Count); // 8 tools（含项2 Plan-2 T5 改文字）+ Undo
+            Assert.Equal(10, buttons.Count); // 8 tools（含改文字）+ Undo + 项2 Plan-3 T6 子图元 Toggle
             Assert.All(buttons, b => Assert.NotNull(ToolTip.GetTip(b)));
         }
         finally { window.Close(); }

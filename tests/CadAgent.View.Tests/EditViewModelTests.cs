@@ -177,6 +177,64 @@ public class EditViewModelTests
         }
     }
 
+    /// <summary>VM 块参数夹具（项2 Plan-3）：块 B 内含 TextEntity，模型两实例共享定义 +
+    /// 顶层模型文字（无块参数对照）。句柄取落盘后真值（写入器分配）。</summary>
+    private sealed class BlockParamsFixture : IDisposable
+    {
+        public const string BlockName = "B";
+        public const string BlockTextValue = "块字";
+        public string ProjectDir { get; }
+        public string DxfPath { get; }
+        public DrawingSession Session { get; }
+        public SqliteAuditStore Audit { get; }
+        public SnapshotStore Snapshots { get; }
+        public string BlockTextHandle { get; }
+        public string ModelTextHandle { get; }
+
+        public BlockParamsFixture()
+        {
+            ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-block-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(ProjectDir, ".cadagent"));
+            DxfPath = DxfFixture.CreateTempDxf(doc =>
+            {
+                var block = new BlockRecord(BlockName);
+                block.Entities.Add(new TextEntity
+                {
+                    InsertPoint = new XYZ(0, 0, 0), Value = BlockTextValue, Height = 3.5
+                });
+                doc.BlockRecords.Add(block);
+                doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(0, 0, 0) });
+                doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(50, 0, 0) });
+                doc.Entities.Add(new TextEntity
+                {
+                    InsertPoint = new XYZ(10, 10, 0), Value = "模型字", Height = 3.5
+                });
+            });
+            Session = DrawingSession.Load(DxfPath);
+            BlockTextHandle = Session.Doc.BlockRecords.First(b => b.Name == BlockName)
+                .Entities.OfType<TextEntity>().Single().Handle.ToString();
+            ModelTextHandle = Session.Doc.Entities.OfType<TextEntity>().Single().Handle.ToString();
+            Audit = new SqliteAuditStore(Path.Combine(ProjectDir, ".cadagent", "audit.db"));
+            Snapshots = new SnapshotStore(Path.Combine(ProjectDir, ".cadagent", "snapshots"));
+        }
+
+        public TextEntity BlockText() => Session.Doc.BlockRecords.First(b => b.Name == BlockName)
+            .Entities.OfType<TextEntity>().Single();
+
+        public EditViewModel MakeVm() =>
+            new(Session, Audit, Snapshots,
+                new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+                new RoleChecker(), ProjectDir);
+
+        public void Dispose()
+        {
+            Audit.Dispose();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(DxfPath);
+            if (Directory.Exists(ProjectDir)) Directory.Delete(ProjectDir, true);
+        }
+    }
+
     private sealed class FixedIdentity : IIdentityProvider
     {
         public FixedIdentity(OperatorIdentity id) => Current = id;
@@ -1057,5 +1115,71 @@ public class EditViewModelTests
         Assert.Single(records, x => x.Entry.Kind == "step-failed");
         Assert.DoesNotContain(records, x => x.Entry.Kind == "tx-commit");
         Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    // ---- 项2 Plan-3：块参数 + affectedInstances 在 view-edit 请求与 step params 双处落审计 ----
+
+    [Fact]
+    public async Task ChangeLayer_BlockWithAffectedInstances_AuditedInRequestAndStep()
+    {
+        using var f = new BlockParamsFixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.ChangeLayerAsync(f.BlockTextHandle, "E-TEXT",
+            block: BlockParamsFixture.BlockName, affectedInstances: 7);
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("E-TEXT", f.BlockText().Layer.Name);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        JsonElement args = Params(req).GetProperty("args");
+        Assert.Equal(BlockParamsFixture.BlockName, args.GetProperty("block").GetString());
+        Assert.Equal(7, args.GetProperty("affectedInstances").GetInt32());
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        JsonElement stepParams = Params(step).GetProperty("Params");
+        Assert.Equal(BlockParamsFixture.BlockName, stepParams.GetProperty("block").GetString());
+        Assert.Equal(7, stepParams.GetProperty("affectedInstances").GetInt32());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task SetText_BlockWithAffectedInstances_AuditedInRequestAndStep()
+    {
+        using var f = new BlockParamsFixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.SetTextAsync(f.BlockTextHandle, "新块字",
+            block: BlockParamsFixture.BlockName, affectedInstances: 7);
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("新块字", f.BlockText().Value);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        JsonElement args = Params(req).GetProperty("args");
+        Assert.Equal(BlockParamsFixture.BlockName, args.GetProperty("block").GetString());
+        Assert.Equal(7, args.GetProperty("affectedInstances").GetInt32());
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        JsonElement stepParams = Params(step).GetProperty("Params");
+        Assert.Equal(BlockParamsFixture.BlockName, stepParams.GetProperty("block").GetString());
+        Assert.Equal(7, stepParams.GetProperty("affectedInstances").GetInt32());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task SetText_NullBlock_OmitsBlockAndAffectedInstancesKeys()
+    {
+        // 条件写入：非块编辑不得出现 "block":null / affectedInstances 噪声（请求与 step 双检）。
+        using var f = new BlockParamsFixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.SetTextAsync(f.ModelTextHandle, "新模型字", block: null);
+
+        Assert.True(r.Ok, r.Error);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        Assert.False(Params(req).GetProperty("args").TryGetProperty("block", out _));
+        Assert.False(Params(req).GetProperty("args").TryGetProperty("affectedInstances", out _));
+        Assert.False(Params(step).GetProperty("Params").TryGetProperty("block", out _));
+        Assert.False(Params(step).GetProperty("Params").TryGetProperty("affectedInstances", out _));
+        Assert.DoesNotContain("\"block\"", step.Entry.ParamsJson);
+        Assert.DoesNotContain("affectedInstances", step.Entry.ParamsJson);
     }
 }

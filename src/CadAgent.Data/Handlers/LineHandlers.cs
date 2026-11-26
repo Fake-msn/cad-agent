@@ -12,6 +12,9 @@ internal static class HandlerHelpers
     /// <summary>纸面限定缺 layout 的统一文案（解析器预校验/新建族/属性检索三处共用，防契约漂移）。</summary>
     public const string PaperNeedsLayoutMessage = "space:\"paper\" 须配 layout";
 
+    /// <summary>属性定义（ADEF）模板不可编辑（move/change-layer 共用；delete/set-text 另有专用文案）。</summary>
+    public const string AttributeDefinitionEditMessage = "属性定义不可编辑";
+
     public static DrawingSession AsDrawing(IDrawingSession session) =>
         session as DrawingSession ?? throw new InvalidOperationException("处理器需要 DrawingSession");
 
@@ -41,11 +44,51 @@ internal static class HandlerHelpers
         return layer;
     }
 
-    /// <summary>块内编辑属 Plan-3：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
+    /// <summary>
+    /// add-* 新建族不支持写入块定义（含 block 参数一律拒绝，fail-closed 防静默落到模型顶层）；
+    /// block 仅 insert-block 用作被插入块名。
+    /// </summary>
+    public const string AddBlockUnsupportedMessage = "add-* 不支持写入块定义（block 仅 insert-block 用作块名）";
+
+    /// <summary>新建族（add-*）不含块定义新建：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
     public static StepResult? RejectBlockParam(JsonElement p) =>
-        p.TryGetProperty("block", out var v) && v.ValueKind != JsonValueKind.Null
-            ? new StepResult(false, EditTargetResolver.BlockDeferredMessage, "")
+        HasBlockParam(p)
+            ? new StepResult(false, AddBlockUnsupportedMessage, "")
             : null;
+
+    /// <summary>block 参数存在且非 null（与解析器 HasValue 同口径）。</summary>
+    public static bool HasBlockParam(JsonElement p) =>
+        p.TryGetProperty("block", out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+
+    /// <summary>
+    /// block 与 space/layout/attribute 互斥入口守卫：必须先于 space 通用预校验
+    /// （否则 block+space:"model" 会误报"space 仅支持 paper"、block+space:"paper" 误报缺 layout）。
+    /// </summary>
+    public static StepResult? RejectBlockScopeConflict(JsonElement p) =>
+        HasBlockParam(p) && (HasParam(p, "space") || HasParam(p, "layout") || HasParam(p, "attribute"))
+            ? new StepResult(false, EditTargetResolver.BlockScopeConflictMessage, "")
+            : null;
+
+    private static bool HasParam(JsonElement p, string name) =>
+        p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+
+    /// <summary>
+    /// 句柄编辑统一目标解析（Plan-3）：block 显式 → 块定义专用文案（未知/受保护/互斥/非法句柄/未命中）；
+    /// 否则默认三空间解析（模型→纸面→顶层属性）。
+    /// </summary>
+    public static EditTarget? ResolveEditTarget(DrawingSession s, JsonElement p, out string error)
+    {
+        error = "";
+        if (!HasBlockParam(p))
+        {
+            EditTarget? target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+            if (target is null) error = resolveError ?? EditTargetResolver.NotFoundMessage;
+            return target;
+        }
+        EditTarget? blockTarget = EditTargetResolver.ResolveBlockTarget(s, p, out string? blockError);
+        if (blockTarget is null) error = blockError ?? EditTargetResolver.NotFoundMessage;
+        return blockTarget;
+    }
 
     /// <summary>
     /// R3：space 仅支持 "paper"（大小写不敏感）。其他取值（含 "model"/未知词）在入口即拒，

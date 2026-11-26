@@ -22,7 +22,7 @@ namespace CadAgent.View.Tests;
 
 /// <summary>
 /// 项2 Plan-2 Task 5 headless：布局幅面纸面空间编辑（移动/删除/改层/纸面新建线·字/改文字）、
-/// 块子图元 Plan-3 拒绝、视口框只读回归、跨空间两击拒绝、纸面 Undo 还原。
+/// 块子图元模式关拒绝、视口框只读回归、跨空间两击拒绝、纸面 Undo 还原。
 /// 夹具：模型近线（视口内）+ 远线；布局1 视口（Center(500,350) 600×400 / viewHeight 200
 /// → s=2，PaperRect (200,150)-(800,550)）+ 纸面线 (100,100)-(200,100) + 纸面标题块
 /// Insert（属性「图名」=旧图名 @ (300,620)，字高 10）。纸面编辑参数断言含 space/layout。
@@ -440,10 +440,10 @@ public class PaperEditHeadlessTests
         finally { Cleanup(window, path, projectDir); }
     }
 
-    // ---- 7. 块内子图元：Move/Delete 拒绝（Plan-3），无 tx ----
+    // ---- 7. 块内子图元：子图元模式关 → Move/Delete 拒绝（提示开启模式），无 tx ----
 
     [AvaloniaFact]
-    public void BlockChild_MoveAndDelete_RefusedPlan3_NoTx()
+    public void BlockChild_MoveAndDelete_ToggleOff_ShowsEnableHint_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(PaperDxf(blockChild: true));
         try
@@ -459,7 +459,7 @@ public class PaperEditHeadlessTests
             ClickCanvasAtWorld(window, 578, 428); // 子线纸面位置 = s·(insert(20,20)+子(19,19)) + center = (578,428)
             Assert.Null(window.Canvas.SelectedHandle);
             Assert.True(window.EditError!.IsVisible);
-            Assert.Contains("Plan-3", window.EditError.Text);
+            Assert.Contains("块子图元需开启「子图元」模式（全实例生效）", window.EditError.Text);
             Assert.Empty(window.Edit!.RecentTxIds);
 
             // Delete：选中块子图元 → 守卫先于确认拒绝
@@ -472,7 +472,7 @@ public class PaperEditHeadlessTests
             Dispatcher.UIThread.RunJobs();
 
             Assert.False(confirmInvoked);
-            Assert.Contains("Plan-3", window.EditError!.Text);
+            Assert.Contains("块子图元需开启「子图元」模式（全实例生效）", window.EditError!.Text);
             Assert.Empty(window.Edit.RecentTxIds);
             Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
         }
@@ -558,10 +558,10 @@ public class PaperEditHeadlessTests
         finally { Cleanup(window, path, projectDir); }
     }
 
-    // ---- 11. Move 二击复检：首击后选中漂移到块子图元 → Plan-3 拒绝，零 tx、盘上不变 ----
+    // ---- 11. Move 二击复检：首击后选中漂移到块子图元（模式关）→ 拒绝，零 tx、盘上不变 ----
 
     [AvaloniaFact]
-    public void Move_SelectionDriftToBlockChild_SecondClickRefusedPlan3_NoTx()
+    public void Move_SelectionDriftToBlockChild_SecondClick_ToggleOff_ShowsEnableHint_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(PaperDxf(blockChild: true));
         try
@@ -581,7 +581,7 @@ public class PaperEditHeadlessTests
             ClickCanvasAtWorld(window, 620, 380); // 空点目标：复检须拒绝（不得整父移动 Insert）
 
             Assert.True(window.EditError!.IsVisible);
-            Assert.Contains("Plan-3", window.EditError.Text);
+            Assert.Contains("块子图元需开启「子图元」模式（全实例生效）", window.EditError.Text);
             Assert.Empty(window.Edit!.RecentTxIds);
             var saved = CadAgent.Data.DrawingSession.Load(path);
             Assert.Equal(100, SavedPaperLine(saved).StartPoint.X, 6); // 纸面未动

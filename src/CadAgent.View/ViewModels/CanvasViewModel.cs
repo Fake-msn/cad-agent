@@ -31,6 +31,13 @@ public sealed class DiffOverlay
 public sealed record CenterlineSeg(string Handle, double X1, double Y1, double X2, double Y2);
 
 /// <summary>
+/// 选中目标来源投影（项2 Plan-3 T6）：真实实体句柄（块子图元不含子索引后缀）、
+/// 最内层块名/属性标签（非块内为 null）、所属空间与只读标志。纯数据可单测。
+/// </summary>
+public sealed record SelectedSource(
+    string Handle, string? BlockName, string? AttributeTag, RenderSpace Space, bool Locked);
+
+/// <summary>
 /// 画布视图模型（计划4 T3）：纯 C#，无 Avalonia 依赖，可单测。
 /// 变换约定（brief）：
 /// screenX = (worldX-minX)*baseScale*Zoom + panX + offsetX；
@@ -118,6 +125,11 @@ public sealed class CanvasViewModel
     /// <summary>选中图元（画布按 Handle 匹配高亮）。</summary>
     public RenderItem? SelectedItem => SelectedIndex is int i && i >= 0 && i < Items.Count ? Items[i] : null;
 
+    /// <summary>选中目标来源投影（块名/属性标签/空间）；null=无选择。</summary>
+    public SelectedSource? SelectedSource => SelectedItem is { } it
+        ? new SelectedSource(it.SourceHandle ?? it.Handle, it.BlockName, it.AttributeTag, it.Space, it.Locked)
+        : null;
+
     /// <summary>
     /// 问题定位高亮句柄集（T5）：SelectHandles 设置，画布对命中的图元同样施加
     /// 选中高亮；用户点击画布（Select）接管选择时清空。空句柄不参与匹配。
@@ -167,8 +179,10 @@ public sealed class CanvasViewModel
 
     /// <summary>
     /// 按真实句柄定位（天读证据行点击）：命中图元含 Insert 展开子图元
-    /// "{handle}:{i}"（与 RenderModel 展开口径一致）→ 沿用 T5 定位模式
-    /// SelectHandles 高亮 + CenterOn 居中。无命中 → 返回 false（不改选择）。
+    /// "{handle}:{i}"（与 RenderModel 展开口径一致）与块子实体真实句柄
+    /// （RenderItem.SourceHandle 精确相等，深读/问题定位用）→ 沿用 T5 定位模式
+    /// SelectHandles 高亮 + CenterOn 居中（命中集存渲染句柄，去重）。
+    /// 无命中 → 返回 false（不改选择）。
     /// </summary>
     public bool SelectByHandle(string handle)
     {
@@ -176,7 +190,8 @@ public sealed class CanvasViewModel
         List<string> matched = Items
             .Where(i => i.Handle.Length > 0
                 && (string.Equals(i.Handle, handle, StringComparison.Ordinal)
-                    || i.Handle.StartsWith(handle + ":", StringComparison.Ordinal)))
+                    || i.Handle.StartsWith(handle + ":", StringComparison.Ordinal)
+                    || string.Equals(i.SourceHandle, handle, StringComparison.Ordinal)))
             .Select(i => i.Handle)
             .Distinct(StringComparer.Ordinal)
             .ToList();

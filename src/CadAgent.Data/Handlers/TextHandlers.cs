@@ -67,7 +67,8 @@ internal static class TextHandlers
 
 /// <summary>
 /// set-text：文字/实例属性改值（spec §3.3）。空串=清空（合法）；TEXT/ATTRIB 为单行
-/// 实体禁换行（多行仅 MText）；ADEF 的 Value 是块内默认值（全实例语义，Plan-3）。
+/// 实体禁换行（多行仅 MText）；ADEF 的 Value 是块内默认值（全实例语义，Plan-3 不做）；
+/// block 显式 → 块定义直接实体（TEXT/MTEXT 可改，全实例生效）。
 /// </summary>
 public sealed class SetTextHandler : IStepHandler
 {
@@ -81,12 +82,12 @@ public sealed class SetTextHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectBlockScopeConflict(p) is { } blockConflict) return blockConflict;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
-        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);
         if (target == null)
-            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+            return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, ViewportMessage, "");
         if (!TextHandlers.TryReadString(p, "text", out string? text, out string paramError))
             return new StepResult(false, paramError, "");
@@ -119,7 +120,7 @@ public sealed class SetTextHandler : IStepHandler
 /// <summary>
 /// set-attribute：实例属性改值。主形态 {handle,value} 直指 ATTRIB；次形态 {insert,tag,value}
 /// 在顶层 Insert（模型/纸面）按 tag 精确（Ordinal，CAD tag 大小写敏感）定位，
-/// 同 insert 同 tag 多条 fail-closed 要求句柄形态；块定义内属性属 Plan-3。
+/// 同 insert 同 tag 多条 fail-closed 要求句柄形态；块内属性编辑未支持（block 参数拒绝）。
 /// </summary>
 public sealed class SetAttributeHandler : IStepHandler
 {
@@ -127,13 +128,14 @@ public sealed class SetAttributeHandler : IStepHandler
     public const string NotFoundInsertMessage = "insert 句柄不存在（已检索：模型/纸面顶层）";
     public const string NotAttributeMessage = "目标不是实例属性";
     public const string MissingFormMessage = "set-attribute 需要 handle 或 insert+tag";
+    public const string BlockUnsupportedMessage = "块内属性编辑未支持";
 
     public string Kind => "set-attribute";
 
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.HasBlockParam(p)) return new StepResult(false, BlockUnsupportedMessage, "");
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         // 两形态（handle / insert+tag）共用同一作用域预校验：space:"paper" 缺 layout、
         // 未知/非纸面 layout、attribute 非 true 一律先于解析给出明确原因（同 set-text 口径）。

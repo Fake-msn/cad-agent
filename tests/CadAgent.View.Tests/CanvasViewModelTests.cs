@@ -486,6 +486,74 @@ public class CanvasViewModelTests
         Assert.Equal(0, raised);
     }
 
+    // ---- Plan-3 T6 fix: SourceHandle 定位 + SelectedSource 投影 ----
+
+    [Fact]
+    public void SelectByHandle_MatchesSourceHandleOfBlockChild()
+    {
+        // 块子图元 Handle 为 "{insert}:{i}" 展示形，真实实体句柄在 SourceHandle；
+        // 深读/问题定位按真实句柄须解析到该子图元（高亮集存渲染句柄）。
+        var items = new[]
+        {
+            new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (10.0, 0.0) }, "0", 0xFFFFFF,
+                null, 0, 0, "9:1", SourceHandle: "5A", BlockName: "B1"),
+            Line(0, 10, 10, 10, handle: "9"), // 父 Insert
+        };
+        var vm = new CanvasViewModel(items);
+        vm.Fit((0, 0, 10, 10), 800, 600);
+
+        Assert.True(vm.SelectByHandle("5A"));
+        Assert.Equal("9:1", vm.SelectedHandle);
+        Assert.Equal(new[] { "9:1" }, vm.HighlightedHandles.ToArray()); // 仅渲染句柄，无重复
+        Assert.True(vm.SelectByHandle("9")); // 既有 Handle + "{handle}:" 前缀口径保持
+        Assert.Equal(new[] { "9", "9:1" }, vm.HighlightedHandles.OrderBy(h => h).ToArray());
+    }
+
+    [Fact]
+    public void SelectByHandle_HandleAndSourceHandleSame_Deduplicates()
+    {
+        var items = new[]
+        {
+            new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (10.0, 0.0) }, "0", 0xFFFFFF,
+                null, 0, 0, "5A", SourceHandle: "5A"),
+        };
+        var vm = new CanvasViewModel(items);
+        vm.Fit((0, 0, 10, 10), 800, 600);
+
+        Assert.True(vm.SelectByHandle("5A"));
+        Assert.Single(vm.HighlightedHandles); // Handle/SourceHandle 双命中不重复
+    }
+
+    [Fact]
+    public void SelectedSource_ProjectsBlockChildAttributeAndPlain()
+    {
+        var items = new[]
+        {
+            // 块子图元：块名 + 真实来源句柄（纸面）
+            new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (1.0, 0.0) }, "0", 0xFFFFFF,
+                null, 0, 0, "9:0", Space: RenderSpace.PaperSpace, SourceHandle: "5A", BlockName: "B1"),
+            // Insert 属性：ATTRIB 句柄 + 标签（无块名）
+            new RenderItem(RenderKind.Text, new[] { (2.0, 2.0) }, "0", 0xFFFFFF, "v", 2,
+                0, "9:attr:图名", SourceHandle: "5B", AttributeTag: "图名"),
+            // 普通图元：SourceHandle 缺失回落自身 Handle
+            Line(3, 3, 4, 4, handle: "7"),
+        };
+        var vm = new CanvasViewModel(items);
+        Assert.Null(vm.SelectedSource); // 无选择
+
+        vm.Select(0);
+        Assert.Equal(new SelectedSource("5A", "B1", null, RenderSpace.PaperSpace, false), vm.SelectedSource);
+
+        vm.Select(1);
+        Assert.Equal(new SelectedSource("5B", null, "图名", RenderSpace.ModelSpace, false), vm.SelectedSource);
+
+        vm.Select(2);
+        Assert.Equal(new SelectedSource("7", null, null, RenderSpace.ModelSpace, false), vm.SelectedSource);
+
+        vm.Select(null);
+        Assert.Null(vm.SelectedSource);
+    }
+
     // ---- T9 carryover: Refresh after a StepEngine edit ----
 
     [Fact]

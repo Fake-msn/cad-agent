@@ -12,6 +12,12 @@ public static class DxfFixture
     {
         var doc = new CadDocument();
         populate(doc);
+        return WriteTempDxf(doc);
+    }
+
+    /// <summary>已构造文档落盘（需保留对象图引用时用，如嵌套块夹具）。</summary>
+    public static string WriteTempDxf(CadDocument doc)
+    {
         string path = Path.Combine(Path.GetTempPath(), $"cadagent-test-{Guid.NewGuid():N}.dxf");
         using var fs = File.Create(path);
         DxfWriter.Write(fs, doc);
