@@ -250,7 +250,7 @@ public static int Count(CadDocument doc, string blockName, int maxDepth = 2)
 
 - [ ] Step 1 失败测试（headless，两实例块夹具 + 嵌套/旋转缩放夹具）：
   1) Toggle 关布局 BlockChild → 新文案、无 tx；模型幅面父整体行为不变（既有用例保持）；
-  2) Toggle 开 + 确认 → 块内线 Move：两实例均位移；局部增量在旋转 90°+缩放(2,3)下精确（世界 (10,6)→局部 (3,2)）；审计含 block；
+  2) Toggle 开 + 确认 → 块内线 Move：两实例均位移；局部增量在旋转 90°+缩放(2,3)下精确（期望值由正向 InsertAffine 变换推导，勿手算；逆解 [[0,-3],[2,0]] 对 (10,6) 得 (3,-10/3)）；审计含 block；
   3) Delete 块内线 → 两实例缺失；4) ChangeLayer；5) SetText 块内文字；6) 取消确认→无 tx；7) 匿名块（Dimension 子图元）拒绝；8) Dynamic/Xref 拒绝；9) 属性项在 Toggle 开时仍实例级（不误入块编辑）；10) Undo 还原块编辑（两实例恢复）。
 - [ ] 红→实现→绿（View.Tests 全绿；既有 BlockChild 拒绝/整父用例按新事实改写并保留旧语义断言）→ 提交 `feat(view): 子图元模式与块定义编辑（确认/计数/路由）`
 
