@@ -24,6 +24,17 @@ public readonly record struct Affine(double A, double B, double C, double D, dou
         C * inner.Tx + D * inner.Ty + Ty);
 
     /// <summary>
+    /// 线性部逆（Tx/Ty 置 0）：世界/纸面增量→块局部增量用。det≈0 → false。
+    /// </summary>
+    public bool TryInvertLinear(out Affine inverse)
+    {
+        double det = A * D - B * C;
+        if (Math.Abs(det) < 1e-12) { inverse = default; return false; }
+        inverse = new Affine(D / det, -B / det, -C / det, A / det, 0, 0);
+        return true;
+    }
+
+    /// <summary>
     /// Radius scale approximation: geometric mean of the column norms (exact
     /// singular values for a single R*S; circles under non-uniform scale become
     /// ellipses in true CAD — approximated here, documented limitation).
