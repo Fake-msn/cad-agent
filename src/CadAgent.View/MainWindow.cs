@@ -2303,7 +2303,8 @@ public sealed class MainWindow : Window
 
             case EditTool.SetText:
                 // 项2 T4 防御分支：改文字工具尚无 UI 入口（T5 接线），点击一律消费、不产生编辑
-                // （不得落入 default 的默认选择路径）。
+                // （不得落入 default 的默认选择路径）；留痕提示使该 deferred 状态可诊断。
+                SetEditError("改文字工具尚未接线");
                 return true;
 
             default:

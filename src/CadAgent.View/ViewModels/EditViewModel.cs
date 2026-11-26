@@ -55,6 +55,10 @@ public sealed class EditViewModel
     private readonly SemaphoreSlim _gate;
     private readonly List<string> _recentTxIds = new();
 
+    // set-attribute 无 EditTool 成员（无独立工具按钮）：tool/kind 成对常量化，防字面量漂移。
+    private const string SetAttributeToolName = "SetAttribute";
+    private const string SetAttributeKind = "set-attribute";
+
     public EditViewModel(DrawingSession session, IAuditStore auditStore, SnapshotStore snapshotStore,
         IIdentityProvider identity, RoleChecker roleChecker, string projectDir,
         string? sessionId = null, SemaphoreSlim? sessionGate = null)
@@ -134,7 +138,7 @@ public sealed class EditViewModel
 
     /// <summary>改实例属性值（spec §3.3 set-attribute 句柄形态；整实例级，不涉块定义）。</summary>
     public Task<EditResult> SetAttributeAsync(string handle, string value) =>
-        WithHandle(handle, h => ApplyAsync("SetAttribute", "set-attribute",
+        WithHandle(handle, h => ApplyAsync(SetAttributeToolName, SetAttributeKind,
             JsonSerializer.SerializeToElement(new { handle = h, value })));
 
     private static Dictionary<string, object?> HandleArgs(ulong handle, string? space, string? layout, bool attribute)
@@ -175,6 +179,9 @@ public sealed class EditViewModel
     /// </summary>
     private async Task<EditResult> ApplyAsync(string toolName, string kind, JsonElement args)
     {
+        // 与公开重载同口径：非对象 args 先于任何副作用拒绝（不留审计、不取闸）。
+        if (args.ValueKind != JsonValueKind.Object)
+            return new EditResult(false, "", "编辑参数必须是 JSON 对象");
         string planId = "view-edit-" + Guid.NewGuid().ToString("N");
 
         await _gate.WaitAsync();

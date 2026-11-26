@@ -974,6 +974,53 @@ public class EditViewModelTests
     }
 
     [Fact]
+    public async Task Delete_PaperAttribute_WithSpaceLayoutAttribute_RemovesAttrib_OneTx_ModelUntouched()
+    {
+        using var f = new PaperFixture();
+        EditViewModel vm = f.MakeVm();
+        int modelBefore = f.Session.Doc.Entities.Count;
+        int paperBefore = f.PaperLayout().AssociatedBlock!.Entities.Count;
+
+        EditResult r = await vm.DeleteAsync(f.AttributeHandle, "paper", PaperFixture.LayoutName, attribute: true);
+
+        Assert.True(r.Ok, r.Error);
+        Insert insert = f.PaperLayout().AssociatedBlock!.Entities.OfType<Insert>().Single();
+        Assert.Empty(insert.Attributes); // ATTRIB 从该布局 Insert.Attributes 移除
+        Assert.Equal(paperBefore, f.PaperLayout().AssociatedBlock!.Entities.Count); // Insert 本身未删
+        Assert.Equal(modelBefore, f.Session.Doc.Entities.Count); // 模型空间未动
+        Assert.Equal(new[] { r.TxId }, vm.RecentTxIds);
+        Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "tx-commit"); // 单事务
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        Assert.Equal("delete-entity", Params(step).GetProperty("Kind").GetString());
+        JsonElement stepParams = Params(step).GetProperty("Params");
+        Assert.Equal(ulong.Parse(f.AttributeHandle), stepParams.GetProperty("handle").GetUInt64());
+        Assert.Equal("paper", stepParams.GetProperty("space").GetString());
+        Assert.Equal(PaperFixture.LayoutName, stepParams.GetProperty("layout").GetString());
+        Assert.True(stepParams.GetProperty("attribute").GetBoolean());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task Delete_Defaults_EntityDeleted_AuditHasNoAttributeKey()
+    {
+        using var f = new Fixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.DeleteAsync(f.LineHandle); // 默认 space/layout/attribute
+
+        Assert.True(r.Ok, r.Error);
+        Assert.DoesNotContain(f.Session.Doc.Entities, e => e.Handle.ToString() == f.LineHandle);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        // 原始审计 JSON 逐字无 "attribute" 键（解析与令牌双查）。
+        Assert.False(Params(req).GetProperty("args").TryGetProperty("attribute", out _));
+        Assert.False(Params(step).GetProperty("Params").TryGetProperty("attribute", out _));
+        Assert.DoesNotContain("\"attribute\"", req.Entry.ParamsJson);
+        Assert.DoesNotContain("\"attribute\"", step.Entry.ParamsJson);
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
     public async Task DrawLine_WithPaperSpace_WritesPaperNotModel()
     {
         using var f = new PaperFixture();
