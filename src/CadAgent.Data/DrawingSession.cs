@@ -169,7 +169,9 @@ public sealed class DrawingSession : IDrawingSession
         {
             foreach (var layout in Doc.Layouts.OrderBy(l => l.Name, StringComparer.Ordinal))
             {
-                if (layout.AssociatedBlock is null) continue;
+                // 只投影纸面布局：Model 布局（IsPaperSpace=false）的关联块就是 *Model_Space，
+                // 与 E| 行同一集合，重复投影纯属 2× 成本且语义错误（同 SheetRegistryBuilder 口径）。
+                if (!layout.IsPaperSpace || layout.AssociatedBlock is null) continue;
                 foreach (var e in layout.AssociatedBlock.Entities.OrderBy(e => e.Handle))
                 {
                     ProjectEntity(sb, "P|" + layout.Name, e);
@@ -200,7 +202,7 @@ public sealed class DrawingSession : IDrawingSession
             // 否则块属性定义（其 Value 为默认值）会被泛型文本行吞掉。
             case AttributeDefinition adef:
                 sb.Append(FormattableString.Invariant(
-                    $"|ADEF|{adef.Tag}|{adef.Value}|{adef.InsertPoint.X:R}|{adef.InsertPoint.Y:R}"));
+                    $"|ADEF|{adef.Tag}|{adef.Value}|{adef.Height:R}|{adef.Rotation:R}|{adef.InsertPoint.X:R}|{adef.InsertPoint.Y:R}"));
                 break;
             case Line line:
                 sb.Append(FormattableString.Invariant(
@@ -239,10 +241,12 @@ public sealed class DrawingSession : IDrawingSession
             case Insert insert:
                 sb.Append(FormattableString.Invariant(
                     $"|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.InsertPoint.Z:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));
-                // 属性值（图号/轴号等）是纸面可见内容，必须进哈希；按 Tag 排序保证确定性。
+                // 属性值（图号/轴号等）是纸面可见内容，必须进哈希；层/位置/字高是可见排版，
+                // 移动 ATTRIB 不改值也必须可观测。按 Tag 排序保证确定性。
                 foreach (var attr in insert.Attributes.OrderBy(a => a.Tag, StringComparer.Ordinal))
                 {
-                    sb.Append(FormattableString.Invariant($"|A|{attr.Tag}|{attr.Value}"));
+                    sb.Append(FormattableString.Invariant(
+                        $"|A|{attr.Tag}|{attr.Value}|{attr.Layer?.Name ?? "0"}|{attr.InsertPoint.X:R},{attr.InsertPoint.Y:R}|{attr.Height:R}"));
                 }
                 break;
             case Hatch hatch:
