@@ -45,6 +45,19 @@ internal static class HandlerHelpers
             : null;
 
     /// <summary>
+    /// R3：space 仅支持 "paper"（大小写不敏感）。其他取值（含 "model"/未知词）在入口即拒，
+    /// 不得塌陷为"句柄不存在"（解析层 fail-closed → null 会误报为未找到）。
+    /// </summary>
+    public static StepResult? RejectUnsupportedSpace(JsonElement p)
+    {
+        if (!p.TryGetProperty("space", out var v) || v.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return null;
+        return string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : new StepResult(false, "space 仅支持 paper", "");
+    }
+
+    /// <summary>
     /// 新建实体目标集合：默认模型（历史行为不变）；space:"paper"+layout → 该布局纸面关联块
     /// 实体集合（layout 必须存在且 IsPaperSpace，否则 fail-closed）。
     /// </summary>
@@ -62,7 +75,7 @@ internal static class HandlerHelpers
         }
         if (hasSpace && !string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase))
         {
-            error = "space 仅支持 \"paper\"";
+            error = "space 仅支持 paper"; // 与 RejectUnsupportedSpace 同文案（入口已先拒，此处为兜底）
             return false;
         }
         string? layoutName = OptString(p, "layout");
@@ -94,6 +107,7 @@ public sealed class AddLineHandler : IStepHandler
     {
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
             return new StepResult(false, spaceError, "");
         var line = new Line
@@ -114,6 +128,7 @@ public sealed class AddTextHandler : IStepHandler
     {
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
             return new StepResult(false, spaceError, "");
         var text = new TextEntity
@@ -128,13 +143,18 @@ public sealed class AddTextHandler : IStepHandler
     }
 }
 
-/// <summary>add-circle（3j 生成式绘制补全）：params {x,y,radius,layer?}。</summary>
+/// <summary>add-circle（3j 生成式绘制补全）：params {x,y,radius,layer?,space?,layout?}。</summary>
 public sealed class AddCircleHandler : IStepHandler
 {
     public string Kind => "add-circle";
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        // 与 add-line/add-text 同一集合解析：默认模型；space:"paper"+layout → 布局纸面关联块。
+        if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
+            return new StepResult(false, spaceError, "");
         double radius = HandlerHelpers.Req(p, "radius");
         if (radius <= 0) return new StepResult(false, "radius 须为正数", "");
         var circle = new Circle
@@ -143,7 +163,7 @@ public sealed class AddCircleHandler : IStepHandler
             Radius = radius,
             Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
         };
-        s.Doc.Entities.Add(circle);
+        target!.Add(circle);
         return new StepResult(true, "", circle.Handle.ToString());
     }
 }

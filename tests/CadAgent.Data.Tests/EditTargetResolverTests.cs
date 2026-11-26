@@ -382,4 +382,33 @@ public class EditTargetResolverTests : IDisposable
         Assert.Null(EditTargetResolver.Resolve(s, P(new { handle = "not-a-number" })));
         Assert.Null(EditTargetResolver.Resolve(s, P(new { dx = 1 })));
     }
+
+    [Fact]
+    public void Resolve_PaperRestriction_ModelAttributeNotFound()
+    {
+        // 组合否定：纸面限定 + 属性检索，句柄来自模型空间属性 → 不回退（fail-closed）。
+        AttributeEntity? attr = null;
+        var (s, _) = New(doc => (_, attr) = PaperFixtures.AddAttributeInsert(doc));
+        Assert.Null(EditTargetResolver.Resolve(s, P(new
+        {
+            handle = attr!.Handle.ToString(),
+            space = "paper",
+            layout = PaperFixtures.LayoutName,
+            attribute = true
+        })));
+    }
+
+    [Fact]
+    public void Resolve_NumericJsonHandle_ResolvesEntity()
+    {
+        // handle 契约为 JSON 数字或十进制字符串：数字形态（ulong 序列化）同样可解析。
+        var (s, layout) = New();
+        var line = layout.AssociatedBlock!.Entities.OfType<Line>().Single();
+        JsonElement p = JsonSerializer.SerializeToElement(new { handle = line.Handle });
+        Assert.Equal(JsonValueKind.Number, p.GetProperty("handle").ValueKind);
+        var target = EditTargetResolver.Resolve(s, p);
+        Assert.NotNull(target);
+        Assert.Equal(EditOwnerKind.Paper, target!.Owner);
+        Assert.Same(line, target.Entity);
+    }
 }

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ACadSharp;
 using ACadSharp.Entities;
+using CadAgent.Core;
 using CadAgent.Data.Handlers;
 using CSMath;
 
@@ -382,5 +383,115 @@ public class PaperEditHandlersTests : IDisposable
             : new AddTextHandler().Apply(s, p);
         Assert.False(r.Ok);
         Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+    }
+
+    // ---- add-circle 纸面化 ----
+
+    [Fact]
+    public void AddCircle_PaperLayout_WritesIntoLayoutBlock()
+    {
+        var (s, layout) = New();
+        var r = new AddCircleHandler().Apply(s, P(new
+        {
+            x = 3, y = 4, radius = 2, space = "paper", layout = PaperFixtures.LayoutName
+        }));
+        Assert.True(r.Ok, r.Error);
+        var circle = Assert.Single(layout.AssociatedBlock!.Entities.OfType<Circle>());
+        Assert.Equal(3, circle.Center.X, 6);
+        Assert.Equal(2, circle.Radius, 6);
+        Assert.Empty(s.Doc.Entities); // 空间隔离：模型未写入
+    }
+
+    [Fact]
+    public void AddCircle_PaperWithoutLayout_Fails()
+    {
+        var (s, _) = New();
+        var r = new AddCircleHandler().Apply(s, P(new { x = 3, y = 4, radius = 2, space = "paper" }));
+        Assert.False(r.Ok);
+        Assert.Contains("layout", r.Error);
+    }
+
+    [Fact]
+    public void AddCircle_BlockParam_RejectedAsPlan3()
+    {
+        var (s, _) = New();
+        var r = new AddCircleHandler().Apply(s, P(new
+        {
+            x = 3, y = 4, radius = 2, block = "图框"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+    }
+
+    [Fact]
+    public void AddCircle_Default_StillWritesModel()
+    {
+        var (s, layout) = New();
+        var r = new AddCircleHandler().Apply(s, P(new { x = 3, y = 4, radius = 2 }));
+        Assert.True(r.Ok, r.Error);
+        Assert.Single(s.Doc.Entities.OfType<Circle>());
+        Assert.Empty(layout.AssociatedBlock!.Entities.OfType<Circle>());
+    }
+
+    // ---- R3：space 预校验（全部接受 space 的处理器） ----
+
+    /// <summary>各处理器最小合法参数（handle 用纸面实句柄：若未先拒，space 会被误读成未命中/成功）。</summary>
+    private static JsonElement SpaceProbe(string kind, string space, ACadSharp.Objects.Layout layout) => kind switch
+    {
+        "add-line" => P(new { x1 = 1, y1 = 2, x2 = 3, y2 = 4, space, layout = PaperFixtures.LayoutName }),
+        "add-text" => P(new { x = 1, y = 2, text = "T", height = 3, space, layout = PaperFixtures.LayoutName }),
+        "add-circle" => P(new { x = 1, y = 2, radius = 3, space, layout = PaperFixtures.LayoutName }),
+        "move-entity" => P(new { handle = PaperLine(layout).Handle.ToString(), dx = 1, dy = 1, space, layout = PaperFixtures.LayoutName }),
+        "delete-entity" => P(new { handle = PaperLine(layout).Handle.ToString(), space, layout = PaperFixtures.LayoutName }),
+        "change-layer" => P(new { handle = PaperLine(layout).Handle.ToString(), layer = "0", space, layout = PaperFixtures.LayoutName }),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
+
+    private static StepResult ApplyKind(string kind, DrawingSession s, JsonElement p) => kind switch
+    {
+        "add-line" => new AddLineHandler().Apply(s, p),
+        "add-text" => new AddTextHandler().Apply(s, p),
+        "add-circle" => new AddCircleHandler().Apply(s, p),
+        "move-entity" => new MoveEntityHandler().Apply(s, p),
+        "delete-entity" => new DeleteEntityHandler().Apply(s, p),
+        "change-layer" => new ChangeLayerHandler().Apply(s, p),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
+
+    [Theory]
+    [InlineData("add-line", "foo")]
+    [InlineData("add-line", "model")]
+    [InlineData("add-text", "foo")]
+    [InlineData("add-text", "model")]
+    [InlineData("add-circle", "foo")]
+    [InlineData("add-circle", "model")]
+    [InlineData("move-entity", "foo")]
+    [InlineData("move-entity", "model")]
+    [InlineData("delete-entity", "foo")]
+    [InlineData("delete-entity", "model")]
+    [InlineData("change-layer", "foo")]
+    [InlineData("change-layer", "model")]
+    public void SpaceOtherThanPaper_RejectedAtEntry(string kind, string space)
+    {
+        var (s, layout) = New();
+        var r = ApplyKind(kind, s, SpaceProbe(kind, space, layout));
+        Assert.False(r.Ok);
+        // R3：不得塌陷为"句柄不存在"，须为明确的 space 取值拒绝。
+        Assert.Contains("仅支持 paper", r.Error);
+    }
+
+    [Fact]
+    public void Delete_PaperBoundaryViewport_Rejected()
+    {
+        // 纸边界视口（RepresentsPaper=true，Layout 构造时自动附加于块首）同样不可编辑。
+        var (s, layout) = New();
+        var vp = layout.AssociatedBlock!.Entities.OfType<Viewport>().Single(v => v.RepresentsPaper);
+        Assert.NotEqual(0UL, vp.Handle); // 句柄 0 会与未写句柄对象混淆，先钉住夹具前提
+        var r = new DeleteEntityHandler().Apply(s, P(new
+        {
+            handle = vp.Handle.ToString(), space = "paper", layout = PaperFixtures.LayoutName
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("视口对象不支持编辑", r.Error);
     }
 }

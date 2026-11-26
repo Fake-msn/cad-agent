@@ -12,6 +12,7 @@ public sealed class DeleteEntityHandler : IStepHandler
     {
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
         if (target == null)
             return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
@@ -20,23 +21,29 @@ public sealed class DeleteEntityHandler : IStepHandler
         switch (target.Owner)
         {
             case EditOwnerKind.Model:
-                s.Doc.Entities.Remove(target.Entity);
+                if (!s.Doc.Entities.Remove(target.Entity))
+                    return new StepResult(false, "实体移除失败", "");
                 break;
             case EditOwnerKind.Paper:
             {
                 var layout = EditTargetResolver.FindLayout(s, target.LayoutName);
                 if (layout?.AssociatedBlock is null)
                     return new StepResult(false, $"布局不存在：{target.LayoutName}", "");
-                layout.AssociatedBlock.Entities.Remove(target.Entity);
+                if (!layout.AssociatedBlock.Entities.Remove(target.Entity))
+                    return new StepResult(false, "实体移除失败", "");
                 break;
             }
-            default:
+            case EditOwnerKind.InsertAttribute:
                 // ATTRIB 实例：Insert.Attributes（SeqendCollection<AttributeEntity>）的 Remove(T)
                 // 实件存在（ACadSharp 3.8.35 反射核验），无需重建集合。
-                if (target.AttributeOwner is null)
+                // 显式分支而非 default：未来新增枚举成员不得落到这里的强制转换（InvalidCastException）。
+                if (target.Entity is not AttributeEntity attribute || target.AttributeOwner is null)
                     return new StepResult(false, "属性所属插入缺失", "");
-                target.AttributeOwner.Attributes.Remove((AttributeEntity)target.Entity);
+                if (!target.AttributeOwner.Attributes.Remove(attribute))
+                    return new StepResult(false, "实体移除失败", "");
                 break;
+            default:
+                return new StepResult(false, $"delete 暂不支持所有者 {target.Owner}", "");
         }
         return new StepResult(true, "", target.Entity.Handle.ToString());
     }
@@ -49,6 +56,7 @@ public sealed class MoveEntityHandler : IStepHandler
     {
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
         if (target == null)
             return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
@@ -174,6 +182,7 @@ public sealed class ChangeLayerHandler : IStepHandler
     {
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
         if (target == null)
             return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
