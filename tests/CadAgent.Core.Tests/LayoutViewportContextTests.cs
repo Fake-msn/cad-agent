@@ -77,4 +77,49 @@ public class LayoutViewportContextTests
     {
         Assert.Equal(expected, ViewportTransform.ScaleOf(paperHeight, viewHeight), 9);
     }
+
+    // ---- 复审第 2 轮：实例映射不得与 Scale 诊断口径分叉 ----
+
+    [Fact]
+    public void Context_PaperDimDegenerate_MapsToTargetFinite_ConsistentWithScale()
+    {
+        // 纸高退化但视高有效（ScaleOf 数学层会得 0 → 除零）；实例必须整体走退化快路径。
+        var ctx = new LayoutViewportContext("1", (500, 350), 1000, 0, 200, (7, 8), 0);
+        Assert.True(ctx.IsDegenerate);
+        Assert.Equal(1.0, ctx.Scale);
+        var p = ctx.PaperToModel((500, 350));
+        Assert.True(double.IsFinite(p.X) && double.IsFinite(p.Y));
+        Assert.Equal((7.0, 8.0), p);
+        // 与「Scale==1 且原点映射到 ViewTarget」自洽：任意纸面点亦返回 ViewTarget。
+        Assert.Equal((7.0, 8.0), ctx.PaperToModel((1500, -250)));
+    }
+
+    [Fact]
+    public void Context_NaNViewHeight_IsDegenerate_NaNTwistRefused()
+    {
+        var ctx = new LayoutViewportContext("1", (500, 350), 1000, 700, double.NaN, (7, 8), 0);
+        Assert.True(ctx.IsDegenerate);
+        Assert.False(ctx.CanMapModel);
+        Assert.Equal(1.0, ctx.Scale);
+        Assert.Equal((7.0, 8.0), ctx.PaperToModel((500, 350)));
+        Assert.False(new LayoutViewportContext("1", (500, 350), 1000, 700, 200, (0, 0), double.NaN).CanMapModel);
+    }
+
+    [Theory]
+    [InlineData(1e-12, true)]        // 阈值上界含：视高 == MinViewHeight 即退化
+    [InlineData(1.0000001e-12, false)]
+    public void Context_ViewHeightThreshold_IsDegenerate(double viewHeight, bool degenerate)
+    {
+        var ctx = new LayoutViewportContext("1", (500, 350), 1000, 700, viewHeight, (0, 0), 0);
+        Assert.Equal(degenerate, ctx.IsDegenerate);
+        Assert.Equal(degenerate, !ctx.CanMapModel);
+    }
+
+    [Theory]
+    [InlineData(1e-12, true)]
+    [InlineData(1.0000001e-12, false)]
+    public void ScaleOf_Boundary(double viewHeight, bool isOne)
+    {
+        Assert.Equal(isOne ? 1 : 700 / viewHeight, ViewportTransform.ScaleOf(700, viewHeight), 6);
+    }
 }
