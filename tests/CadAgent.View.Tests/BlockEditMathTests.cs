@@ -28,6 +28,11 @@ public class BlockEditMathTests
 
     private static string HandleOf(Entity e) => e.Handle.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
+    /// <summary>强制句柄（ACadSharp Handle setter 为 internal；脏图夹具专用）。</summary>
+    private static void SetHandle(Entity e, ulong handle) =>
+        typeof(ACadSharp.CadObject).GetProperty(nameof(ACadSharp.CadObject.Handle))!
+            .GetSetMethod(nonPublic: true)!.Invoke(e, new object[] { handle });
+
     /// <summary>增量（向量）只经线性部映射：插入点平移不参与（平移只影响点坐标）。</summary>
     private static (double X, double Y) ForwardDelta(Affine t, double x, double y) =>
         (t.A * x + t.B * y, t.C * x + t.D * y);
@@ -198,6 +203,75 @@ public class BlockEditMathTests
             Assert.Equal(lx, bx, Tol);
             Assert.Equal(ly, by, Tol);
         });
+    }
+
+    [Fact]
+    public void WorldDeltaToBlockDelta_RootHandleSharedByModelAndPaper_ReturnsAmbiguousError()
+    {
+        // 脏图：合法 DXF 句柄全文档唯一，同句柄跨空间 = 无法判定宿主空间 → fail-closed。
+        // Handle setter 为 internal，测试用反射强制同一句柄（模型 Insert 与纸面 Insert）。
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("AMB");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(block);
+
+            doc.Entities.Add(new Insert(block) { XScale = 2, YScale = 3, ZScale = 1 });
+
+            var layout = new ACadSharp.Objects.Layout("布局2");
+            doc.Layouts.Add(layout);
+            layout.AddViewport(new Viewport
+            {
+                Center = new XYZ(500, 350, 0), Width = 1000, Height = 700,
+                ViewTarget = new XYZ(0, 0, 0), ViewHeight = 200
+            });
+            layout.AssociatedBlock!.Entities.Add(new Insert(block) { XScale = 5, YScale = 7, ZScale = 1 });
+        }, s =>
+        {
+            Insert modelIns = s.Doc.Entities.OfType<Insert>().Single();
+            Insert paperIns = s.Doc.Layouts.First(l => l.Name == "布局2")
+                .AssociatedBlock!.Entities.OfType<Insert>().Single();
+            SetHandle(paperIns, modelIns.Handle);
+
+            var (ok, dx, dy, err) = BlockEditMath.WorldDeltaToBlockDelta(
+                s.Doc, new[] { HandleOf(modelIns) }, 10, 6);
+            Assert.False(ok);
+            Assert.Equal(0, dx);
+            Assert.Equal(0, dy);
+            Assert.Equal($"插入链解析失败: {HandleOf(modelIns)}（多空间命中）", err);
+        });
+    }
+
+    [Fact]
+    public void WorldDeltaToBlockDelta_EmptyOrNullChain_ReturnsIdentitySuccess()
+    {
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("B5");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block) { XScale = 2, YScale = 2, ZScale = 1 });
+        }, s =>
+        {
+            foreach (IReadOnlyList<string>? chain in new IReadOnlyList<string>?[]
+                     { Array.Empty<string>(), null })
+            {
+                var (ok, lx, ly, err) = BlockEditMath.WorldDeltaToBlockDelta(s.Doc, chain!, 7, -3);
+                Assert.True(ok, err);
+                Assert.Equal(7, lx, Tol);
+                Assert.Equal(-3, ly, Tol);
+            }
+        });
+    }
+
+    [Fact]
+    public void WorldDeltaToBlockDelta_NullDocument_ReturnsArgumentError()
+    {
+        var (ok, dx, dy, err) = BlockEditMath.WorldDeltaToBlockDelta(null!, new[] { "1A" }, 1, 1);
+        Assert.False(ok);
+        Assert.Equal(0, dx);
+        Assert.Equal(0, dy);
+        Assert.Equal("图纸为空", err);
     }
 
     [Fact]

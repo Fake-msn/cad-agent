@@ -616,15 +616,15 @@ public static class RenderModelBuilder
 
     private static double NormDeg(double deg) => ((deg % 360.0) + 360.0) % 360.0;
 
+    /// <summary>OCS→WCS XY 投影仿射（内部暴露给块编辑逆解：须与渲染复合同口径）。</summary>
+    internal static Affine OcsAffine(XYZ normal) => OcsMapper(normal).Map;
+
     /// <summary>
     /// OCS→WCS XY 投影（AutoCAD 任意轴算法）：法向接近 +Z 时 identity 快路径；
     /// 否则 Ax = (|Nx|,|Ny| 均 &lt; 1/64 ? (0,1,0)×N : (0,0,1)×N) 归一，Ay = N×Ax 归一。
     /// 返回 2D 仿射（丢弃 WCS Z——视图为 XY 投影）。倾斜法向的圆/弧投影为椭圆，
     /// 经 tessellation 诚实近似（72 段）；文字旋转取 OCS 方向向量投影角。
     /// </summary>
-    /// <summary>OCS→WCS XY 投影仿射（内部暴露给块编辑逆解：须与渲染复合同口径）。</summary>
-    internal static Affine OcsAffine(XYZ normal) => OcsMapper(normal).Map;
-
     private static (Affine Map, bool IsIdentity) OcsMapper(XYZ normal)
     {
         XYZ n = Normalize(normal);
