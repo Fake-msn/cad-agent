@@ -145,6 +145,74 @@ public void Build_InsertWithAttribute_RendersAttributeText_WithSourceHandleAndTa
 
 > 夹具说明：`RenderModelBuilder.Build` 需要 `DrawingSession`；View.Tests 用 `DxfFixture.CreateTempDxf` + `DrawingSession.Load`（既有测试同风格）。所需 using：`ACadSharp.Entities/Tables/Objects`、`CSMath`、`CadAgent.Data`、`CadAgent.Data.Tests`。
 
+**Step 1b：已放置坐标 + 对齐锚点的数值断言**（修复轮要求；旧实现必红）
+
+```csharp
+[Fact]
+public void Build_InsertAttribute_UsesPlacedCoordinates_NotBlockLocal()
+{
+    string path = DxfFixture.CreateTempDxf(doc =>
+    {
+        var block = new BlockRecord("B") { };
+        block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        doc.BlockRecords.Add(block);
+        var ins = new Insert(block)
+        {
+            InsertPoint = new XYZ(100, 200, 0), Rotation = Math.PI / 2,
+            XScale = 1, YScale = 1
+        };
+        var attr = new AttributeEntity { Tag = "T", Value = "V" };
+        attr.InsertPoint = new XYZ(150, 250, 0);
+        attr.AlignmentPoint = new XYZ(150, 250, 0);
+        ins.Attributes.Add(attr);
+        doc.Entities.Add(ins);
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(0, 0, 0), Value = "锚点", Height = 1 });
+    });
+    try
+    {
+        var items = RenderModelBuilder.Build(CadAgent.Data.DrawingSession.Load(path));
+        var attrItem = Assert.Single(items, i => i.AttributeTag == "T");
+        // ATTRIB 是"已放置"坐标：顶层 Insert 变换不得二次施加
+        Assert.Equal(150, attrItem.Points[0].X, 6);
+        Assert.Equal(250, attrItem.Points[0].Y, 6);
+        Assert.NotNull(attrItem.SourceHandle);
+        Assert.EndsWith(":attr:T", attrItem.Handle);
+    }
+    finally { File.Delete(path); }
+}
+```
+
+```csharp
+[Fact]
+public void Build_AttributeNonDefaultAlignment_UsesAlignmentPoint()
+{
+    string path = DxfFixture.CreateTempDxf(doc =>
+    {
+        var block = new BlockRecord("B2");
+        doc.BlockRecords.Add(block);
+        var ins = new Insert(block) { InsertPoint = new XYZ(0, 0, 0) };
+        var attr = new AttributeEntity
+        {
+            Tag = "C", Value = "居中",
+            HorizontalAlignment = TextHorizontalAlignment.Center,
+            VerticalAlignment = TextVerticalAlignmentType.Middle
+        };
+        attr.InsertPoint = new XYZ(0, 0, 0);
+        attr.AlignmentPoint = new XYZ(5, 5, 0);
+        ins.Attributes.Add(attr);
+        doc.Entities.Add(ins);
+    });
+    try
+    {
+        var items = RenderModelBuilder.Build(CadAgent.Data.DrawingSession.Load(path));
+        var attrItem = Assert.Single(items, i => i.AttributeTag == "C");
+        Assert.Equal(5, attrItem.Points[0].X, 6);
+        Assert.Equal(5, attrItem.Points[0].Y, 6);
+    }
+    finally { File.Delete(path); }
+}
+```
+
 - [ ] **Step 2: 红**
 
 Run: `dotnet test tests/CadAgent.View.Tests/CadAgent.View.Tests.csproj --filter "FullyQualifiedName~Build_InsertWithAttribute_RendersAttributeText" --nologo`
@@ -200,11 +268,40 @@ foreach (Entity child in insert.Block.Entities)
 }
 foreach (AttributeEntity attr in insert.Attributes)
 {
-    Append(attr, items, ref skipped, composed, rot, hs, color, depth + 1,
-        insertHandle + ":attr:" + attr.Tag,
-        new EmitContext(c.Space, attr.Handle.ToString(CultureInfo.InvariantCulture), null, null, attr.Tag));
+    // DXF ATTRIB 坐标是"已放置"坐标（INSERT 的 OCS 最终空间），不是块局部坐标——
+    // 只承接父仿射 t，绝不能套 insert 自身的 composed 变换（全实例偏移上千单位的实证缺陷）。
+    EmitAttribute(attr, items, t, rotationDeg, heightScale, color, depth + 1,
+        insertHandle + ":attr:" + attr.Tag, c.Space);
 }
 ```
+
+专用属性发射（对齐锚点 + 已放置坐标；不改 plain TextEntity 既有口径）：
+
+```csharp
+private static void EmitAttribute(
+    AttributeEntity attr, List<RenderItem> items, Affine t, double rotationDeg,
+    double heightScale, uint? byBlockColor, int depth, string handle, RenderSpace space)
+{
+    // 默认对齐（左+基线）用插入点；其余对齐的语义锚点是 AlignmentPoint（真图标题栏多为居中）。
+    bool defaultAlignment = attr.HorizontalAlignment == TextHorizontalAlignment.Left
+        && attr.VerticalAlignment == TextVerticalAlignmentType.Baseline;
+    XYZ anchor = defaultAlignment ? attr.InsertPoint : attr.AlignmentPoint;
+    var (ocs, _) = OcsMapper(attr.Normal);
+    (double ox, double oy) = ocs.Apply(anchor.X, anchor.Y);
+    items.Add(new RenderItem(RenderKind.Text,
+        new[] { t.Apply(ox, oy) },
+        attr.Layer?.Name ?? "0", ResolveColor(attr, byBlockColor), attr.Value,
+        Math.Abs(attr.Height) * heightScale,
+        NormDeg(OcsRotation(ToDeg(attr.Rotation), ocs) + rotationDeg),
+        handle, DashPattern: ResolveDash(attr),
+        Space: space,
+        SourceHandle: attr.Handle.ToString(CultureInfo.InvariantCulture),
+        AttributeTag: attr.Tag));
+}
+```
+
+- depth 参数仅用于签名对齐（属性不可再展开）；如实现中不需要则去掉。
+- 戳记循环改为「已戳记（SourceHandle 非空）项只 `continue`」：子递归/属性自带的 Space 不被祖先覆盖（消除跨空间未来陷阱）。
 
 Dimension 分支子递归同理传 `new EmitContext(c.Space, child.Handle.ToString(...), dim.Block.Name, chain, null)`（`chain` 同样追加 dim 句柄）。
 
@@ -247,6 +344,8 @@ public void ComposeLayout_IncludesPaperEntitiesAttributesAndLockedViewportFrame(
         doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
         var title = new BlockRecord("图框");
         title.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+        // Ruling R8：ATTDEF 定义不渲染（模板），实例值仅经 Insert.Attributes
+        title.Entities.Add(new AttributeDefinition { Tag = "DEF", Value = "DEFVAL" });
         doc.BlockRecords.Add(title);
         var layout = new ACadSharp.Objects.Layout("布局1");
         doc.Layouts.Add(layout);
@@ -270,6 +369,7 @@ public void ComposeLayout_IncludesPaperEntitiesAttributesAndLockedViewportFrame(
         Assert.Equal(4, frame.Count);
         Assert.All(frame, f => Assert.Equal(RenderSpace.PaperSpace, f.Space));
         Assert.Contains(items, i => i.Space == RenderSpace.ModelSpace); // 视口内模型线
+        Assert.DoesNotContain(items, i => i.Text == "DEFVAL");           // ATTDEF 定义不渲染
         // 顺序：纸面 → 模型 → 框（框在列表末尾）
         Assert.True(items[^1].Locked);
     }
@@ -318,6 +418,8 @@ public static IReadOnlyList<RenderItem> ComposeLayout(CadDocument doc, string la
     return list;
 }
 ```
+
+同时（Ruling R8）：块展开排除 `AttributeDefinition`（ATTDEF 是模板定义，不是可见图元；实例值仅经 `Insert.Attributes` 渲染），避免真实图框出现「定义默认值 + 实例值」重叠。实现：`Append` 开头 `if (e is AttributeDefinition) break;`（不计数 skipped——定义不是被跳过的实体，语义上不属于渲染对象）。测试在 ComposeLayout 用例的标题块内加入 `new AttributeDefinition { Tag="DEF", Value="DEFVAL" }`，断言 `Assert.DoesNotContain(items, i => i.Text == "DEFVAL")` 且实例属性文本仍在。
 
 - [ ] **Step 4: 绿 + 提交**
 
