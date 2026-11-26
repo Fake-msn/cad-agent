@@ -475,11 +475,14 @@ public void Context_TwistRefusesModelMapping_AndPaperRectMatchesViewport()
 - [ ] **Step 3: 实现**
 
 ```csharp
+public static double ScaleOf(double paperHeight, double viewHeight) =>
+    viewHeight > 1e-12 ? paperHeight / viewHeight : 1;
+
 public static (double X, double Y) PaperToModel(
     (double X, double Y) paper, (double X, double Y) viewTarget, double viewHeight,
     (double X, double Y) paperCenter, double paperHeight)
 {
-    double s = viewHeight > 1e-12 ? paperHeight / viewHeight : 1;
+    double s = ScaleOf(paperHeight, viewHeight);
     return (viewTarget.X + (paper.X - paperCenter.X) / s,
             viewTarget.Y + (paper.Y - paperCenter.Y) / s);
 }
@@ -493,14 +496,54 @@ public sealed record LayoutViewportContext(
     (double X, double Y) ViewTarget,
     double TwistRadians)
 {
-    public double Scale => ViewHeight > 1e-12 ? PaperHeight / ViewHeight : 1;
-    public bool CanMapModel => Math.Abs(TwistRadians) < 1e-9;
+    public const double MinViewHeight = 1e-12;
+
+    /// <summary>退化视口（视高/纸宽/纸高非正）：上下文不可用于模型映射，装配方（View ContextFrom）须拒绝。</summary>
+    public bool IsDegenerate =>
+        !(ViewHeight > MinViewHeight) || !(PaperWidth > 0) || !(PaperHeight > 0);
+    public double Scale => IsDegenerate ? 1 : ViewportTransform.ScaleOf(PaperHeight, ViewHeight);
+    /// <summary>模型映射可用：非退化且无旋转。非矩形裁剪 ACadSharp 3.8.35 无法识别，不在此判定。</summary>
+    public bool CanMapModel => !IsDegenerate && Math.Abs(TwistRadians) < 1e-9;
     public (double MinX, double MinY, double MaxX, double MaxY) PaperRect => (
         PaperCenter.X - PaperWidth / 2, PaperCenter.Y - PaperHeight / 2,
         PaperCenter.X + PaperWidth / 2, PaperCenter.Y + PaperHeight / 2);
 
     public (double X, double Y) PaperToModel((double X, double Y) paper) =>
         ViewportTransform.PaperToModel(paper, ViewTarget, ViewHeight, PaperCenter, PaperHeight);
+}
+```
+
+补充测试（修复轮要求）：方向金断言 + 退化 + twist 边界/负值：
+
+```csharp
+[Fact]
+public void PaperToModel_GoldenDirection_NonCenterPoint()
+{
+    // s=3.5；纸面中心右移 350 → 模型右移 100
+    var p = ViewportTransform.PaperToModel((850, 350), (0, 0), 200, (500, 350), 700);
+    Assert.Equal(100, p.X, 9);
+    Assert.Equal(0, p.Y, 9);
+}
+
+[Fact]
+public void Context_DegenerateViewHeight_IsObservable_ScaleOne_MapsToTarget()
+{
+    var ctx = new LayoutViewportContext("1", (500, 350), 1000, 700, 0, (7, 8), 0);
+    Assert.True(ctx.IsDegenerate);
+    Assert.False(ctx.CanMapModel);
+    Assert.Equal(1, ctx.Scale);
+    Assert.Equal((7.0, 8.0), ctx.PaperToModel((500, 350)));
+}
+
+[Theory]
+[InlineData(1e-9, true)]
+[InlineData(-1e-9, true)]
+[InlineData(1.0000001e-9, false)]
+[InlineData(-1.0000001e-9, false)]
+public void Context_TwistBoundary(double twist, bool canMap)
+{
+    var ctx = new LayoutViewportContext("1", (500, 350), 1000, 700, 200, (0, 0), twist);
+    Assert.Equal(canMap, ctx.CanMapModel);
 }
 ```
 
@@ -721,7 +764,7 @@ public static class EditRouting
 }
 ```
 - `Route` 判定序（Plan-1 版）：`hit.Locked` → `Locked`；`hit.Space==ModelSpace` → `Model`（`vp` 为空或 twist → `Unavailable`+Reason）；`hit.Space==PaperSpace` → `Paper`（Plan-1 未启用→调用方提示）；未命中 → 在 `vp.PaperRect` 内 → `Model`，否则 `Paper`。
-- `ContextFrom(vp)`：`ViewHeight<=1e-12 || Width<=0 || Height<=0` → null；Handle=vp.Handle；TwistRadians=vp.TwistAngle。
+- `ContextFrom(vp)`：构造上下文后 `ctx.IsDegenerate ? null : ctx`（**唯一退化判据**，不得在 View 层重复 1e-12 字面量；且必须 `!vp.RepresentsPaper` 才可作为布局视口）；Handle=vp.Handle；TwistRadians=vp.TwistAngle。
 
 - [ ] **Step 1: 写失败测试**（矩阵：模型命中/纸面命中/Locked/框内空点/框外空点/缺上下文/twist）
 
