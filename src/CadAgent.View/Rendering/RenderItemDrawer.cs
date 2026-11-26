@@ -134,13 +134,6 @@ public sealed class TextCache
         _map[key] = added;
         return created;
     }
-
-    /// <summary>清空缓存（Items/DPI 等失效场景复用；Task 3 起调用）。</summary>
-    public void Clear()
-    {
-        _map.Clear();
-        _lru.Clear();
-    }
 }
 
 /// <summary>
@@ -155,8 +148,8 @@ public sealed class RenderItemDrawer
     /// <summary>选中/高亮画笔（黄 2px，延续旧画布语义）。</summary>
     public static readonly Pen SelectionPen = new(Brushes.Yellow, 2);
 
-    /// <summary>文本命中盒/简化条宽高比（每字符 0.6×字高，与命中数学一致）。</summary>
-    private const double TextWidthPerHeight = 0.6;
+    /// <summary>文本命中盒/简化条宽高比（与命中/索引同一常量）。</summary>
+    private const double TextWidthPerHeight = RenderMetrics.TextWidthPerHeight;
 
     /// <summary>选中/高亮全细节预算：Hatch/Polyline 点数上限（spec §3.2）。</summary>
     internal const int MaxBudgetPoints = 2000;
@@ -330,6 +323,17 @@ public sealed class RenderItemDrawer
             }
             DrawItemCore(ctx, projection, item, SelectionPen, quality, pens, texts, bold: true);
         }
+    }
+
+    /// <summary>
+    /// 超预算图元的包围盒降级绘制（diff 叠加层复用 <see cref="IsOverBudget"/>；
+    /// 与 <see cref="DrawSelection"/> 的降级像素语义一致）。返回 false=无有效坐标未绘制。
+    /// </summary>
+    internal bool TryDrawBudgetBox(DrawingContext ctx, CanvasProjection projection, RenderItem item, Pen pen)
+    {
+        if (!TryScreenBounds(projection, item, out ScreenBox box)) return false;
+        DrawBox(ctx, box, pen);
+        return true;
     }
 
     /// <summary>

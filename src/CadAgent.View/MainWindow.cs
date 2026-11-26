@@ -267,11 +267,13 @@ public sealed class MainWindow : Window
 
         // T5：全模型渲染 + 幅面登记簿；默认首幅面（R4 sanctioned：模型幅面按框内锚点裁剪，
         // 布局幅面经 BuildViewport 纸面映射）。单幅面/无布局图纸 bounds=ModelBounds → 全保留（legacy 无感）。
+        // 项3 终审：Items/Sheets 由 MainViewModel 在加载期（LoadAsync 后台线程）构建，
+        // 此处直接消费，不在 UI 线程重复 Build。
         _title = vm.Title;
         _doc = vm.Session.Doc;
         _session = vm.Session;
-        _fullModelItems = RenderModelBuilder.Build(vm.Session);
-        _sheets = vm.Session.Sheets;
+        _fullModelItems = vm.Items;
+        _sheets = vm.Sheets;
         SheetRecord firstSheet = _sheets[0];
         _currentSheetId = firstSheet.SheetId;
         _currentSheetName = firstSheet.Name;
@@ -1348,6 +1350,13 @@ public sealed class MainWindow : Window
 
     /// <summary>计划错误/引导文本（视图闭环 T10：ErrorMessage/填充引导，可见时非空）。</summary>
     internal TextBlock? PlanError { get; }
+
+    /// <summary>全模型渲染图元（终审 seam：应即 <see cref="MainViewModel.Items"/> 同一实例——
+    /// 证明 MainWindow 不再于 UI 线程调用 RenderModelBuilder.Build）。</summary>
+    internal IReadOnlyList<RenderItem> FullModelItemsForTests => _fullModelItems;
+
+    /// <summary>幅面登记簿（终审 seam：应即 <see cref="MainViewModel.Sheets"/> 同一实例）。</summary>
+    internal IReadOnlyList<SheetRecord> SheetsForTests => _sheets;
 
     /// <summary>
     /// 行模板：复选框（仅勾选框本体，可见性）+ 色样 + 名称（计数）。Click → Toggle。

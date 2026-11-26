@@ -114,8 +114,9 @@ public static partial class CommandRouter
         var persisted = UnparsedCensusStore.LoadTrusted(projectDir, drawingPath, out bool verifiedEmpty);
         var session = DrawingSession.Load(drawingPath, persisted, verifiedEmpty);
         // 已信任空 → 不重写（指纹未变，避免每命令重写 sidecar）；否则源在即回写（含空 census）。
+        // 尽力写：只读项目目录 → Save 返回 false（不抛），本次会话 census 仍可用。
         if (!verifiedEmpty && File.Exists(drawingPath))
-            UnparsedCensusStore.Save(projectDir, drawingPath, session.Unparsed);
+            _ = UnparsedCensusStore.Save(projectDir, drawingPath, session.Unparsed);
         return session;
     }
 

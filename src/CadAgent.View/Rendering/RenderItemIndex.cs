@@ -10,8 +10,8 @@ namespace CadAgent.View.Rendering;
 /// </summary>
 public sealed class RenderItemIndex
 {
-    /// <summary>文本命中盒宽度估算：每字符 0.6×字高（等宽近似，无字形度量）。</summary>
-    private const double TextWidthPerHeight = 0.6;
+    /// <summary>文本命中盒宽度估算：每字符 0.6×字高（与绘制/画布共用 <see cref="RenderMetrics"/>）。</summary>
+    private const double TextWidthPerHeight = RenderMetrics.TextWidthPerHeight;
 
     /// <summary>图元包围盒（无有效坐标的图元 Has=false：不入格、不参与查询）。</summary>
     private readonly struct Box

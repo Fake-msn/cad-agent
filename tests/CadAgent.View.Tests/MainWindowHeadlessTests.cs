@@ -60,9 +60,26 @@ public class MainWindowHeadlessTests
     }
 
     [AvaloniaFact]
-    public void LayerPanel_BuildsOrderedEntries_WithCheckboxesAndCounts()
+    public void MainWindow_ConsumesPrebuiltItemsAndSheets_NoUiThreadBuild()
     {
-        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        // 终审 Important 2：MainWindow 直接消费 MainViewModel 预构建的 Items/Sheets
+        // （同一实例引用）——证明加载期 Build 未在 UI 线程重复执行。
+        string path = TwoLayerDxf();
+        var vm = new MainViewModel(path, Path.GetTempPath());
+        Assert.Null(vm.ErrorMessage);
+        var window = new MainWindow(vm);
+        try
+        {
+            Assert.Same(vm.Items, window.FullModelItemsForTests);
+            Assert.Same(vm.Sheets, window.SheetsForTests);
+            Assert.NotEmpty(window.FullModelItemsForTests);
+        }
+        finally { Cleanup(window, path); }
+    }
+
+    [AvaloniaFact]
+    public void LayerPanel_BuildsOrderedEntries_WithCheckboxesAndCounts()
+    {        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
         try
         {
             Assert.NotNull(window.Layers);

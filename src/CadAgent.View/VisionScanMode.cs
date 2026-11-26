@@ -130,7 +130,7 @@ internal static class VisionScanMode
             var persisted = UnparsedCensusStore.LoadTrusted(project, drawing, out bool verifiedEmpty);
             var s = DrawingSession.Load(drawing, persisted, verifiedEmpty);
             if (!verifiedEmpty && File.Exists(drawing))
-                UnparsedCensusStore.Save(project, drawing, s.Unparsed);
+                _ = UnparsedCensusStore.Save(project, drawing, s.Unparsed); // 尽力写（只读项目不抛）
             return s;
         }, drawing, session, audit, op, stderr);
         if (doc is null) return 1;

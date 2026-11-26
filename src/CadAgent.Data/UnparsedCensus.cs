@@ -126,30 +126,48 @@ public static class UnparsedCensusStore
 
     /// <summary>
     /// 写 sidecar（幂等复写）：VerifiedEmpty = 本次 census 来自源且为空。
+    /// <para>
+    /// <b>尽力写（best-effort）</b>：调用方在每次 Green/已验证空载入后回写，若项目目录只读、
+    /// sidecar 被占用或路径不支持 → 返回 false 且不抛出（sidecar 只是性能证据，不得阻断
+    /// 打开只读项目；本次会话内 census 仍由 <see cref="UnparsedCensus"/> 正常使用）。
+    /// 仅吞 IO 类异常（IOException/UnauthorizedAccessException/NotSupportedException）；
+    /// OutOfMemory 等非 IO 异常照常传播。
+    /// </para>
     /// 已知窗口（明示不闭合）：size/mtime/hash 取自本次 Save 时刻的源文件，而 census 来自
     /// 之前的 Load——源若恰在两者之间被换图，旧 census 会挂到新指纹上；窗口极短，彻底闭合
     /// 需 Load 回传载入时指纹（超出本切片）。
     /// </summary>
-    public static void Save(string projectDir, string sourcePath, UnparsedCensus census)
+    /// <returns>true=已落盘；false=尽力写失败（权限/占用/不支持），sidecar 保持原状。</returns>
+    public static bool Save(string projectDir, string sourcePath, UnparsedCensus census)
     {
-        string p = SidecarPath(projectDir);
-        string dir = Path.GetDirectoryName(p)!;
-        Directory.CreateDirectory(dir);
-        CleanupOrphanTemps(dir);
-        // 指纹一次取得（同一次 Save 内 size/mtime/hash 不各读一遍源）。
-        var fi = new FileInfo(sourcePath);
-        long size = fi.Length;
-        DateTime mtime = fi.LastWriteTimeUtc;
-        string hash = HashOf(sourcePath);
-        // VerifiedEmpty = 本次 census 来自源（首载或 R9 重建）并为空 → 下次载入可信任 Empty。
-        var sc = new Sidecar(Path.GetFullPath(sourcePath), hash, census.Classes, size, mtime,
-            census.TotalCount == 0, ProducerId);
-        // 原子写（T3 闭合 T1 deferred minor，对齐 SaveWorking 约定）：先写 tmp 再 Move——
-        // 写中途崩溃不损既有 sidecar（census 证据不因半截 JSON 降级 Empty）。
-        // tmp 名唯一：并发写同一项目（测试并行/多进程）不互踩临时文件。
-        string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(sc));
-        File.Move(tmp, p, overwrite: true);
+        try
+        {
+            string p = SidecarPath(projectDir);
+            string dir = Path.GetDirectoryName(p)!;
+            Directory.CreateDirectory(dir);
+            CleanupOrphanTemps(dir);
+            // 指纹一次取得（同一次 Save 内 size/mtime/hash 不各读一遍源）。
+            var fi = new FileInfo(sourcePath);
+            long size = fi.Length;
+            DateTime mtime = fi.LastWriteTimeUtc;
+            string hash = HashOf(sourcePath);
+            // VerifiedEmpty = 本次 census 来自源（首载或 R9 重建）并为空 → 下次载入可信任 Empty。
+            var sc = new Sidecar(Path.GetFullPath(sourcePath), hash, census.Classes, size, mtime,
+                census.TotalCount == 0, ProducerId);
+            // 原子写（T3 闭合 T1 deferred minor，对齐 SaveWorking 约定）：先写 tmp 再 Move——
+            // 写中途崩溃不损既有 sidecar（census 证据不因半截 JSON 降级 Empty）。
+            // tmp 名唯一：并发写同一项目（测试并行/多进程）不互踩临时文件。
+            string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(sc));
+            File.Move(tmp, p, overwrite: true);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            // 只读项目/文件被占用/路径不支持：sidecar 不可写不是加载失败（R9 信任语义不变，
+            // 下次打开仍会 LoadTrusted 失配 → 回退重读源）。OOM 等不在此列。
+            return false;
+        }
     }
 
     /// <summary>尽力清理崩溃遗留的写临时文件（&gt;1 天）：失败不影响保存。</summary>

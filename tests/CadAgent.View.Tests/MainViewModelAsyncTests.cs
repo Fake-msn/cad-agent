@@ -45,4 +45,53 @@ public class MainViewModelAsyncTests : IDisposable
         Assert.Null(vm.ErrorMessage);
         Assert.Equal(new[] { "s1", "s2" }, vm.SkillDirs);
     }
+
+    // ---- 终审 Important 2：Build + Sheets 同处后台任务（MainWindow 不再 UI 线程重建） ----
+
+    [Fact]
+    public async Task LoadAsync_PrebuiltItemsAndSheets_NonEmpty()
+    {
+        var vm = await MainViewModel.LoadAsync(_path, _projectDir);
+        Assert.Null(vm.ErrorMessage);
+        Assert.NotEmpty(vm.Items);
+        Assert.NotEmpty(vm.Sheets);
+        Assert.True(vm.BuildCompleted);
+    }
+
+    [Fact]
+    public async Task LoadAsync_HeavyBuildRanOffCallingThread()
+    {
+        int callerThread = Environment.CurrentManagedThreadId;
+        var vm = await MainViewModel.LoadAsync(_path, _projectDir);
+        Assert.Null(vm.ErrorMessage);
+        // BuildThreadId 由构造（Task.Run 内）捕获：重活必须不在调用/UI 线程执行。
+        // 线程 id 理论上可复用，故并列断言 Items 已就绪（结构证据）。
+        Assert.NotEqual(callerThread, vm.BuildThreadId);
+        Assert.NotEmpty(vm.Items);
+    }
+
+    [Fact]
+    public void SyncConstructor_AlsoBuildsItemsAndSheets()
+    {
+        // 同步构造保留且语义一致（既有测试/CLI/MainWindow 直接 new 的场景）。
+        var vm = new MainViewModel(_path, _projectDir);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(Environment.CurrentManagedThreadId, vm.BuildThreadId);
+        Assert.NotEmpty(vm.Items);
+        Assert.NotEmpty(vm.Sheets);
+    }
+
+    // ---- 终审 Important 1：sidecar 不可写不得阻断打开（只读项目） ----
+
+    [Fact]
+    public async Task LoadAsync_UnwritableSidecarTarget_StillLoads()
+    {
+        // <project>/.cadagent/unparsed.json 被同名目录占位 → Save 抛 IOException（尽力写吞掉）。
+        string sidecar = Path.Combine(_projectDir, ".cadagent", "unparsed.json");
+        Directory.CreateDirectory(sidecar);
+        var vm = await MainViewModel.LoadAsync(_path, _projectDir);
+        Assert.Null(vm.ErrorMessage);
+        Assert.NotEmpty(vm.Session.Summarize().Entities);
+        Assert.NotEmpty(vm.Items);
+    }
 }

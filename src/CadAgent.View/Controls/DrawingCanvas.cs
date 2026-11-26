@@ -267,6 +267,13 @@ public sealed class DrawingCanvas : Control
                 || (item.Handle.Length > 0 && ViewModel.HighlightedHandles.Contains(item.Handle));
             bool added = item.Handle.Length > 0 && diff.AddedHandles.Contains(item.Handle);
             Pen pen = added ? DiffAddedPen : highlight ? RenderItemDrawer.SelectionPen : _pens.ColorPen(item.ColorRgb);
+            // diff 叠加层的高亮/新增同受 §3.2 预算（diff 直绘不进 DrawSelection）：
+            // 超预算 → 包围盒 +2px 描边，与缓存路径的选中降级同像素语义。
+            if ((highlight || added) && RenderItemDrawer.IsOverBudget(projection, item))
+            {
+                _drawer.TryDrawBudgetBox(context, projection, item, pen);
+                continue;
+            }
             _drawer.DrawOne(context, projection, item, pen, Quality);
         }
         BaseRenderCount++;
@@ -562,7 +569,7 @@ public sealed class DrawingCanvas : Control
             {
                 if (item.Kind != RenderKind.Text) continue;
                 if (item.TextHeight > maxHeight) maxHeight = item.TextHeight;
-                double width = (item.Text?.Length ?? 0) * item.TextHeight * 0.6;
+                double width = (item.Text?.Length ?? 0) * item.TextHeight * RenderMetrics.TextWidthPerHeight;
                 if (width > maxWidth) maxWidth = width;
             }
             _textMarginAscentWorld = 1.2 * maxHeight;
@@ -582,7 +589,7 @@ public sealed class DrawingCanvas : Control
         {
             if (item.Points.Count < 1 || string.IsNullOrEmpty(item.Text)) return;
             double fontSize = item.TextHeight * projection.Scale;
-            double width = item.Text.Length * item.TextHeight * 0.6 * projection.Scale;
+            double width = item.Text.Length * item.TextHeight * RenderMetrics.TextWidthPerHeight * projection.Scale;
             if (fontSize <= 0 || width <= 0) return;
             Point p = ScreenPoint(projection, item.Points[0]);
             double y = p.Y - fontSize / 2; // 基线上方半字高 ≈ 字形中线
