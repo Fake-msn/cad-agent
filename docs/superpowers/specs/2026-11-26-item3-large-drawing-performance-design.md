@@ -146,3 +146,98 @@
 - Core：`IDrawingSession`（Revision/InvalidateHash）、StepEngine 调用点。
 - Tests：索引/命中矩阵；LOD 决策（阈值边界）；缓存失效与像素一致性；census v2 信任/失效；revision 缓存正确性；headless 交互两阶段；性能工具冒烟。
 - Docs：spec §12 闭环注记；工具 README。
+
+## 12. 闭环注记（T7 实测，2026-11-27）
+
+本节为项3 收口：机制落地清单、真实图前后数字、R9/哈希语义与 racked 边界。数字来源
+`outputs/perf-baseline/after-real.md`、`after-synth.md`（工具生成，与基线
+`real-baseline.md`/`baseline.md` 同机同口径对照；验收运行记录于 T7 报告）。
+
+### 12.1 落地机制
+
+| 切片 | 机制 | 主要位置 |
+|---|---|---|
+| T1 | 空间索引（均匀网格 + 长实体 overflow 表）、视口裁剪、命中宽相+精相 | `View/Rendering/RenderItemIndex`、`CanvasViewModel` |
+| T2 | 统一绘制器 + LOD 决策 + 画笔/文字缓存 LRU | `View/Rendering/{CanvasProjection,RenderItemDrawer}` |
+| T3 | 位图平移缓存（128px 外扩，blit）+ 两阶段交互（静止 150ms 精绘） | `View/Controls/DrawingCanvas` |
+| T4 | 快照/缩略图改走 Refined 绘制器（共享裁剪 + LOD） | `View/Rendering/RenderSnapshotProvider` |
+| T5 | 空 census 信任（sidecar v2 指纹）+ 异步加载 + 状态注记 | `Data/UnparsedCensus`、`Data/DrawingSession`、`View/MainViewModel` |
+| T6 | ComputeHash 修订缓存（`IHashRevision`，引擎每步失效） | `Core/Cad/IHashRevision`、`Data/DrawingSession`、`Core/StepEngine` |
+| T7 | 基线工具（合成 20k/80k/200k + `--drawing`）入 sln | `tools/CadAgent.PerfBaseline` |
+
+### 12.2 真实图前后（headless Skia 软件渲染，1600×1000）
+
+| 指标 | 接地图 before → after | 强电图 before → after | 目标 |
+|---|---|---|---|
+| 交互帧（blit 复用缓存） | 488 → **2.09 / 2.82ms** | 313 → **3.22 / 2.61ms** | <50ms PASS |
+| 命中 2000 次总 / 每次 | 5567ms / 2.78ms → **9ms / 0.004ms** | 8101ms / 4.05ms → **16ms / 0.008ms** | <2ms/次 PASS |
+| Refined 冷首帧（渲染） | 488（含编码）→ **96.2ms**（+65.7ms 编码） | 313（含编码）→ **122.8ms**（+55.9ms 编码） | <150ms（渲染 PASS；含编码 TARGET） |
+| 快照 RenderPng | 895 → **483ms**（重复 214ms） | 340 → **301ms**（重复 198ms） | <150ms **TARGET 未达** |
+| 源首载（DWG 解析 + working 物化） | 11744 → **6566ms** | 6031 → **2288ms** | —（口径见注） |
+| 二开（working + 侧车 census） | 4908 → **4297ms** | 2879 → **2015ms** | 不重读源（PASS） |
+| ComputeHash 冷 / 重复 | 524ms / — → **358.5ms / 0.062ms** | 194ms / — → **187.8ms / 0.001ms** | 重复 O(1) PASS |
+| 构建 items | 310 → 249ms（54,929） | 938 → 974ms（76,589） | — |
+| 托管内存（单文档） | 489 → **494MB** | 342 → **349MB** | — |
+| 二开源未动 / 源移走可再载 | — → **True / True** | — → **True / True** | PASS |
+
+注：
+- 源首载在 `%TEMP%` 同字节副本上测（标本目录零写入），**OS 文件缓存已暖**，非磁盘冷载口径；
+  与基线（冷盘）之差含缓存因素，只作参考。
+- Refined「含编码」= 渲染 + PNG 编码（65.7/55.9ms）；旧基线 frame 计时本就含编码，
+  故同口径为 162/178.7ms：显著优于基线但**超过 150ms**（记为 TARGET）。
+- 快照冷首帧 483/301ms，重复快照 214/198ms（扣 PNG 编码约 148/142ms）：冷帧含进程级
+  一次性初始化（字体/几何预热）；**150ms 目标在冷首帧口径下未达**，重复口径贴近目标。
+  快照仍较基线 895/340ms 改善约 1.9×/1.1×，瓶颈为软件光栅 55k–77k 基元的描边/轮廓成本。
+- 合成 200k：交互 **2.96/2.3ms**、命中 **0.259ms/次**（基线 frame 249ms、6.6s/2k 命中）；
+  对应「合成 200k 交互 <50ms、命中 <2ms」PASS。Refined 冷 279.5 / 暖 215.8ms、快照 772ms
+  （仅记录；spec §7 对合成只设交互/命中目标）。
+
+### 12.3 LOD / 缓存语义边界
+
+- **两阶段**：交互期（滚轮/中键拖动/被消费的工具点击）Quality=Interactive，只变换已烘焙位图
+  （缩放按比例仿射），静止 150ms 后 Refined 重建缓存并重绘叠加层；选择点击不算交互（不重绘）。
+- **阈值**（Refined / Interactive）：文字 2–6px 简化条、<2px 跳过（交互 4/10px）；微图元
+  0.5px→1px（交互 1px）；Hatch 面积 <4px² 或 >2000 点→仅轮廓/bbox（交互 >500 点或 <16px²）；
+  折线抽稀 0.5px（交互 1px）。降级是**显示降级**，不改变数据/命中/审计/编辑目标。
+- **选中/高亮预算**：投影 bbox ≤ 视口 25% 且 Hatch ≤2000 点且折线 ≤2000 顶点才给全细节，
+  否则包围盒/轮廓 +2px 描边，状态栏注记「高亮为包围盒（图元过密）」；叠加层不烘焙进位图。
+- **文字缓存**：FormattedText LRU ≤512，键 `(text, fontBucket, bold, colorRgb)`；交互档基本不缓存
+  （以简化条/跳过为主）。概览位图的「概览」注记只跟实际呈现档位（复用 Refined 位图时不标）。
+- **缓存失效**：Items 引用、控件尺寸、DPI、隐藏层集合、世界原点/ Fit 偏移、Zoom、Diff 开关
+  （diff 直绘且绕过缓存）、脱离视觉树即释放；平移仅在 128px 外扩内 blit，越界重建；重建先释放旧位图。
+- **快照**：恒 Refined + 共享裁剪/LOD，无交互缓存/叠加层；导出与报告缩略图同源。
+
+### 12.4 R9 空 census 信任（语义调整，非安全边界）
+
+- sidecar v2 增 `sourceSha256/sourceSize/sourceMtimeUtc/verifiedEmpty`；`LoadTrusted` 需
+  路径+哈希+size+mtime 全匹配且 census 为空才返回 `verifiedEmpty=true`，`DrawingSession.Load`
+  据此**免重读源 DWG**（源缺失亦放行）。不匹配/旧 v1 → 回退 R9 fail-closed 重建。
+- **明示**：sidecar 为本地普通文件，任何本地进程可改写；`verifiedEmpty` 只是性能捷径，
+  **不是安全边界**（伪造指纹可使 Yellow 源显示 Green）；`Producer` 仅可观测、未签名。
+  需强校验时依赖源 DWG 解析（R9）或外部可信存证。
+- 已知窗口（不闭合）：Save 的 size/mtime/hash 取自 Save 时刻源文件，census 来自此前 Load。
+
+### 12.5 哈希契约
+
+- `IHashRevision { long Revision; void InvalidateHash(); }` 为**可选能力**（`IDrawingSession` 未改）；
+  `DrawingSession` 缓存 `(Revision, hash)`，命中即 O(1)（实测 0.06/0.001/0.051ms）。
+- 失效点：StepEngine 每步成功后、`Reload`/`RestoreState`；`SaveWorking` 不改 content 不失效；
+  缓存条目带修订号 + `Volatile` 存取（计算期间被失效不会钉旧值）。
+- **契约**：任何绕过 StepEngine 直接改 `Doc` 的调用方**必须**在 `ComputeHash` 前
+  `InvalidateHash()`，否则拿到旧值（T6 已披露清单 + 契约用例钉住）。非 `IHashRevision`
+  会话（测试 fake）不走缓存，行为不变。哈希投影口径未改。
+
+### 12.6 Racked 边界与残留风险
+
+- **工作副本格式未改**：仍为 `.working.dxf`（DWG 首载物化）。真实图 working DXF 解析仍
+  约 4.3/2.0s（二开 2 次打开不重读源 DWG 但 working 解析仍是主成本）；AC1027 working /
+  二进制缓存属另立切片。
+- **快照 150ms 目标未达**（冷 483/301，重复 214/198）：留作后续（减少基元描边/路径合并、
+  或快照按视口瓦片并行）；本轮不改渲染后端。
+- **GPU/headless 差异**：验收口径为 headless Skia 软件渲染；真机 GPU 可能更快，亦可能因
+  纹理上传更慢——数字不承诺跨机复现（CI 不断言绝对耗时）。
+- **测量方差**：同机重复运行 Refined/快照波动可达 ±40%（JIT tiering/GC/进程级预热）；
+  工具在表中同时给出冷帧与重复（warm）值，报告以冷首帧为 PASS/TARGET 判据。
+- 索引内存 O(n)（候选格重复登记 + overflow 表）；命中顺序仍为 Items 序首个精确命中，
+  LOD 不改变绘制顺序语义。
+- 空 census 信任的 sidecar 写入窗口、`Producer` 未签名（见 12.4）。

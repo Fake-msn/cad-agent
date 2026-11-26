@@ -245,3 +245,54 @@ public interface IHashRevision { long Revision { get; } void InvalidateHash(); }
 ---
 
 ## 执行记录（执行中追加）
+
+### 提交与任务对应（branch `feat/cad-agent-perf`，自 main af72091；未 push/未 merge）
+
+| 任务 | 提交 |
+|---|---|
+| T0 文档 | `119e85a docs(spec): 项3 大图性能设计（索引/LOD/位图缓存/加载/哈希）`、`3aec51c docs(plan): …实施计划（7 任务）`、`6d5480b docs(spec): 哈希缓存改用可选 IHashRevision 接口` |
+| T1 索引/裁剪 | `3fd2747 feat(view): 渲染图元空间索引与视口/命中查询`、`d6016c7 fix(view): 索引极端矩形/非有限/去重排序（评审修复）` |
+| T2 绘制器/LOD | `961ddea feat(view): 统一绘制器与 LOD 决策（投影/画笔/文字缓存）`、`b627ace fix(view): 裁剪包围盒缓存/文本边距/计数与像素加固（评审修复）` |
+| T3 缓存/两阶段 | `aec665a feat(view): 交互期位图缓存与两阶段精绘`、`4996369`、`6862eb8`、`bce7ef6`（评审/复审修复） |
+| T4 快照 Refined | `a3cfd42 feat(view): 快照改走 Refined 绘制器（LOD）` |
+| T5 空信任/异步 | `e54d5ca feat: 空 census 信任与异步加载`、`5d1411c fix: 异步 UI 线程/状态注记时序/空 census 披露（评审修复）` |
+| T6 哈希修订缓存 | `e69a612 feat(core,data): ComputeHash 修订缓存（IHashRevision）`、`1252b64 fix(data): 哈希缓存条目带修订并 Volatile 存取（评审修复）` |
+| T7 工具/门禁/注记 | `dc6d95e feat(tools): 大图性能基线工具` + `docs(spec): 项3 大图性能闭环注记` |
+
+T1..T6 区间：`3fd2747..1252b64`（13 提交）。T7 工具入 `CadAgent.sln`（`tools` 解决方案文件夹）。
+
+### Task 7 数字（`tools/CadAgent.PerfBaseline`，headless Skia 1600×1000，2026-11-27）
+
+| case | 交互帧 | 命中/次 | Refined 冷（+编码） | 快照（重复） | hash 冷/重复 | 二开 working | 内存 |
+|---|---|---|---|---|---|---|---|
+| 接地图 54,929 items | 2.09 / 2.82ms | 0.004ms | 96.2ms（+65.7） | 483ms（214） | 358.5 / 0.062ms | 4297ms（源 6566） | 494MB |
+| 强电图 76,589 items | 3.22 / 2.61ms | 0.008ms | 122.8ms（+55.9） | 301ms（198） | 187.8 / 0.001ms | 2015ms（源 2288） | 349MB |
+| synth 200k | 2.96 / 2.3ms | 0.259ms | 279.5ms（+257） | 772ms（556） | 405.3 / 0.051ms | 3199ms | 291MB |
+
+- 目标判定：交互/命中/哈希重复/二开不重读源 **PASS**；Refined 渲染 PASS（含编码 162/178.7ms 超 150→TARGET）；
+  **快照 150ms 未达**（冷 483/301ms，重复 214/198ms）——记录不 hard fail，残留在 spec §12.6。
+- 二开证据：`sourceUntouched=True`（源 size/mtime 不变）且源移走后再载成功（`noSourceReread=True`，3809/2322ms）；
+  census 状态 `persisted non-empty (342/7557)`。
+- 运行命令（输出均在 `outputs/perf-baseline/`，标本目录零写入）：
+  `--drawing specimens/地下室接地平面图.dwg --drawing specimens/地下室强电系统图.dwg --out after-real.md`；
+  `--synth 200k --out after-synth.md`；冒烟 `--synth 20k --out <temp>.md`（非空指标）。
+
+### 门禁
+
+`dotnet test CadAgent.sln`（Debug，`DOTNET_CLI_UI_LANGUAGE=en`，日志 `outputs/perf-baseline/t7-gate-sln.log`）：
+
+| 套件 | 通过 | 跳过 | 失败 |
+|---|---|---|---|
+| Core | 290 | 0 | 0 |
+| Data | 681 | 0 | 0 |
+| View | 626 | 0 | 0 |
+| Cli | 371 | 1 | 0 |
+| Llm | 33 | 0 | 0 |
+| Report | 31 | 0 | 0 |
+| TArchBridge | 76 | 0 | 0 |
+| Adapters.Zwcad | 16 | 0 | 0 |
+| Adapters.Acad | 180 | 1 | 0 |
+| 合计 | **2304** | 2 | **0** |
+
+跳过 2 例均为设计性 skip（真实标本/真实换源 TCH 用例）。**无 flake**（单次全绿，未触发隔离复跑）；
+无 Acad/ZWCAD 残留进程（`tasklist` 核查为空）。
