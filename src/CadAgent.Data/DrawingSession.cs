@@ -14,14 +14,21 @@ public sealed class DrawingSession : IDrawingSession, IHashRevision
     public string SourcePath { get; }
 
     private long _revision;
-    private string? _hashCache;
+    private HashCacheEntry? _hashCache;
     private int _hashComputeCount;
+
+    /// <summary>哈希缓存条目：不可变，带计算时捕获的修订号（命中须与当前修订相等）。</summary>
+    private sealed record HashCacheEntry(long Revision, string Hash);
 
     /// <summary>项3 §5：内容修订号（0=载入态）；InvalidateHash/Reload/RestoreState 递增。</summary>
     public long Revision => Interlocked.Read(ref _revision);
 
     /// <summary>测试 seam：真实哈希计算次数（缓存命中不增）。</summary>
     internal int HashComputeCount => Volatile.Read(ref _hashComputeCount);
+
+    /// <summary>测试 seam：写入指定修订号的缓存条目（验证陈旧条目不会被命中）。</summary>
+    internal void SeedHashCacheForTests(long revision, string hash) =>
+        Volatile.Write(ref _hashCache, new HashCacheEntry(revision, hash));
 
     /// <summary>
     /// 声明内容已变：递增修订并清缓存。StepEngine 每个成功步自动调用；绕过引擎直接改
@@ -30,7 +37,7 @@ public sealed class DrawingSession : IDrawingSession, IHashRevision
     public void InvalidateHash()
     {
         Interlocked.Increment(ref _revision);
-        _hashCache = null;
+        Volatile.Write(ref _hashCache, null);
     }
 
     private IReadOnlyList<SheetRecord>? _sheets;
@@ -180,12 +187,14 @@ public sealed class DrawingSession : IDrawingSession, IHashRevision
     /// Excludes volatile header fields ($HANDSEED, Julian-date doubles) so the hash
     /// is stable across no-change SaveWorking/Reload cycles and reflects real
     /// content changes only. Doubles use round-trip "R" format, invariant culture.
-    /// 项3 §5：结果按修订号缓存——重复计算 O(1)；绕过引擎的变更须先 InvalidateHash（见接口契约）。
+    /// 项3 §5：结果按修订号缓存——命中须条目修订 == 当前修订，重复计算 O(1)；
+    /// 绕过引擎的变更须先 InvalidateHash（见接口契约）。缓存非同步原语：正确性来自
+    /// 修订标签（计算先捕获 rev，失效后当前 rev 已变 → 陈旧条目不命中），良性竞态永不返回旧值。
     /// </summary>
     public string ComputeHash()
     {
-        if (_hashCache is { } cached) return cached;
         long rev = Revision;
+        if (Volatile.Read(ref _hashCache) is { } cached && cached.Revision == rev) return cached.Hash;
         var sb = new StringBuilder();
         foreach (var layer in Doc.Layers.OrderBy(l => l.Name, StringComparer.Ordinal))
         {
@@ -222,8 +231,8 @@ public sealed class DrawingSession : IDrawingSession, IHashRevision
         }
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
         Interlocked.Increment(ref _hashComputeCount);
-        // 计算期间有失效（跨线程编辑）→ 不写缓存，避免把旧修订的哈希钉成新值。
-        if (Revision == rev) _hashCache = hash;
+        // 条目按投影前捕获的 rev 打标：若写入与失效竞态，当前 rev 已前进 → 该条目永不被命中。
+        Volatile.Write(ref _hashCache, new HashCacheEntry(rev, hash));
         return hash;
     }
 

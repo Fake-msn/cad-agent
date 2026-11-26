@@ -198,6 +198,7 @@ public sealed class StepEngine
 
             if (!result.Ok)
             {
+                // 仅 Ok 失效（spec §5）：失败调用方自行 Reload，此处不失效。
                 Append(op, sessionId, "step-failed", result.TargetHandle,
                     JsonSerializer.Serialize(new { step.Kind, result.Error }), beforeHash, afterHash, snapshot, plan.PlanId);
                 return new TxResult(txId, false, done, result.Error);

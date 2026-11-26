@@ -75,6 +75,27 @@ public class HashRevisionCacheTests : IDisposable
     }
 
     [Fact]
+    public void CacheEntry_TaggedOldRevision_IsNotServed()
+    {
+        // 修订标签：陈旧条目（失效前写入/写读竞态）即便非空也不得命中。
+        var s = NewSession();
+        s.ComputeHash();
+        s.InvalidateHash(); // rev=1
+        s.SeedHashCacheForTests(0, "STALE-REV0");
+        Assert.NotEqual("STALE-REV0", s.ComputeHash());
+        Assert.Equal(2, s.HashComputeCount); // 重新计算，未被陈旧条目命中
+    }
+
+    [Fact]
+    public void CacheEntry_TaggedCurrentRevision_IsServed()
+    {
+        var s = NewSession();
+        s.SeedHashCacheForTests(s.Revision, "SEEDED-CURRENT");
+        Assert.Equal("SEEDED-CURRENT", s.ComputeHash());
+        Assert.Equal(0, s.HashComputeCount); // 命中即返回
+    }
+
+    [Fact]
     public void DirectMutation_StaleUntilInvalidate_ThenNewValue()
     {
         // 契约：绕过引擎的直接 Doc 变更在 InvalidateHash 之前对 ComputeHash 不可见。
