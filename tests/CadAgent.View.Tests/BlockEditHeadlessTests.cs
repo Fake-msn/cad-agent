@@ -74,6 +74,24 @@ public class BlockEditHeadlessTests
         });
     });
 
+    /// <summary>两实例 + 布局视口 + 纸面线（状态栏目标空间夹具）。</summary>
+    private static string TwoInsertLayoutWithPaperDxf() => DxfFixture.CreateTempDxf(doc =>
+    {
+        AddTitleBlock(doc);
+        var layout = new Layout("布局1");
+        doc.Layouts.Add(layout);
+        layout.AddViewport(new Viewport
+        {
+            Center = new XYZ(500, 350, 0),
+            Width = 1000,
+            Height = 700,
+            ViewTarget = new XYZ(50, 0, 0),
+            ViewHeight = 200,
+        });
+        layout.AssociatedBlock!.Entities.Add(
+            new Line { StartPoint = new XYZ(100, 100, 0), EndPoint = new XYZ(200, 100, 0) });
+    });
+
     /// <summary>旋转 90° + 缩放 (2,3) 的单个实例（局部增量精确性夹具）。</summary>
     private static string RotatedScaledDxf() => DxfFixture.CreateTempDxf(doc =>
     {
@@ -626,6 +644,42 @@ public class BlockEditHeadlessTests
             Assert.Equal(10, line.EndPoint.X, 9);
             Assert.Equal(2, window.Canvas.Items.Count(i =>
                 i.BlockName == TitleBlockName && i.Kind == RenderKind.Line)); // 两实例恢复
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 13. 状态栏目标空间：块定义 / 纸面 / 模型 ----
+
+    [AvaloniaFact]
+    public void ToggleOn_StatusBar_ShowsTargetSpace()
+    {
+        (MainWindow window, string path, string projectDir) = Show(TwoInsertLayoutWithPaperDxf());
+        try
+        {
+            window.SheetSelector!.SelectedIndex = 1; // 布局幅面
+            Dispatcher.UIThread.RunJobs();
+            EnableSubEntityMode(window);
+
+            int blockIndex = BlockChildIndex(window, RenderKind.Line);
+            Assert.True(blockIndex >= 0, "夹具块子图元未入视口");
+            window.Canvas!.Select(blockIndex);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains($"目标 块定义 {TitleBlockName}", window.Status!.Text);
+
+            int paperIndex = window.Canvas.Items.ToList().FindIndex(i =>
+                i.Space == RenderSpace.PaperSpace && !i.Locked);
+            Assert.True(paperIndex >= 0, "夹具纸面线未渲染");
+            window.Canvas.Select(paperIndex);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains("目标 纸面", window.Status.Text);
+            Assert.DoesNotContain("目标 块定义", window.Status.Text);
+
+            int modelIndex = window.Canvas.Items.ToList().FindIndex(i =>
+                i.Space == RenderSpace.ModelSpace && i.BlockName is null && !i.Locked);
+            Assert.True(modelIndex >= 0, "夹具模型图元未入视口");
+            window.Canvas.Select(modelIndex);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains("目标 模型", window.Status.Text);
         }
         finally { Cleanup(window, path, projectDir); }
     }

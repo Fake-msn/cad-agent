@@ -113,6 +113,9 @@ public sealed class MainWindow : Window
     /// （模式开启后编辑块定义，全实例生效——Plan-3 已落地，旧「后续切片」文案退役）。</summary>
     private const string BlockChildToggleOffMessage = "块子图元需开启「子图元」模式（全实例生效）";
 
+    /// <summary>项2 Plan-3 T6 防御：渲染项未戳记来源句柄（正常路径恒有）→ 无法定位块内实体。</summary>
+    private const string BlockChildSourceMissingMessage = "渲染来源缺失，无法定位块内实体";
+
     /// <summary>子图元模式开启时的状态栏提示（块内编辑=全实例生效）。</summary>
     private const string SubEntityModeHint = "子图元模式：块内编辑=全实例生效";
 
@@ -1695,7 +1698,12 @@ public sealed class MainWindow : Window
             // 项2 Plan-3 T6：子图元模式开启 → 醒目提示块内编辑=全实例生效。
             if (SubEntityToggle?.IsChecked == true) status += $" | {SubEntityModeHint}";
             if (selected is not null)
+            {
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
+                // 项2 Plan-3 T6：目标空间（块内→块定义名；否则按纸面/模型空间）。
+                status += selected.BlockName is not null ? $" | 目标 块定义 {selected.BlockName}"
+                    : selected.Space == RenderSpace.PaperSpace ? " | 目标 纸面" : " | 目标 模型";
+            }
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
             if (_diffSummary.Length > 0) status += $" | {_diffSummary}";
             // T7：编辑警示（Yellow 闸口 / run-regression 回归警告）入状态栏尾部。
@@ -2206,9 +2214,6 @@ public sealed class MainWindow : Window
         if (!_layoutSheetActive) return true;
         switch (route.Intent)
         {
-            case EditSpaceIntent.Locked: // 上方已处理，防御性保留（契约违约不可达）
-                SetEditError(route.Reason ?? "视口边框只读");
-                return false;
             case EditSpaceIntent.BlockChild:
                 SetEditError(BlockChildToggleOffMessage);
                 return false;
@@ -2255,7 +2260,7 @@ public sealed class MainWindow : Window
         if (item.SourceHandle is null)
         {
             // 防御：渲染未戳记来源（正常路径恒有子实体句柄）。
-            SetEditError(BlockChildToggleOffMessage);
+            SetEditError(BlockChildSourceMissingMessage);
             return false;
         }
         return true;

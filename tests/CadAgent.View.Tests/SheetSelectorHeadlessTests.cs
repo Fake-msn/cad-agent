@@ -586,7 +586,7 @@ public class SheetSelectorHeadlessTests
     /// audit.db 不落盘（父 Insert 与两条线原样保留）。模型幅面的整父语义不变（见 MainWindow 早期口径）。
     /// </summary>
     [AvaloniaFact]
-    public void LayoutSheet_BlockChildDelete_RefusedPlan3_NoTx()
+    public void LayoutSheet_BlockChildDelete_ToggleOff_ShowsEnableHint_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(LayoutDxf(blockChild: true),
             new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));

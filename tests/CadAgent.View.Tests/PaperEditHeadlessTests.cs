@@ -443,7 +443,7 @@ public class PaperEditHeadlessTests
     // ---- 7. 块内子图元：子图元模式关 → Move/Delete 拒绝（提示开启模式），无 tx ----
 
     [AvaloniaFact]
-    public void BlockChild_MoveAndDelete_RefusedPlan3_NoTx()
+    public void BlockChild_MoveAndDelete_ToggleOff_ShowsEnableHint_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(PaperDxf(blockChild: true));
         try
@@ -561,7 +561,7 @@ public class PaperEditHeadlessTests
     // ---- 11. Move 二击复检：首击后选中漂移到块子图元（模式关）→ 拒绝，零 tx、盘上不变 ----
 
     [AvaloniaFact]
-    public void Move_SelectionDriftToBlockChild_SecondClickRefusedPlan3_NoTx()
+    public void Move_SelectionDriftToBlockChild_SecondClick_ToggleOff_ShowsEnableHint_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(PaperDxf(blockChild: true));
         try
