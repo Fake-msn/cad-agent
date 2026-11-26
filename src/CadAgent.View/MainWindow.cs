@@ -77,7 +77,9 @@ namespace CadAgent.View;
 /// 全视图刷新 + 问题清单重评 + 审计 live-rebuild。编排期间会话闸粗粒度持有
 /// （编辑/问题刷新在闸上阻塞——计划明示）。
 /// 幅面感知 T5 修复波：①布局幅面编辑硬闸（旧语义，项2 A 已替换为空间路由：布局幅面 =
-/// 纸面视图，视口内可编辑模型（纸→模型逆映射），纸面编辑后续切片）；②OnSheetSelected 补
+/// 纸面视图，视口内可编辑模型（纸→模型逆映射）；项2 Plan-2 T5 起纸面编辑启用——
+/// 移动/删除/改层/新建线·字/改文字按 space:"paper"+layout 落盘，块子图元留 Plan-3）；
+/// ②OnSheetSelected 补
 /// _editBusy 硬闸（在途编辑期间幅面不切换，selector 索引恢复，防 torn read）。
 /// §4.1④ 勾选→意图补全（Imp#5 deferred 闭合）：问题行 CheckBox（TwoWay IsChecked）
 /// → 填充意图勾选项优先（"{RuleId} [{Force}]: {Suggestion}"）+ 零勾选 mandatory
@@ -105,9 +107,14 @@ public sealed class MainWindow : Window
     /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
     private const double PickTolerancePixels = 5;
 
-    /// <summary>项2 A：Plan-1 纸面编辑未启用的行内拒绝文案（Route Paper 意图）。</summary>
-    private static string PaperEditMessage(string action) =>
-        $"纸面编辑将在后续切片提供；当前仅视口内可编辑模型（动作: {action}）";
+    /// <summary>项2 Plan-2 T5：布局幅面空间路由的行内拒绝文案（纸面编辑已启用，Plan-1 全幅拒绝退役）。</summary>
+    private const string BlockChildMessage = "块子图元编辑将在后续切片提供（Plan-3）";
+
+    /// <summary>两击跨空间（模型/纸面）不成线——不得混空间成图元。</summary>
+    private const string CrossSpaceMessage = "两击跨空间（模型/纸面），请在视图内同一空间完成";
+
+    /// <summary>纸面写参数固定值（handlers 契约：space 仅支持 paper，须配 layout）。</summary>
+    private const string PaperSpace = "paper";
 
     private string _baseStatus = "";
     private string _diffSummary = "";
@@ -167,8 +174,8 @@ public sealed class MainWindow : Window
     /// <summary>程序性刷新幅面下拉时抑制 SelectionChanged（避免编辑重建二次刷新/重 Fit）。</summary>
     private bool _suppressSheetSelection;
     /// <summary>
-    /// 幅面类型标志：布局幅面（纸面视图）激活——模型编辑经纸→模型逆映射，纸面编辑
-    /// 本切片未启用（见 EditRouting 守卫）；模型幅面保持直通语义（纸面=模型坐标系）。
+    /// 幅面类型标志：布局幅面（纸面/模型双空间）激活——模型编辑经纸→模型逆映射、纸面编辑
+    /// 原值落盘（space:"paper"+layout）；模型幅面保持直通语义（纸面=模型坐标系）。
     /// </summary>
     private bool _layoutSheetActive;
 
@@ -178,6 +185,10 @@ public sealed class MainWindow : Window
     /// <see cref="EditRouting.Route"/>（本类不重复推导 Space/Locked/twist 谓词）。
     /// </summary>
     private LayoutViewportContext? _layoutViewport;
+
+    /// <summary>项2 Plan-2 T5：当前布局幅面的布局名（SheetRecord.LayoutName，ApplySheet 同源）——
+    /// 纸面写参数 space:"paper"+layout 的唯一来源；模型幅面为空串。</summary>
+    private string _currentLayoutName = "";
     /// <summary>窗口标题图纸名（状态栏 _baseStatus 重建用）。</summary>
     private string _title = "";
 
@@ -246,6 +257,7 @@ public sealed class MainWindow : Window
         _currentSheetId = firstSheet.SheetId;
         _currentSheetName = firstSheet.Name;
         _layoutSheetActive = firstSheet.LayoutName is not null;
+        _currentLayoutName = firstSheet.LayoutName ?? "";
         IReadOnlyList<RenderItem> items = ItemsForSheet(firstSheet, out _layoutViewport);
         Canvas = new CanvasViewModel(items);
         // T8：传 session → 图层面板 = renderItems ∪ 图层表（空图层计数 0+表色样）。
@@ -606,6 +618,9 @@ public sealed class MainWindow : Window
         toolbar.Children.Add(delete);
         Tool("ChangeLayer", EditTool.ChangeLayer, "改层：点击实体选中，再从层下拉选择目标层");
         Tool("InsertBlock", EditTool.InsertBlock, "插块：先在工具栏输入块名，再点击放置");
+        // 项2 Plan-2 T5：改文字——点击文字/属性图元（或先用其他工具选中），按 Text content 框内容改写
+        // （空=清空；实例级，无块定义确认）。目标须文字类实体或 Insert 属性（AttributeTag）。
+        Tool("改文字", EditTool.SetText, "改文字：点击文字/属性图元，用 Text content 框内容改写（空=清空）");
         var undo = new Button
         {
             Content = "Undo",
@@ -1640,8 +1655,8 @@ public sealed class MainWindow : Window
             // T10 状态栏收尾：图纸名/实体计数（_baseStatus）+ 缩放 + 选择 + 审计摘要。
             // T5：幅面名（当前选中幅面）。
             string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}";
-            // 项2 A：布局幅面 = 纸面视图；视口内模型可编辑（纸面编辑后续切片）。
-            if (_layoutSheetActive) status += "（纸面视图：视口内可编辑模型）";
+            // 项2 B（Plan-2 T5）：布局幅面 = 纸面/模型双空间（视口内模型 + 纸面均可编辑）。
+            if (_layoutSheetActive) status += "（纸面/模型双空间）";
             if (selected is not null)
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
@@ -2078,77 +2093,104 @@ public sealed class MainWindow : Window
     /// </summary>
     private static string ParentHandle(string handle) => handle.Split(':')[0];
 
-    /// <summary>
-    /// 布局幅面纸面点 → 模型点（Route 唯一判定：未命中按点是否落在视口 PaperRect 内）。
-    /// Model 且可映射才转换；纸面（Plan-1 未启用）与不可映射（旋转/无有效视口）按路由
-    /// 原因拒绝。模型幅面直通（纸面=模型坐标系）。
-    /// </summary>
-    private bool TryModelPoint(double px, double py, string action, out double mx, out double my)
-    {
-        mx = px;
-        my = py;
-        if (!_layoutSheetActive) return true;
-        if (_layoutViewport is null)
-        {
-            // 防御性分支（R15：无有效视口的布局不会登记为幅面）；不得落入纸面文案。
-            SetEditError("当前布局无有效视口，无法编辑模型");
-            return false;
-        }
-        EditRoute route = EditRouting.Route(_layoutViewport, null, (px, py));
-        if (route.Intent == EditSpaceIntent.Model && route.CanMapModel)
-        {
-            (mx, my) = _layoutViewport!.PaperToModel((px, py));
-            return true;
-        }
-        SetEditError(route.Intent == EditSpaceIntent.Paper
-            ? PaperEditMessage(action)
-            : route.Reason ?? PaperEditMessage(action));
-        return false;
-    }
+    /// <summary>点工具目标：Route 意图 + 工作坐标（Paper=纸坐标原值；Model=逆映射模型点）。</summary>
+    private readonly record struct PointTarget(EditSpaceIntent Intent, double X, double Y);
 
     /// <summary>
-    /// 布局幅面按选中图元守卫（Delete/ChangeLayer 等无坐标动作）：Locked/纸面（含纸面
-    /// 块子图元，R13 以 hit.Space 区分）→ 拒绝对应文案；模型/模型块子图元 → 按父实体整体
-    /// 继续（Route 可映射性同判，twist/无视口拒绝）。模型幅面直通返回 true。
+    /// 布局幅面纸面点 → 目标空间（Route 唯一判定：未命中按点是否落在视口 PaperRect 内）。
+    /// Paper 意图保留纸坐标原值（纸面新建/预览锚点同源）；Model 且可映射 → 逆映射模型点；
+    /// 不可映射（旋转/无有效视口）按路由原因拒绝。模型幅面直通（纸面=模型坐标系，意图 Model）。
     /// </summary>
-    private bool TryGuardSelection(RenderItem item, string action)
+    private bool TryPointTarget(double px, double py, out PointTarget target)
     {
+        target = new PointTarget(EditSpaceIntent.Model, px, py);
+        if (!_layoutSheetActive) return true;
+        EditRoute route = EditRouting.Route(_layoutViewport, null, (px, py));
+        switch (route.Intent)
+        {
+            case EditSpaceIntent.Paper when _currentLayoutName.Length > 0:
+                target = new PointTarget(EditSpaceIntent.Paper, px, py);
+                return true;
+            case EditSpaceIntent.Paper:
+                SetEditError("当前布局缺少布局名，纸面编辑不可用");
+                return false;
+            case EditSpaceIntent.Model when route.CanMapModel:
+                (double mx, double my) = _layoutViewport!.PaperToModel((px, py));
+                target = new PointTarget(EditSpaceIntent.Model, mx, my);
+                return true;
+            default:
+                // 旋转/无有效视口：模型点不可映射（纸面点击不会落到此分支——Route 未命中纸面点恒 Paper）。
+                SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
+                return false;
+        }
+    }
+
+    /// <summary>纸面目标句柄：属性取 ATTRIB 句柄（SourceHandle；Handle 为 "{insert}:attr:{tag}" 展示形），
+    /// 其余取实体句柄（子图元剥后缀——块子图元在布局幅面已被守卫拒绝，此处为模型幅面防御）。</summary>
+    private static string PaperEditHandle(RenderItem item) =>
+        item.AttributeTag is not null ? item.SourceHandle ?? item.Handle : ParentHandle(item.Handle);
+
+    /// <summary>
+    /// 布局幅面按选中图元守卫（Move/Delete/ChangeLayer/改文字 等按图元动作）：Locked → 只读；
+    /// BlockChild（块子图元，不分空间）→ Plan-3 拒绝；Paper → 允许（经 out 意图交给调用方加
+    /// space/layout 参数）；Model → 可映射性判定（twist/无视口拒绝）。模型幅面直通（意图 Model，
+    /// 既有"块子图元按父实体整体"语义不变）。
+    /// </summary>
+    private bool TryGuardSelection(RenderItem item, out EditSpaceIntent intent)
+    {
+        intent = EditSpaceIntent.Model;
         if (!_layoutSheetActive) return true;
         EditRoute route = EditRouting.Route(_layoutViewport, item, (0, 0));
         switch (route.Intent)
         {
             case EditSpaceIntent.Locked:
-                // 文案单一来源 EditRouting（"视口边框只读"）；契约违约兜底不得复用纸面文案。
+                // 文案单一来源 EditRouting（"视口边框只读"）；契约违约兜底不得复用其他文案。
                 SetEditError(route.Reason ?? "视口边框只读");
                 return false;
-            case EditSpaceIntent.Paper:
-            case EditSpaceIntent.BlockChild when item.Space == RenderSpace.PaperSpace:
-                SetEditError(PaperEditMessage(action));
-                return false;
-            case EditSpaceIntent.Model:
             case EditSpaceIntent.BlockChild:
+                SetEditError(BlockChildMessage);
+                return false;
+            case EditSpaceIntent.Paper:
+                if (_currentLayoutName.Length == 0)
+                {
+                    SetEditError("当前布局缺少布局名，纸面编辑不可用");
+                    return false;
+                }
+                intent = EditSpaceIntent.Paper;
+                return true;
+            case EditSpaceIntent.Model:
                 if (!route.CanMapModel)
                 {
-                    SetEditError(route.Reason ?? PaperEditMessage(action));
+                    SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
                     return false;
                 }
                 return true;
-            default: // Unavailable：Plan-1 路由不产出，防御性拒绝
-                SetEditError(route.Reason ?? PaperEditMessage(action));
+            default: // Unavailable：路由不产出，防御性拒绝
+                SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
                 return false;
         }
     }
 
-    /// <summary>布局幅面移动增量 = 纸面增量 ÷ 视口比例（Route 可映射性判定；模型幅面直通）。</summary>
-    private bool TryMoveDelta(double bx, double by, double wx, double wy, out double dx, out double dy)
+    /// <summary>
+    /// 布局幅面移动增量：纸面选中 → 原始 dx/dy（纸面增量即图纸增量）；模型（含模型幅面直通）
+    /// → ÷视口比例（可映射性经 Route 判定）。<paramref name="intent"/> 交给调用方选择 space 参数。
+    /// </summary>
+    private bool TryMoveDelta(double bx, double by, double wx, double wy,
+        out double dx, out double dy, out EditSpaceIntent intent)
     {
         dx = wx - bx;
         dy = wy - by;
+        intent = EditSpaceIntent.Model;
         if (!_layoutSheetActive || Canvas?.SelectedItem is not { } selected) return true;
         EditRoute route = EditRouting.Route(_layoutViewport, selected, (0, 0));
+        if (route.Intent == EditSpaceIntent.Paper && _currentLayoutName.Length > 0)
+        {
+            intent = EditSpaceIntent.Paper; // 纸面增量即图纸增量（不 ÷s）
+            return true;
+        }
         if (!route.CanMapModel)
         {
-            SetEditError(route.Reason ?? PaperEditMessage("移动"));
+            SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
             return false;
         }
         double s = _layoutViewport!.Scale; // 可映射 ⇒ 非退化，比例可信
@@ -2168,9 +2210,12 @@ public sealed class MainWindow : Window
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string selected)
         {
-            // R5：Locked/PaperSpace 守卫先于确认（不对只读目标弹确认）。
-            if (Canvas.SelectedItem is { } item && !TryGuardSelection(item, "删除")) return;
-            string handle = ParentHandle(selected); // Imp#3：子图元句柄→父实体整体删除
+            // R5：Locked/BlockChild 守卫先于确认（不对只读/Plan-3 目标弹确认）；纸面目标允许。
+            RenderItem? item = Canvas.SelectedItem;
+            EditSpaceIntent intent = EditSpaceIntent.Model;
+            if (item is not null && !TryGuardSelection(item, out intent)) return;
+            bool paper = item is not null && intent == EditSpaceIntent.Paper;
+            string handle = paper ? PaperEditHandle(item!) : ParentHandle(selected); // Imp#3：子图元→父实体
             string msg = $"确认删除选中实体（句柄 {handle}）？删除经审计管线，可 Undo 撤回。";
             bool confirmed = ConfirmDeleteOverride is not null
                 ? await ConfirmDeleteOverride(msg)
@@ -2178,7 +2223,9 @@ public sealed class MainWindow : Window
             if (!confirmed) return; // 取消：保持选中，不清状态
             // 确认等待期间编辑/diff 抢跑 → 硬闸兜底（模态阻塞 owner 时理论不可达，seam 路径防御）。
             if (_editBusy || _diffBusy) return;
-            await RunEditAsync(() => Edit.DeleteAsync(handle));
+            await RunEditAsync(() => paper
+                ? Edit.DeleteAsync(handle, PaperSpace, _currentLayoutName, attribute: item!.AttributeTag is not null)
+                : Edit.DeleteAsync(handle));
         }
         else
             SetActiveTool(EditTool.Delete);
@@ -2204,8 +2251,14 @@ public sealed class MainWindow : Window
             && Canvas.SelectedHandle is string selected
             && EditLayerSelector?.SelectedItem is string layer)
         {
-            if (Canvas.SelectedItem is { } item && !TryGuardSelection(item, "改层")) return;
-            _ = RunEditAsync(() => Edit.ChangeLayerAsync(ParentHandle(selected), layer)); // Imp#3：父实体整体改层
+            RenderItem? item = Canvas.SelectedItem;
+            EditSpaceIntent intent = EditSpaceIntent.Model;
+            if (item is not null && !TryGuardSelection(item, out intent)) return;
+            bool paper = item is not null && intent == EditSpaceIntent.Paper;
+            // Imp#3：模型幅面仍按父实体整体改层；纸面取纸面句柄 + space/layout。
+            _ = RunEditAsync(() => paper
+                ? Edit.ChangeLayerAsync(PaperEditHandle(item!), layer, PaperSpace, _currentLayoutName)
+                : Edit.ChangeLayerAsync(ParentHandle(selected), layer));
         }
     }
 
@@ -2214,8 +2267,8 @@ public sealed class MainWindow : Window
     /// Line 第一击设预览锚点、第二击提交；Text/InsertBlock 需工具栏输入（空→引导）；
     /// Move 点击实体选中并记首点基准、点击目标点提交 dx/dy；Delete/ChangeLayer
     /// 点击仅选中（确认走工具栏二次按压/层下拉）。Select 走默认选择路径。
-    /// 项2 A：布局幅面坐标经 EditRouting 判定——视口内=模型（纸→模型逆映射），
-    /// 纸面编辑 Plan-1 未启用（拒绝），视口框只读；模型幅面直通不变。
+    /// 项2 B（Plan-2 T5）：布局幅面 = 纸面/模型双空间——视口内模型走纸→模型逆映射，纸面
+    /// 原值写纸面（space:"paper"+layout），两击跨空间拒绝；视口框只读、块子图元 Plan-3。
     /// </summary>
     private bool OnCanvasToolClick(double wx, double wy)
     {
@@ -2228,17 +2281,23 @@ public sealed class MainWindow : Window
             case EditTool.Line:
                 if (Canvas.PendingPoint is (double x1, double y1))
                 {
-                    // 两击都须可映射（首击锚点存纸坐标）；任一失败 → 清 pending + 错误，不提交。
-                    if (!TryModelPoint(x1, y1, "画线", out double mx1, out double my1)
-                        || !TryModelPoint(wx, wy, "画线", out double mx2, out double my2))
+                    // 两击都须可路由（首击锚点存纸坐标）；任一失败 → 清 pending + 错误，不提交。
+                    if (!TryPointTarget(x1, y1, out PointTarget t1) || !TryPointTarget(wx, wy, out PointTarget t2))
                     {
                         Canvas.SetPendingPoint(null);
                         return true;
                     }
                     Canvas.SetPendingPoint(null);
-                    _ = RunEditAsync(() => Edit.DrawLineAsync(mx1, my1, mx2, my2));
+                    if (t1.Intent != t2.Intent)
+                    {
+                        SetEditError(CrossSpaceMessage); // 跨空间不得混成一条线
+                        return true;
+                    }
+                    _ = RunEditAsync(() => t1.Intent == EditSpaceIntent.Paper
+                        ? Edit.DrawLineAsync(t1.X, t1.Y, t2.X, t2.Y, space: PaperSpace, layout: _currentLayoutName)
+                        : Edit.DrawLineAsync(t1.X, t1.Y, t2.X, t2.Y));
                 }
-                else if (TryModelPoint(wx, wy, "画线", out _, out _))
+                else if (TryPointTarget(wx, wy, out _))
                 {
                     Canvas.SetPendingPoint((wx, wy)); // 预览锚点存纸坐标（模型幅面=模型坐标）
                 }
@@ -2251,11 +2310,14 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入文本内容（工具栏 Text content 框）");
                     return true;
                 }
-                if (!TryModelPoint(wx, wy, "写字", out double tx, out double ty)) return true;
+                if (!TryPointTarget(wx, wy, out PointTarget tp)) return true;
                 // 视图闭环 T9：字高取输入框（InvariantCulture；非法/≤0 → 默认 3.5，不崩）。
                 // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查）。
+                // 纸面意图下字高即纸面单位（handlers 纸面坐标语义，不再换算）。
                 double height = double.TryParse(TextHeightInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && double.IsFinite(h) && h > 0 ? h : DefaultTextHeight;
-                _ = RunEditAsync(() => Edit.AddTextAsync(tx, ty, text, height));
+                _ = RunEditAsync(() => tp.Intent == EditSpaceIntent.Paper
+                    ? Edit.AddTextAsync(tp.X, tp.Y, text, height, space: PaperSpace, layout: _currentLayoutName)
+                    : Edit.AddTextAsync(tp.X, tp.Y, text, height));
                 return true;
 
             case EditTool.InsertBlock:
@@ -2265,13 +2327,15 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入块名（工具栏 Block name 框）");
                     return true;
                 }
-                if (!TryModelPoint(wx, wy, "插块", out double bx0, out double by0)) return true;
+                if (!TryPointTarget(wx, wy, out PointTarget bp)) return true;
                 // 视图闭环 T9：缩放非法/≤0 → 1；旋转 UI 度 → handler 弧度（非法 → 0）。
                 // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查；
                 // NaN/∞ 入 JsonSerializer 会抛异常致编辑静默失败）。
                 double scale = double.TryParse(BlockScaleInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && double.IsFinite(s) && s > 0 ? s : 1;
                 double rotation = double.TryParse(BlockRotationInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double deg) && double.IsFinite(deg) ? deg * Math.PI / 180.0 : 0;
-                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, bx0, by0, scale, rotation));
+                _ = RunEditAsync(() => bp.Intent == EditSpaceIntent.Paper
+                    ? Edit.InsertBlockAsync(block, bp.X, bp.Y, scale, rotation, space: PaperSpace, layout: _currentLayoutName)
+                    : Edit.InsertBlockAsync(block, bp.X, bp.Y, scale, rotation));
                 return true;
 
             case EditTool.Move:
@@ -2279,8 +2343,8 @@ public sealed class MainWindow : Window
                 if (hit is int i)
                 {
                     RenderItem hitItem = Canvas.Items[i];
-                    // 项2 A：布局幅面按下图元空间守卫（框只读/纸面未启用/不可映射含旋转）。
-                    if (!TryGuardSelection(hitItem, "移动")) return true;
+                    // 布局幅面按下图元空间守卫（框只读/块子图元 Plan-3/模型不可映射含旋转）。
+                    if (!TryGuardSelection(hitItem, out _)) return true;
                     Canvas.Select(i);
                     _moveBase = hitItem.Points.Count > 0
                         ? hitItem.Points[0]
@@ -2288,10 +2352,15 @@ public sealed class MainWindow : Window
                 }
                 else if (Canvas.SelectedHandle is string moveHandle && _moveBase is (double bx, double by))
                 {
+                    RenderItem? selected = Canvas.SelectedItem;
                     _moveBase = null;
-                    if (!TryMoveDelta(bx, by, wx, wy, out double dx, out double dy)) return true;
-                    // Imp#3：子图元句柄→父 Insert/Dimension 整体移动（块/标注几何随父平移）。
-                    _ = RunEditAsync(() => Edit.MoveAsync(ParentHandle(moveHandle), dx, dy));
+                    if (!TryMoveDelta(bx, by, wx, wy, out double dx, out double dy, out EditSpaceIntent intent)) return true;
+                    // Imp#3：模型幅面/模型空间子图元句柄→父 Insert/Dimension 整体移动；纸面取纸面句柄。
+                    bool paper = intent == EditSpaceIntent.Paper;
+                    string handle = paper ? PaperEditHandle(selected!) : ParentHandle(moveHandle);
+                    _ = RunEditAsync(() => paper
+                        ? Edit.MoveAsync(handle, dx, dy, PaperSpace, _currentLayoutName)
+                        : Edit.MoveAsync(handle, dx, dy));
                 }
                 return true;
 
@@ -2302,14 +2371,39 @@ public sealed class MainWindow : Window
                 return true;
 
             case EditTool.SetText:
-                // 项2 T4 防御分支：改文字工具尚无 UI 入口（T5 接线），点击一律消费、不产生编辑
-                // （不得落入 default 的默认选择路径）；留痕提示使该 deferred 状态可诊断。
-                SetEditError("改文字工具尚未接线");
-                return true;
+                return ApplySetTextClick(wx, wy);
 
             default:
                 return false; // Select：默认 HitTest→Select 路径
         }
+    }
+
+    /// <summary>
+    /// 项2 Plan-2 T5：改文字点击——命中图元（无命中则用当前选中）须为文字类或 Insert 属性；
+    /// 目标句柄取 SourceHandle（属性=ATTRIB 句柄，实例级 set-text），内容取 Text content 框
+    /// （空=清空）。不弹确认（实例级，非块定义）。块子图元/只读框按路由守卫拒绝。
+    /// </summary>
+    private bool ApplySetTextClick(double wx, double wy)
+    {
+        int? hitIndex = Canvas!.HitTest(wx, wy, PickTolerancePixels / Canvas.Scale);
+        RenderItem? target = hitIndex is int idx ? Canvas.Items[idx] : Canvas.SelectedItem;
+        if (target is null)
+        {
+            SetEditError("请点击文字或属性图元");
+            return true;
+        }
+        if (target.Kind != RenderKind.Text && target.AttributeTag is null)
+        {
+            SetEditError("仅文字/属性可改文字");
+            return true;
+        }
+        if (!TryGuardSelection(target, out _)) return true;
+        Canvas.Select(hitIndex ?? Canvas.SelectedIndex);
+        // SourceHandle 即真实实体句柄（属性项 Handle 为 "{insert}:attr:{tag}" 展示形）。
+        string handle = target.SourceHandle ?? target.Handle;
+        string text = EditTextInput?.Text ?? "";
+        _ = RunEditAsync(() => Edit!.SetTextAsync(handle, text));
+        return true;
     }
 
     /// <summary>T9：编辑/撤销评估期间禁用工具栏 + Diff 切换（防重入 + diff/编辑互斥）。
@@ -2394,6 +2488,7 @@ public sealed class MainWindow : Window
         if (Canvas is null || Layers is null) return;
         IReadOnlyList<RenderItem> items = ItemsForSheet(sheet, out _layoutViewport);
         _layoutSheetActive = sheet.LayoutName is not null; // 状态栏/守卫同源；先于 Refresh 防陈旧注记
+        _currentLayoutName = sheet.LayoutName ?? ""; // 纸面写参数 layout 唯一来源（模型幅面清空）
         Canvas.Refresh(items);
         Layers.Refresh(items, _session); // T8：图层表并集（编辑清空某层后空层仍显示）
         if (LayerList is not null) LayerList.ItemsSource = Layers.Layers;

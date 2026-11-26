@@ -1,7 +1,9 @@
 using System.Text.Json;
 using ACadSharp.Entities;
+using ACadSharp.Tables;
 using CadAgent.Core;
 using CadAgent.Data.Handlers;
+using CSMath;
 
 namespace CadAgent.Data.Tests;
 
@@ -96,6 +98,58 @@ public class InsertBlockTests : IDisposable
         Assert.Equal(10, insert.InsertPoint.X, 3);
         Assert.Equal(20, insert.InsertPoint.Y, 3);
         Assert.Equal(2, insert.XScale, 3);
+    }
+
+    // ---- 项2 Plan-2 T5：space:"paper"+layout → 布局纸面关联块（与 add-line 同一集合解析）----
+
+    private static (DrawingSession S, ACadSharp.Objects.Layout Layout, string Path) NewPaper()
+    {
+        var (s, layout, path) = PaperFixtures.PaperSession(doc =>
+        {
+            var lum = new BlockRecord("LUM");
+            lum.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(lum);
+        });
+        return (s, layout, path);
+    }
+
+    [Fact]
+    public void InsertBlock_PaperSpace_WritesIntoLayoutBlock_ModelUntouched()
+    {
+        var (s, layout, path) = NewPaper();
+        try
+        {
+            var r = new InsertBlockHandler().Apply(s, P($$"""
+                {"block":"LUM","x":420,"y":297,"scale":2,
+                 "space":"paper","layout":"{{PaperFixtures.LayoutName}}"}
+                """));
+            Assert.True(r.Ok, r.Error);
+            var insert = Assert.Single(layout.AssociatedBlock!.Entities.OfType<Insert>());
+            Assert.Equal("LUM", insert.Block.Name);
+            Assert.Equal(420, insert.InsertPoint.X, 6);
+            Assert.Equal(297, insert.InsertPoint.Y, 6);
+            Assert.Equal(2, insert.XScale, 6);
+            Assert.Equal(insert.Handle.ToString(), r.TargetHandle);
+            Assert.Empty(s.Doc.Entities); // 模型空间未写入（空间隔离）
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void InsertBlock_UnsupportedSpace_Fails_NoEntityAdded()
+    {
+        var (s, layout, path) = NewPaper();
+        try
+        {
+            var r = new InsertBlockHandler().Apply(s, P($$"""
+                {"block":"LUM","x":1,"y":2,"space":"foo","layout":"{{PaperFixtures.LayoutName}}"}
+                """));
+            Assert.False(r.Ok);
+            Assert.Contains("仅支持 paper", r.Error);
+            Assert.Empty(s.Doc.Entities.OfType<Insert>());
+            Assert.Empty(layout.AssociatedBlock!.Entities.OfType<Insert>());
+        }
+        finally { File.Delete(path); }
     }
 
     [Fact]

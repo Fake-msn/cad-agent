@@ -129,8 +129,17 @@ public sealed class EditViewModel
             return ApplyAsync(EditTool.ChangeLayer, JsonSerializer.SerializeToElement(args));
         });
 
-    public Task<EditResult> InsertBlockAsync(string block, double x, double y, double scale = 1, double rotation = 0) =>
-        ApplyAsync(EditTool.InsertBlock, JsonSerializer.SerializeToElement(new { block, x, y, scale, rotation }));
+    /// <summary>插块（space:"paper"+layout → 布局纸面，项2 T5；默认模型，源兼容）。</summary>
+    public Task<EditResult> InsertBlockAsync(string block, double x, double y, double scale = 1,
+        double rotation = 0, string? space = null, string? layout = null)
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["block"] = block, ["x"] = x, ["y"] = y, ["scale"] = scale, ["rotation"] = rotation
+        };
+        AddSpace(args, space, layout);
+        return ApplyAsync(EditTool.InsertBlock, JsonSerializer.SerializeToElement(args));
+    }
 
     /// <summary>改文字（spec §3.3 set-text）：TEXT/MText/ATTRIB 改值；句柄默认检索序=模型→纸面→属性。</summary>
     public Task<EditResult> SetTextAsync(string handle, string text) =>

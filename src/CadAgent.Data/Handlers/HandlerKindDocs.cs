@@ -12,7 +12,7 @@ public static class HandlerKindDocs
         change-layer: 改图层 {handle: number|string, layer: string, space?: "paper", layout?: string, attribute?: true}（space 须配 layout；不存在则创建；block 块内编辑属 Plan-3）
         set-text: 改文字/实例属性值 {handle: number|string, text: string, space?: "paper", layout?: string, attribute?: true}（space 须配 layout；≤4096 字符；空串=清空；TEXT/ATTRIB 禁换行，MText 可多行；block 块内编辑属 Plan-3）
         set-attribute: 改实例属性值 {handle: number|string, value: string} 或 {insert: number|string, tag: string, value: string, space?: "paper", layout?: string}（space 须配 layout；value ≤4096、禁换行；insert 形态支持 space/layout；仅模型/纸面顶层 Insert.Attributes；tag 大小写敏感；同 tag 多条须改用句柄；block 块内编辑属 Plan-3）
-        insert-block: 插入图纸内已有块 {block: string, x,y: number, scale?: number, rotation?: number(弧度)}
+        insert-block: 插入图纸内已有块 {block: string, x,y: number, scale?: number, rotation?: number(弧度), space?: "paper", layout?: string}（space 须配 layout → 写入该布局纸面；此处 block 为被插入块名，非块定义定位）
         layout-lighting: 房间网格布灯 {x,y,width,depth,spacing: number(mm), block: string, layer?: string}（需已确认 Room 语义；点位=区域内 spacing 网格）
         label-luminaires: 灯具编号/设备索引符号 {prefix: string(品种代号,归院标), block?: string, start?: number, symbolSize?: number(8~12mm,默认10), layer?: string}（需已确认 Lighting 语义；正六边形符号 JGJ/T 244-2011 3.6.6-4）
         insert-symbol: 跨文档导入 skill 符号并插入 {symbol: string(符号名,须 --skill 包内), x,y: number, scale?: number, rotation?: number(弧度), layer?: string}（建块/复用块；Line/Circle/Arc/Text 白名单）
