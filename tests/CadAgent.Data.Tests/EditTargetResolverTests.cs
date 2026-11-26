@@ -43,9 +43,10 @@ internal static class PaperFixtures
         return (new DrawingSession(path, doc), layout, path);
     }
 
-    /// <summary>顶层 Insert + 一条属性（构造法同 MoveEntityTests.Insert 分支）；inPaper 挂纸面块。</summary>
+    /// <summary>顶层 Insert + 一条属性（构造法同 MoveEntityTests.Insert 分支）；inPaper 挂纸面块；
+    /// handle 给定则强置 ATTRIB 句柄（脏图/正控制场景，落盘前生效）。</summary>
     public static (Insert Insert, AttributeEntity Attribute) AddAttributeInsert(
-        CadDocument doc, bool inPaper = false)
+        CadDocument doc, bool inPaper = false, ulong? handle = null)
     {
         var block = new BlockRecord("TB_" + Guid.NewGuid().ToString("N")[..8]);
         doc.BlockRecords.Add(block);
@@ -53,6 +54,7 @@ internal static class PaperFixtures
         var attr = new AttributeEntity { Tag = "图名", Value = "栖贤雅庭" };
         attr.InsertPoint = new XYZ(10, 20, 0);
         attr.AlignmentPoint = new XYZ(12, 22, 0);
+        if (handle is ulong forced) ForceHandle(attr, forced);
         insert.Attributes.Add(attr);
         if (inPaper)
             doc.Layouts.First(l => l.Name == LayoutName).AssociatedBlock!.Entities.Add(insert);
@@ -123,9 +125,9 @@ public class EditTargetResolverTests : IDisposable
     }
 
     [Fact]
-    public void Resolve_ModelWinsOverPaper_WhenBothPresent()
+    public void Resolve_EachHandleStaysInItsSpace()
     {
-        // 兼容口径：仅 handle 时模型优先（历史计划行为逐字不变）。
+        // 兼容口径：仅 handle 时各句柄解析到自身空间（模型句柄→Model，纸面句柄→Paper，历史行为逐字不变）。
         Line? modelLine = null;
         var (s, layout) = New(doc =>
         {
@@ -187,7 +189,24 @@ public class EditTargetResolverTests : IDisposable
             doc.Entities.Add(new Insert(outer) { InsertPoint = new XYZ(0, 0, 0) });
         });
         Assert.NotNull(nested);
+        // 反空断言：强置句柄必须真存活（否则 7777 未命中可能是"句柄本就不存在"而非"块定义未检索"）。
+        Assert.Equal(7777UL, nested!.Handle);
         Assert.Null(EditTargetResolver.Resolve(s, P(new { handle = "7777" })));
+    }
+
+    [Fact]
+    public void Resolve_TopLevelForcedHandleAttribute_FindsInsertAttribute()
+    {
+        // 正控制：同一 7777 口径的顶层 Insert 属性必须解析到 InsertAttribute（否定不空转）。
+        AttributeEntity? attr = null;
+        Insert? insert = null;
+        var (s, _) = New(doc => (insert, attr) = PaperFixtures.AddAttributeInsert(doc, handle: 7777UL));
+        Assert.Equal(7777UL, attr!.Handle);
+        var target = EditTargetResolver.Resolve(s, P(new { handle = "7777" }));
+        Assert.NotNull(target);
+        Assert.Equal(EditOwnerKind.InsertAttribute, target!.Owner);
+        Assert.Same(attr, target.Entity);
+        Assert.Same(insert, target.AttributeOwner);
     }
 
     // ---- 显式限定（fail-closed，未命中不回退） ----

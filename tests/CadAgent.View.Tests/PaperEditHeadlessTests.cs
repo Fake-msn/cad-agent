@@ -39,7 +39,9 @@ public class PaperEditHeadlessTests
         return dir;
     }
 
-    private static string PaperDxf(bool blockChild = false, string? extraLayer = null)
+    /// <param name="twist">视口 TwistAngle（弧度）：非 0 时布局仍登记（尺寸合法）但纸→模型不可映射；
+    /// 纸面分支不经 CanMapModel，故纸面读写路径必须照常。</param>
+    private static string PaperDxf(bool blockChild = false, string? extraLayer = null, double twist = 0)
         => DxfFixture.CreateTempDxf(doc =>
         {
             doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(50, 0, 0) });
@@ -66,6 +68,7 @@ public class PaperEditHeadlessTests
                 Height = 400,
                 ViewTarget = new XYZ(0, 0, 0),
                 ViewHeight = 200,
+                TwistAngle = twist,
             });
             layout.AssociatedBlock!.Entities.Add(
                 new Line { StartPoint = new XYZ(100, 100, 0), EndPoint = new XYZ(200, 100, 0) });
@@ -335,7 +338,7 @@ public class PaperEditHeadlessTests
             Dispatcher.UIThread.RunJobs();
             Assert.Equal(EditTool.SetText, window.Edit!.ActiveTool);
             window.EditTextInput!.Text = "新图名";
-            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 305, 618)); // 属性文字盒内
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 305, 625)); // 属性文字盒内（(300,620)+盒 18×10，留边距防缩放）
 
             Assert.Null(window.Edit.ErrorMessage);
             Assert.Single(window.Edit.RecentTxIds);
@@ -388,7 +391,7 @@ public class PaperEditHeadlessTests
             SelectLayoutSheet(window);
             ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
-            ClickCanvasAtWorld(window, 305, 618); // 命中属性文字 → 选中 + 基准 (300,620)
+            ClickCanvasAtWorld(window, 305, 625); // 命中属性文字（盒内）→ 选中 + 基准 (300,620)
             Assert.NotNull(window.Canvas!.SelectedHandle);
             Assert.Contains(":attr:", window.Canvas.SelectedHandle);
 
@@ -419,7 +422,7 @@ public class PaperEditHeadlessTests
             ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
             window.EditTextInput!.Text = "新图名";
-            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 305, 618));
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 305, 625)); // 盒内点（同上）
 
             Assert.Null(window.Edit!.ErrorMessage);
             Assert.Single(window.Edit.RecentTxIds);
@@ -613,6 +616,123 @@ public class PaperEditHeadlessTests
             Assert.Equal(2, inserted.XScale, 6);
             Assert.Empty(saved.Doc.Entities.OfType<Insert>()); // 模型空间未写入
             AssertPaperScopeAudited(projectDir, "insert-block");
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 13. twist 视口（0.3）：纸面分支先于 CanMapModel —— 纸面新建照常 ----
+
+    /// <summary>
+    /// 视图旋转下纸→模型不可映射（既有测试钉住视口内拒绝），但 PaperRect 外的点走 Paper
+    /// 意图、不经 CanMapModel——两击仍须新建纸面线（一 tx、space/layout 审计、模型不变）。
+    /// </summary>
+    [AvaloniaFact]
+    public async Task TwistedViewport_LineToolOutsidePaperRect_WritesPaperLine_OneTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf(twist: 0.3));
+        try
+        {
+            Assert.Equal(2, window.SheetSelector!.ItemCount); // 旋转不影响幅面登记（尺寸合法）
+            SelectLayoutSheet(window);
+            ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 150, 300); // PaperRect(200,150)-(800,550) 外 → 纸面锚点
+            Assert.NotNull(window.Canvas!.PendingPoint);
+            Assert.False(window.EditError!.IsVisible); // 纸面路由不得落旋转拒绝
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 700, 600));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            var added = Assert.Single(saved.Doc.Layouts.First(l => l.Name == LayoutName)
+                .AssociatedBlock!.Entities.OfType<Line>(), l => Math.Abs(l.StartPoint.X - 150) < 1e-6);
+            Assert.Equal(300, added.StartPoint.Y, 6);
+            Assert.Equal(700, added.EndPoint.X, 6);
+            Assert.Equal(600, added.EndPoint.Y, 6);
+            Assert.Equal(2, saved.Doc.Entities.OfType<Line>().Count()); // 模型实体数不变
+            AssertPaperScopeAudited(projectDir, "add-line");
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    /// <summary>twist 下纸面 Move 仍取原始纸面增量（不 ÷Scale、不经逆映射），模型不变。</summary>
+    [AvaloniaFact]
+    public async Task TwistedViewport_MovePaperLine_WritesRawPaperDelta_ModelUntouched()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf(twist: 0.3));
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 150, 100); // 纸面线命中（PaperRect 外）
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 250, 250)); // 原始增量 (+150,+150)
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            Line moved = SavedPaperLine(saved);
+            Assert.Equal(250, moved.StartPoint.X, 6);
+            Assert.Equal(250, moved.StartPoint.Y, 6);
+            Assert.Equal(350, moved.EndPoint.X, 6);
+            Assert.Equal(250, moved.EndPoint.Y, 6);
+            Assert.Contains(saved.Doc.Entities.OfType<Line>(),
+                l => Math.Abs(l.StartPoint.X) < 1e-6 && Math.Abs(l.EndPoint.X - 50) < 1e-6); // 模型未动
+            AssertPaperScopeAudited(projectDir, "move-entity");
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 14. 纸面属性 ChangeLayer：ATTRIB 改层、父 Insert 不变、一 tx ----
+
+    [AvaloniaFact]
+    public async Task PaperAttribute_ChangeLayer_SetsAttribLayer_InsertUnchanged_OneTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf(extraLayer: "A-属性"));
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "ChangeLayer").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            int index = PaperAttributeIndex(window);
+            Assert.True(index >= 0);
+            window.Canvas!.Select(index);
+            Assert.Contains("A-属性", window.EditLayerSelector!.ItemsSource!.Cast<string>());
+
+            await ActAndWaitForEditAsync(window, () =>
+                window.EditLayerSelector.SelectedItem = "A-属性");
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            Insert insert = SavedTitleInsert(saved);
+            Assert.Equal("A-属性", Assert.Single(insert.Attributes).Layer.Name); // 仅属性层变
+            Assert.Equal("0", insert.Layer.Name); // 父 Insert 层不变
+            AssertPaperScopeAudited(projectDir, "change-layer");
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 15. 改文字空点：引导文案、零 tx（ApplySetTextClick 无命中分支） ----
+
+    [AvaloniaFact]
+    public void SetTextTool_EmptyCanvasClick_ReportsTargetHint_NoTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf());
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(EditTool.SetText, window.Edit!.ActiveTool);
+            ClickCanvasAtWorld(window, 700, 600); // 空点：无图元、无选中
+
+            Assert.Null(window.Canvas!.SelectedHandle);
+            Assert.True(window.EditError!.IsVisible);
+            Assert.Contains("请点击文字或属性图元", window.EditError.Text);
+            Assert.Empty(window.Edit.RecentTxIds);
+            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
         }
         finally { Cleanup(window, path, projectDir); }
     }

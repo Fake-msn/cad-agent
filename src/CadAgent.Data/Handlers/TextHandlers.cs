@@ -44,7 +44,7 @@ internal static class TextHandlers
         {
             string? layoutName = HandlerHelpers.OptString(p, "layout");
             if (string.IsNullOrEmpty(layoutName))
-                return (null, "space:\"paper\" 需指定 layout");
+                return (null, HandlerHelpers.PaperNeedsLayoutMessage);
             ACadSharp.Objects.Layout? layout = EditTargetResolver.FindLayout(s, layoutName);
             if (layout is null) return (null, $"布局不存在：{layoutName}");
             if (!layout.IsPaperSpace || layout.AssociatedBlock is null)
@@ -135,6 +135,9 @@ public sealed class SetAttributeHandler : IStepHandler
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        // 两形态（handle / insert+tag）共用同一作用域预校验：space:"paper" 缺 layout、
+        // 未知/非纸面 layout、attribute 非 true 一律先于解析给出明确原因（同 set-text 口径）。
+        if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
         if (!TextHandlers.TryReadString(p, "value", out string? value, out string paramError))
             return new StepResult(false, paramError, "");
         // 属性值同为单行文字（AttributeEntity : TextEntity）：与 set-text 的 ATTRIB 分支同口径。

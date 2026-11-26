@@ -9,6 +9,9 @@ namespace CadAgent.Data.Handlers;
 
 internal static class HandlerHelpers
 {
+    /// <summary>纸面限定缺 layout 的统一文案（解析器预校验/新建族/属性检索三处共用，防契约漂移）。</summary>
+    public const string PaperNeedsLayoutMessage = "space:\"paper\" 须配 layout";
+
     public static DrawingSession AsDrawing(IDrawingSession session) =>
         session as DrawingSession ?? throw new InvalidOperationException("处理器需要 DrawingSession");
 
@@ -58,9 +61,10 @@ internal static class HandlerHelpers
     }
 
     /// <summary>
-    /// 句柄类编辑（delete/move/change-layer/set-text）的 space/layout/attribute 语义预校验：
-    /// 先于 Resolver 给出准确原因——显式限定非法时 Resolver fail-closed 返回 null，调用方
-    /// 会把限定错误误报成"句柄不存在"。space 取值本身仍由 <see cref="RejectUnsupportedSpace"/> 先行拒绝。
+    /// 句柄类编辑（delete/move/change-layer/set-text/set-attribute 两形态）的 space/layout/attribute
+    /// 语义预校验：先于 Resolver/TopLevelCollections 给出准确原因——显式限定非法时 Resolver
+    /// fail-closed 返回 null，调用方会把限定错误误报成"句柄不存在"。
+    /// space 取值本身仍由 <see cref="RejectUnsupportedSpace"/> 先行拒绝。
     /// </summary>
     public static StepResult? RejectInvalidTargetScope(DrawingSession s, JsonElement p)
     {
@@ -71,7 +75,7 @@ internal static class HandlerHelpers
         if (!string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase)) return null;
         string? layoutName = OptString(p, "layout");
         if (string.IsNullOrEmpty(layoutName))
-            return new StepResult(false, "space:\"paper\" 须配 layout", "");
+            return new StepResult(false, PaperNeedsLayoutMessage, "");
         var layout = EditTargetResolver.FindLayout(s, layoutName);
         if (layout is null || !layout.IsPaperSpace || layout.AssociatedBlock is null)
             return new StepResult(false, $"布局不存在或非纸面布局: {layoutName}", "");
@@ -102,7 +106,7 @@ internal static class HandlerHelpers
         string? layoutName = OptString(p, "layout");
         if (string.IsNullOrEmpty(layoutName))
         {
-            error = "space:\"paper\" 需指定 layout";
+            error = PaperNeedsLayoutMessage;
             return false;
         }
         var layout = EditTargetResolver.FindLayout(s, layoutName);

@@ -457,4 +457,101 @@ public class SetTextAttributeTests : IDisposable
         Assert.False(r.Ok);
         Assert.Equal("set-attribute 需要 handle 或 insert+tag", r.Error);
     }
+
+    // ---- set-attribute 空格隐含（只给 layout）与同句柄歧义 ----
+
+    [Fact]
+    public void SetAttribute_InsertTagForm_LayoutOnly_ImpliesPaper()
+    {
+        // 只给 layout（省 space）→ 纸面限定（与 Resolver/新建族同口径）。
+        Insert? insert = null;
+        AttributeEntity? attr = null;
+        var (s, _) = New(doc => (insert, attr) = PaperFixtures.AddAttributeInsert(doc, inPaper: true));
+        var r = new SetAttributeHandler().Apply(s, P(new
+        {
+            insert = insert!.Handle.ToString(), tag = "图名", value = "仅布局", layout = PaperFixtures.LayoutName
+        }));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("仅布局", attr!.Value);
+    }
+
+    [Fact]
+    public void SetAttribute_InsertTagForm_SameHandleModelAndPaper_RejectsAmbiguous()
+    {
+        // 脏图：模型/纸面顶层 Insert 同句柄 → insert+tag 形态按句柄歧义拒绝，两侧值不变。
+        Insert? modelInsert = null;
+        Insert? paperInsert = null;
+        AttributeEntity? modelAttr = null;
+        AttributeEntity? paperAttr = null;
+        var (s, _) = New(doc =>
+        {
+            (modelInsert, modelAttr) = PaperFixtures.AddAttributeInsert(doc);
+            (paperInsert, paperAttr) = PaperFixtures.AddAttributeInsert(doc, inPaper: true);
+        });
+        PaperFixtures.ForceHandle(modelInsert!, 5353);
+        PaperFixtures.ForceHandle(paperInsert!, 5353);
+        var r = new SetAttributeHandler().Apply(s, P(new
+        {
+            insert = "5353", tag = "图名", value = "不该写入"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal(EditTargetResolver.AmbiguousMessage, r.Error);
+        Assert.Equal("栖贤雅庭", modelAttr!.Value);
+        Assert.Equal("栖贤雅庭", paperAttr!.Value);
+    }
+
+    // ---- set-attribute 作用域预校验（先于 Resolver/TopLevelCollections，两种形态同口径） ----
+
+    [Fact]
+    public void SetAttribute_InsertForm_PaperWithoutLayout_ReportsLayoutRequired()
+    {
+        Insert? insert = null;
+        AttributeEntity? attr = null;
+        var (s, _) = New(doc => (insert, attr) = PaperFixtures.AddAttributeInsert(doc, inPaper: true));
+        var r = new SetAttributeHandler().Apply(s, P(new
+        {
+            insert = insert!.Handle.ToString(), tag = "图名", value = "不该写入", space = "paper"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("space:\"paper\" 须配 layout", r.Error);
+        Assert.Equal("栖贤雅庭", attr!.Value);
+    }
+
+    [Fact]
+    public void SetAttribute_InsertForm_NonPaperLayout_ReportsLayoutName()
+    {
+        Insert? insert = null;
+        AttributeEntity? attr = null;
+        var (s, _) = New(doc => (insert, attr) = PaperFixtures.AddAttributeInsert(doc, inPaper: true));
+        string modelLayout = s.Doc.Layouts.First(l => !l.IsPaperSpace).Name;
+        var r = new SetAttributeHandler().Apply(s, P(new
+        {
+            insert = insert!.Handle.ToString(), tag = "图名", value = "不该写入",
+            space = "paper", layout = modelLayout
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal($"布局不存在或非纸面布局: {modelLayout}", r.Error);
+        Assert.Equal("栖贤雅庭", attr!.Value);
+    }
+
+    [Fact]
+    public void SetAttribute_AttributeNotTrue_ReportsExplicitMessage_BothForms()
+    {
+        Insert? insert = null;
+        AttributeEntity? attr = null;
+        var (s, _) = New(doc => (insert, attr) = PaperFixtures.AddAttributeInsert(doc));
+        var byHandle = new SetAttributeHandler().Apply(s, P(new
+        {
+            handle = attr!.Handle.ToString(), value = "不该写入", attribute = false
+        }));
+        Assert.False(byHandle.Ok);
+        Assert.Equal("attribute 仅支持 true", byHandle.Error);
+        var byInsert = new SetAttributeHandler().Apply(s, P(new
+        {
+            insert = insert!.Handle.ToString(), tag = "图名", value = "不该写入", attribute = false
+        }));
+        Assert.False(byInsert.Ok);
+        Assert.Equal("attribute 仅支持 true", byInsert.Error);
+        Assert.Equal("栖贤雅庭", attr.Value); // 两形态均零变更
+    }
 }

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ACadSharp;
 using ACadSharp.Entities;
+using ACadSharp.Tables;
 using CadAgent.Core;
 using CadAgent.Data.Handlers;
 using CSMath;
@@ -433,6 +434,48 @@ public class PaperEditHandlersTests : IDisposable
         Assert.Empty(layout.AssociatedBlock!.Entities.OfType<Circle>());
     }
 
+    // ---- 布局隐含纸面（只给 layout、不写 space）：空间隔离硬约束钉在处理器+集合解析 ----
+
+    private static JsonElement LayoutOnlyProbe(string kind) => kind switch
+    {
+        "add-line" => P(new { x1 = 1, y1 = 2, x2 = 5, y2 = 6, layout = PaperFixtures.LayoutName }),
+        "add-text" => P(new { x = 420, y = 297, text = "纸面字", height = 3.5, layout = PaperFixtures.LayoutName }),
+        "add-circle" => P(new { x = 3, y = 4, radius = 2, layout = PaperFixtures.LayoutName }),
+        "insert-block" => P(new { block = "PBLK", x = 150, y = 300, layout = PaperFixtures.LayoutName }),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
+
+    private static StepResult ApplyAdd(string kind, DrawingSession s, JsonElement p) => kind switch
+    {
+        "add-line" => new AddLineHandler().Apply(s, p),
+        "add-text" => new AddTextHandler().Apply(s, p),
+        "add-circle" => new AddCircleHandler().Apply(s, p),
+        "insert-block" => new InsertBlockHandler().Apply(s, p),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
+
+    /// <summary>
+    /// 只给 layout（省 space）必须等价 space:"paper"：实体落 layout.AssociatedBlock.Entities，
+    /// Doc.Entities 计数不变（TryResolveAddCollection 语义经处理器端到端钉住，非仅 Resolver）。
+    /// </summary>
+    [Theory]
+    [InlineData("add-line")]
+    [InlineData("add-text")]
+    [InlineData("add-circle")]
+    [InlineData("insert-block")]
+    public void Add_LayoutOnlyWithoutSpace_ImpliesPaper(string kind)
+    {
+        var (s, layout) = New(doc => doc.BlockRecords.Add(new BlockRecord("PBLK")));
+        int modelBefore = s.Doc.Entities.Count;
+        int paperBefore = layout.AssociatedBlock!.Entities.Count();
+        var r = ApplyAdd(kind, s, LayoutOnlyProbe(kind));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(paperBefore + 1, layout.AssociatedBlock!.Entities.Count()); // 落纸面块
+        Assert.Equal(modelBefore, s.Doc.Entities.Count); // 模型计数不变（空间隔离）
+        Entity added = layout.AssociatedBlock!.Entities.Last();
+        Assert.Equal(r.TargetHandle, added.Handle.ToString());
+    }
+
     // ---- R3：space 预校验（全部接受 space 的处理器） ----
 
     /// <summary>各处理器最小合法参数（handle 用纸面实句柄：若未先拒，space 会被误读成未命中/成功）。</summary>
@@ -568,5 +611,23 @@ public class PaperEditHandlersTests : IDisposable
         }));
         Assert.False(r.Ok);
         Assert.Equal("视口对象不支持编辑", r.Error);
+    }
+}
+
+/// <summary>
+/// 契约文档不漂移：HandlerRegistry 注册的每个 kind 都必须在 HandlerKindDocs.Default
+/// 有独立契约行（"&lt;kind&gt;:" 行首）。新增处理器漏写文档在此红灯。
+/// </summary>
+public class HandlerKindDocsTests
+{
+    [Fact]
+    public void Default_DocumentsEveryRegisteredKind()
+    {
+        string[] lines = HandlerKindDocs.Default
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .ToArray();
+        foreach (string kind in HandlerRegistry.All().Select(h => h.Kind))
+            Assert.Contains(lines, l => l.StartsWith(kind + ":", StringComparison.Ordinal));
     }
 }
