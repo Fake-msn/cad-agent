@@ -145,6 +145,8 @@ EditRoute Route(LayoutViewportContext? vp, RenderItem? hit, (double X,double Y) 
 ### 4.4 确认与错误面
 - 块定义任何变更（移动/删除/改层/改文字）→ 模态确认（复用 `ConfirmDialog`；测试 seam 扩为 `ConfirmEditOverride`）：「将修改块定义 <名>，影响约 N 个实例（含嵌套估算）；所有引用同步变化。继续？」
 - 硬拒绝走 `EditError` 行内：匿名/动态/XREF、twist、缺视口、跨空间成线、视口边框只读、句柄歧义、不支持实体类型。
+- **Plan-1 文案口径（B 前的过渡）**：`_layoutViewport==null` 的空点点击 →「当前布局无有效视口，无法编辑模型」（不得落入纸面文案）；twist 下坐标无关操作（Delete/ChangeLayer）拒绝 →「视口带旋转，布局内模型编辑暂不支持」（不得声称「纸面编辑仍可用」，Plan-1 纸面未启用）。
+- 注：有效视口缺失的布局不会登记为幅面（SheetRegistryBuilder 先例），该分支为防御性覆盖，无 UI 可达测试（由 EditRouting 退化上下文单测覆盖）。
 - 实例数 N：View 递归统计模型+纸面 Insert 展开（深度守卫内），“约”值，界面如实标注。
 
 ### 4.5 刷新与一致性
