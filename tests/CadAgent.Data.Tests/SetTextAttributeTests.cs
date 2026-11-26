@@ -464,15 +464,29 @@ public class SetTextAttributeTests : IDisposable
     public void SetAttribute_InsertTagForm_LayoutOnly_ImpliesPaper()
     {
         // 只给 layout（省 space）→ 纸面限定（与 Resolver/新建族同口径）。
+        // 模型侧同块同标签孪生且同句柄：若作用域退化为不限定，insert 检索双命中 → 歧义拒绝。
         Insert? insert = null;
         AttributeEntity? attr = null;
-        var (s, _) = New(doc => (insert, attr) = PaperFixtures.AddAttributeInsert(doc, inPaper: true));
+        Insert? modelInsert = null;
+        AttributeEntity? modelAttr = null;
+        var (s, _) = New(doc =>
+        {
+            (insert, attr) = PaperFixtures.AddAttributeInsert(doc, inPaper: true);
+            modelInsert = new Insert(insert.Block) { InsertPoint = new XYZ(10, 20, 0) };
+            modelAttr = new AttributeEntity { Tag = "图名", Value = "MODEL_OLD" };
+            modelAttr.InsertPoint = new XYZ(10, 20, 0);
+            modelAttr.AlignmentPoint = new XYZ(12, 22, 0);
+            modelInsert.Attributes.Add(modelAttr);
+            doc.Entities.Add(modelInsert);
+        });
+        PaperFixtures.ForceHandle(modelInsert!, insert!.Handle);
         var r = new SetAttributeHandler().Apply(s, P(new
         {
-            insert = insert!.Handle.ToString(), tag = "图名", value = "仅布局", layout = PaperFixtures.LayoutName
+            insert = insert.Handle.ToString(), tag = "图名", value = "NEW", layout = PaperFixtures.LayoutName
         }));
         Assert.True(r.Ok, r.Error);
-        Assert.Equal("仅布局", attr!.Value);
+        Assert.Equal("NEW", attr!.Value);
+        Assert.Equal("MODEL_OLD", modelAttr!.Value);
     }
 
     [Fact]
