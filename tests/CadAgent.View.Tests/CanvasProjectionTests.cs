@@ -102,4 +102,21 @@ public class CanvasProjectionTests
         CanvasProjection p = CanvasProjection.From(vm);
         Assert.Equal((0.0, 0.0, -1.0, -1.0), p.WorldViewport());
     }
+
+    [Fact]
+    public void WorldRectOf_WithExtraOffset_ExpandsCacheViewport()
+    {
+        // 位图缓存：屏幕矩形（缓存位图坐标）含额外偏移 → 世界矩形按 extra/Scale 平移
+        // （X 反向外扩，Y 翻转后同向外扩），覆盖视口 + 四周外扩像素。
+        CanvasViewModel vm = Fitted();
+        CanvasProjection plain = CanvasProjection.From(vm);
+        CanvasProjection p = plain with { ExtraOffsetX = 5, ExtraOffsetY = -5 };
+        (double minX, double minY, double maxX, double maxY) = p.WorldRectOf(0, 0, p.ViewportW, p.ViewportH);
+        (double pMinX, double pMinY, double pMaxX, double pMaxY) = plain.WorldViewport();
+        double shift = 5 / vm.Scale;
+        Assert.Equal(pMinX - shift, minX, 9);
+        Assert.Equal(pMaxX - shift, maxX, 9);
+        Assert.Equal(pMinY + shift, minY, 9);
+        Assert.Equal(pMaxY + shift, maxY, 9);
+    }
 }

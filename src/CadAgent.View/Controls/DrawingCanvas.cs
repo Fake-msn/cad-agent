@@ -2,15 +2,20 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 using CadAgent.View.Rendering;
 using CadAgent.View.ViewModels;
 
 namespace CadAgent.View.Controls;
 
 /// <summary>
-/// 画布控件（计划4 T3；项3 T2 改走统一绘制器）：渲染 CanvasViewModel 当前视口内图元
-/// （深色背景 #1E1E1E；视口裁剪 + LOD 由 RenderItemDrawer 执行），
+/// 画布控件（计划4 T3；项3 T2 改走统一绘制器；T3 位图平移缓存 + 两阶段精绘）：渲染
+/// CanvasViewModel 当前视口内图元（深色背景 #1E1E1E；视口裁剪 + LOD 由 RenderItemDrawer 执行），
 /// 变换/命中全部委托 VM（WorldToScreen/ScreenToWorld/HitTest）。
+/// 项3 T3 渲染顺序：基元（命中缓存 → blit 缓存位图；否则重建）→ 中心线/预览等只读叠加；
+/// 选中/高亮叠加实时绘制（不烘焙，受 §3.2 预算）；diff 模式直绘并绕过缓存。
+/// 交互期（滚轮/中键拖动）Quality=Interactive，静止 150ms 后 Refined 重建缓存（两阶段）。
 /// 指针：滚轮→ZoomAt（光标锚点）；中键拖拽→PanBy（屏幕增量）；左键→ScreenToWorld
 /// →T9 工具拦截（ToolClickHandler，MainWindow 按 ActiveTool 路由）→未消费则
 /// HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮（文本黄色加粗）。
@@ -23,6 +28,12 @@ public sealed class DrawingCanvas : Control
 {
     private const double WheelZoomBase = 1.2;
     private const double PickTolerancePixels = 5;
+
+    /// <summary>位图缓存四周外扩（DIP；平移超出即重建）。</summary>
+    private const double CacheMargin = 128;
+
+    /// <summary>交互静止多久后回到 Refined 精绘（毫秒）。</summary>
+    private const double IdleRefineMs = 150;
 
     private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
 
@@ -52,6 +63,24 @@ public sealed class DrawingCanvas : Control
     private Point _lastPanPosition;
     private Size _lastFitSize;
 
+    // 项3 T3 位图缓存：缓存层单独一个绘制器（避免覆盖本帧 LOD/降级计数），画笔/文字缓存共享。
+    private readonly RenderItemDrawer _cacheDrawer = new();
+    private RenderTargetBitmap? _cacheBitmap;
+    private IReadOnlyList<RenderItem>? _cacheItems;
+    private double _cacheScale = 1;
+    private (double X, double Y) _cachePan;
+    private Size _cacheBounds;
+    private Size _cacheViewport;
+    private Size _cacheLogicalSize;
+    private double _cacheDpi = 1;
+    private int _cacheHiddenHash;
+    private RenderQuality _cacheQuality = RenderQuality.Refined;
+
+    // 两阶段交互：交互标记 + 静止计时器（150ms 后 Refined 重建缓存）。
+    private bool _interacting;
+    private DateTime _interactionDeadline;
+    private DispatcherTimer? _idleTimer;
+
     /// <summary>T9：光标屏幕位置（仅 PendingPoint 存在时跟踪，预览橡皮筋用）。</summary>
     private Point? _hoverScreen;
 
@@ -77,6 +106,8 @@ public sealed class DrawingCanvas : Control
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         ViewModel.RenderInvalidated -= InvalidateVisual;
+        StopIdleTimer();
+        DisposeCache();
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -87,14 +118,23 @@ public sealed class DrawingCanvas : Control
         ViewModel.Fit(RenderModelBuilder.Bounds(ViewModel.Items), e.NewSize.Width, e.NewSize.Height);
     }
 
-    /// <summary>质量档（项3 §3.1）：默认 Refined；Task 3 交互期切 Interactive、静止 150ms 后回 Refined。</summary>
+    /// <summary>质量档（项3 §3.1）：默认 Refined；交互期切 Interactive、静止 150ms 后回 Refined。</summary>
     internal RenderQuality Quality { get; set; } = RenderQuality.Refined;
 
-    /// <summary>测试 seam（Task 3 计时器接线前）：headless 直接切档，不依赖真实 150ms。</summary>
+    /// <summary>测试 seam：headless 直接切档，不依赖真实 150ms 计时器。</summary>
     internal void SetQualityForTests(RenderQuality quality) => Quality = quality;
 
-    /// <summary>状态栏注记占位（Task 3/5 写入「概览」「高亮为包围盒…」）。</summary>
-    internal string? LastRenderNote { get; set; }
+    /// <summary>状态栏注记（「概览」/「高亮为包围盒（图元过密）」）；MainWindow 读取（Task 5 接线）。</summary>
+    internal string? LastRenderNote { get; private set; }
+
+    /// <summary>测试 seam：直绘对照（关缓存），用于缓存 blit 与直绘的像素等价断言。</summary>
+    internal bool DisableCacheForTests { get; set; }
+
+    /// <summary>基元层从零绘制的次数（缓存重建/直绘）；平移复用缓存时不变（测试 seam）。</summary>
+    internal int BaseRenderCount { get; private set; }
+
+    /// <summary>测试 seam：同步走「静止 → Refined 重建缓存」路径（与计时器到点同一实现）。</summary>
+    internal void ForceRefinedForTests() => RefineNow();
 
     public override void Render(DrawingContext context)
     {
@@ -105,10 +145,22 @@ public sealed class DrawingCanvas : Control
         CanvasProjection projection = CanvasProjection.From(ViewModel);
         _drawer.BeginFrame();
 
-        // T6 对比叠加：before 幽灵层 + after 层（diff 模式保持全量语义，暂不走裁剪/位图缓存）。
+        // T6 对比叠加：diff 模式直接绘（全量语义），不进缓存；关 diff 后按需重建。
         DiffOverlay? diff = ViewModel.DiffOverlay;
-        if (diff is not null) RenderDiff(context, projection, diff);
-        else RenderBase(context, projection);
+        if (diff is not null)
+        {
+            DisposeCache();
+            RenderDiff(context, projection, diff);
+        }
+        else if (TryDrawFromCache(context, projection))
+        {
+            // 基元来自缓存位图；选中/高亮叠加实时绘制（不烘焙，受 §3.2 预算）。
+            DrawSelectionOverlay(context, projection);
+        }
+        else
+        {
+            RenderBase(context, projection);
+        }
 
         // 天读证据：中心线叠加（ShowCenterlines 开时绘制；只读，不参与命中/选择）。
         if (ViewModel.ShowCenterlines)
@@ -124,7 +176,15 @@ public sealed class DrawingCanvas : Control
             context.DrawLine(PreviewPen, new Point(anchor.X - 6, anchor.Y), new Point(anchor.X + 6, anchor.Y));
             context.DrawLine(PreviewPen, new Point(anchor.X, anchor.Y - 6), new Point(anchor.X, anchor.Y + 6));
         }
+
+        UpdateRenderNote();
     }
+
+    /// <summary>状态注记：叠加降级优先（数据在途），其次交互概览。</summary>
+    private void UpdateRenderNote() =>
+        LastRenderNote = _drawer.LastSelectionDowngraded ? "高亮为包围盒（图元过密）"
+            : Quality == RenderQuality.Interactive ? "概览"
+            : null;
 
     /// <summary>
     /// 主路径（项3 T2）：视口裁剪（索引查询）+ LOD；选中/高亮由绘制器最后重绘（受预算）。
@@ -135,6 +195,18 @@ public sealed class DrawingCanvas : Control
         IReadOnlyList<int>? indices = QueryIndices(projection);
         bool selectionBudgetExceeded = selected is not null && RenderItemDrawer.IsOverBudget(projection, selected);
         _drawer.Draw(context, projection, ViewModel.Items, indices, Quality, _pens, _texts,
+            selected, ViewModel.HighlightedHandles, selectionBudgetExceeded);
+        BaseRenderCount++;
+    }
+
+    /// <summary>缓存 blit 之上的选中/高亮叠加（实时绘制，不进位图）。</summary>
+    private void DrawSelectionOverlay(DrawingContext context, CanvasProjection projection)
+    {
+        RenderItem? selected = ViewModel.SelectedItem;
+        if (selected is null && ViewModel.HighlightedHandles.Count == 0) return;
+        IReadOnlyList<int>? indices = QueryIndices(projection);
+        bool selectionBudgetExceeded = selected is not null && RenderItemDrawer.IsOverBudget(projection, selected);
+        _drawer.DrawSelection(context, projection, ViewModel.Items, indices, Quality, _pens, _texts,
             selected, ViewModel.HighlightedHandles, selectionBudgetExceeded);
     }
 
@@ -164,6 +236,7 @@ public sealed class DrawingCanvas : Control
             Pen pen = added ? DiffAddedPen : highlight ? RenderItemDrawer.SelectionPen : _pens.ColorPen(item.ColorRgb);
             _drawer.DrawOne(context, projection, item, pen, Quality);
         }
+        BaseRenderCount++;
     }
 
     /// <summary>
@@ -172,9 +245,13 @@ public sealed class DrawingCanvas : Control
     /// （O(1)，避免每帧全顶点扫描）。文本剔除留字形边距（绘制 ≈1.2×字高；字盒只含
     /// 逻辑字盒），右侧另按最大文本世界宽度加宽（文本向右延伸），均世界单位。
     /// </summary>
-    private IReadOnlyList<int>? QueryIndices(CanvasProjection projection)
+    private IReadOnlyList<int>? QueryIndices(CanvasProjection projection) =>
+        QueryWorld(projection.WorldViewport());
+
+    /// <summary>世界矩形 → 可见图元索引（null=全量捷径）；缓存外扩视口复用同一逻辑。</summary>
+    private IReadOnlyList<int>? QueryWorld((double MinX, double MinY, double MaxX, double MaxY) rect)
     {
-        (double minX, double minY, double maxX, double maxY) = projection.WorldViewport();
+        (double minX, double minY, double maxX, double maxY) = rect;
         if (!(minX <= maxX && minY <= maxY)) return null; // 未 Fit：无有效视口（画布零尺寸）
         if (ViewModel.HiddenLayers.Count == 0)
         {
@@ -186,6 +263,225 @@ public sealed class DrawingCanvas : Control
         (double ascent, double right) = TextCullingMarginsWorld();
         return ViewModel.QueryViewport((minX - ascent, minY - ascent,
             maxX + Math.Max(ascent, right), maxY + ascent));
+    }
+
+    // ---- 项3 T3：位图平移缓存 ----
+
+    /// <summary>缓存可用前提：已挂树（DPI 可查；离屏快照直绘不驻留位图）+ 有效尺寸/视口。</summary>
+    private bool CacheAllowed(CanvasProjection projection) =>
+        !DisableCacheForTests
+        && TopLevel.GetTopLevel(this) is not null
+        && Bounds.Width > 0 && Bounds.Height > 0
+        && projection.ViewportW > 0 && projection.ViewportH > 0;
+
+    private double CurrentRenderScaling => TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
+
+    /// <summary>
+    /// 缓存路径：结构键（items 引用/尺寸/DPI/隐藏层）→ 平移复用；缩放变化在交互期缩放旧图；
+    /// 其余（尺寸/DPI/隐藏层/items/质量/平移越界）→ 同步重建后 blit。
+    /// </summary>
+    private bool TryDrawFromCache(DrawingContext context, CanvasProjection projection)
+    {
+        if (!CacheAllowed(projection)) return false;
+        if (!CacheStructureMatches(projection))
+        {
+            RebuildCache(projection);
+            BlitCache(context, projection, scaled: false);
+            return true;
+        }
+        bool scaleSame = Math.Abs(projection.Scale - _cacheScale) <= 1e-12;
+        double dx = projection.PanX - _cachePan.X;
+        double dy = -(projection.PanY - _cachePan.Y);
+        if (scaleSame)
+        {
+            // 交互期质量档变化不重建（沿用已烘焙的 Refined 位图）；静止后按质量档重建。
+            bool qualitySame = _cacheQuality == Quality;
+            if ((qualitySame || _interacting) && Math.Abs(dx) <= CacheMargin && Math.Abs(dy) <= CacheMargin)
+            {
+                BlitCache(context, projection, scaled: false);
+                return true;
+            }
+        }
+        else if (_interacting)
+        {
+            // 交互期缩放：旧位图按 Scale1/Scale0 缩放，静止计时器到点后重建精绘。
+            BlitCache(context, projection, scaled: true);
+            return true;
+        }
+        RebuildCache(projection);
+        BlitCache(context, projection, scaled: false);
+        return true;
+    }
+
+    private bool CacheStructureMatches(CanvasProjection projection) =>
+        _cacheBitmap is not null
+        && ReferenceEquals(_cacheItems, ViewModel.Items)
+        && _cacheBounds == new Size(Bounds.Width, Bounds.Height)
+        && _cacheViewport == new Size(projection.ViewportW, projection.ViewportH)
+        && Math.Abs(_cacheDpi - CurrentRenderScaling) <= 1e-9
+        && _cacheHiddenHash == HiddenHash();
+
+    /// <summary>隐藏层集合的内容哈希（排序后聚合，集合增删即失效）。</summary>
+    private int HiddenHash()
+    {
+        if (ViewModel.HiddenLayers.Count == 0) return 0;
+        string[] names = ViewModel.HiddenLayers.ToArray();
+        Array.Sort(names, StringComparer.OrdinalIgnoreCase);
+        var hash = new HashCode();
+        foreach (string name in names) hash.Add(name, StringComparer.OrdinalIgnoreCase);
+        return hash.ToHashCode();
+    }
+
+    /// <summary>
+    /// 重建缓存位图（UI 线程）：私有缓存层以「背景 + 基元」绘制到 RenderTargetBitmap，
+    /// 内容四周外扩 <see cref="CacheMargin"/>（extra offset 令内容右/下各留边距），
+    /// 锚点 Pan 冻结在构建时刻，之后平移只做 blit 偏移。
+    /// </summary>
+    private void RebuildCache(CanvasProjection projection)
+    {
+        double dpi = CurrentRenderScaling;
+        double logicalW = Math.Ceiling(Bounds.Width) + 2 * CacheMargin;
+        double logicalH = Math.Ceiling(Bounds.Height) + 2 * CacheMargin;
+        var logical = new Size(logicalW, logicalH);
+        var pixelSize = new PixelSize(
+            Math.Max(1, (int)Math.Ceiling(logicalW * dpi)),
+            Math.Max(1, (int)Math.Ceiling(logicalH * dpi)));
+
+        CanvasProjection cacheProjection = projection with { ExtraOffsetX = CacheMargin, ExtraOffsetY = -CacheMargin };
+        IReadOnlyList<int>? indices = QueryWorld(cacheProjection.WorldRectOf(0, 0, logicalW, logicalH));
+        var layer = new CacheLayer(cacheProjection, ViewModel.Items, indices, Quality, _cacheDrawer, _pens, _texts);
+        layer.Measure(logical);
+        layer.Arrange(new Rect(logical));
+
+        var bitmap = new RenderTargetBitmap(pixelSize, new Vector(96 * dpi, 96 * dpi));
+        bitmap.Render(layer);
+
+        _cacheBitmap?.Dispose(); // 单缓存：重建即替换
+        _cacheBitmap = bitmap;
+        _cacheItems = ViewModel.Items;
+        _cacheScale = projection.Scale;
+        _cachePan = (projection.PanX, projection.PanY);
+        _cacheBounds = new Size(Bounds.Width, Bounds.Height);
+        _cacheViewport = new Size(projection.ViewportW, projection.ViewportH);
+        _cacheLogicalSize = logical;
+        _cacheDpi = dpi;
+        _cacheHiddenHash = HiddenHash();
+        _cacheQuality = Quality;
+        BaseRenderCount++;
+    }
+
+    /// <summary>
+    /// blit 缓存位图：平移 → 仅偏移（最近邻，像素保真）；缩放 → 以 Scale1/Scale0 仿射
+    /// （与平移同一矩阵公式，f=1 时退化为偏移；Pan 差吸收锚点位移）。
+    /// </summary>
+    private void BlitCache(DrawingContext context, CanvasProjection projection, bool scaled)
+    {
+        if (_cacheBitmap is null) return;
+        double a = projection.ViewportH - projection.OffsetY;
+        double f = scaled ? projection.Scale / _cacheScale : 1;
+        double tx = projection.PanX + projection.OffsetX - f * (CacheMargin + _cachePan.X + projection.OffsetX);
+        double ty = a - f * (a + CacheMargin - _cachePan.Y) - projection.PanY;
+        var dest = new Rect(0, 0, _cacheLogicalSize.Width, _cacheLogicalSize.Height);
+        var options = new RenderOptions
+        {
+            BitmapInterpolationMode = scaled ? BitmapInterpolationMode.HighQuality : BitmapInterpolationMode.None
+        };
+        using (context.PushTransform(new Matrix(f, 0, 0, f, tx, ty)))
+        using (context.PushRenderOptions(options))
+            context.DrawImage(_cacheBitmap, dest);
+    }
+
+    private void DisposeCache()
+    {
+        _cacheBitmap?.Dispose();
+        _cacheBitmap = null;
+        _cacheItems = null;
+    }
+
+    /// <summary>
+    /// 交互标记（滚轮/中键拖动）：切 Interactive 并重置 150ms 静止计时器；
+    /// 静止到点 → Refined 重建缓存（两阶段精绘）。
+    /// </summary>
+    private void BeginInteraction()
+    {
+        _interacting = true;
+        Quality = RenderQuality.Interactive;
+        _interactionDeadline = DateTime.UtcNow.AddMilliseconds(IdleRefineMs);
+        if (_idleTimer is null)
+        {
+            _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(IdleRefineMs) };
+            _idleTimer.Tick += OnIdleTick;
+        }
+        _idleTimer.Stop();
+        _idleTimer.Interval = TimeSpan.FromMilliseconds(IdleRefineMs);
+        _idleTimer.Start();
+    }
+
+    private void OnIdleTick(object? sender, EventArgs e)
+    {
+        TimeSpan remaining = _interactionDeadline - DateTime.UtcNow;
+        if (remaining > TimeSpan.Zero)
+        {
+            _idleTimer!.Stop();
+            _idleTimer.Interval = remaining; // 计时器早触发 → 补足剩余静止时间
+            _idleTimer.Start();
+            return;
+        }
+        _idleTimer!.Stop();
+        RefineNow();
+    }
+
+    /// <summary>静止精绘：回 Refined、立即重建缓存（不等待下一帧）、请求重绘。</summary>
+    private void RefineNow()
+    {
+        _interacting = false;
+        Quality = RenderQuality.Refined;
+        if (_cacheBitmap is not null && Bounds.Width > 0 && Bounds.Height > 0)
+            RebuildCache(CanvasProjection.From(ViewModel));
+        InvalidateVisual();
+    }
+
+    private void StopIdleTimer()
+    {
+        if (_idleTimer is null) return;
+        _idleTimer.Stop();
+        _idleTimer.Tick -= OnIdleTick;
+        _idleTimer = null;
+    }
+
+    /// <summary>缓存层：私有 Control，只画背景 + 基元（无选中/高亮叠加/中心线/预览/diff）。</summary>
+    private sealed class CacheLayer : Control
+    {
+        private readonly RenderItemDrawer _drawer;
+        private readonly PenResolver _pens;
+        private readonly TextCache _texts;
+
+        public CacheLayer(CanvasProjection projection, IReadOnlyList<RenderItem> items,
+            IReadOnlyList<int>? indices, RenderQuality quality,
+            RenderItemDrawer drawer, PenResolver pens, TextCache texts)
+        {
+            Projection = projection;
+            Items = items;
+            Indices = indices;
+            Quality = quality;
+            _drawer = drawer;
+            _pens = pens;
+            _texts = texts;
+            IsHitTestVisible = false;
+        }
+
+        public CanvasProjection Projection { get; }
+        public IReadOnlyList<RenderItem> Items { get; }
+        public IReadOnlyList<int>? Indices { get; }
+        public RenderQuality Quality { get; }
+
+        public override void Render(DrawingContext context)
+        {
+            base.Render(context);
+            context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
+            _drawer.BeginFrame();
+            _drawer.Draw(context, Projection, Items, Indices, Quality, _pens, _texts, null, null);
+        }
     }
 
     /// <summary>
@@ -243,6 +539,7 @@ public sealed class DrawingCanvas : Control
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
         base.OnPointerWheelChanged(e);
+        BeginInteraction(); // 两阶段：缩放期 Interactive（旧位图缩放），静止 150ms 后精绘
         Point p = e.GetPosition(this);
         ViewModel.ZoomAt(Math.Pow(WheelZoomBase, e.Delta.Y), p.X, p.Y);
         e.Handled = true;
@@ -256,6 +553,7 @@ public sealed class DrawingCanvas : Control
         {
             _panning = true;
             _lastPanPosition = point.Position;
+            BeginInteraction();
             e.Pointer.Capture(this);
             e.Handled = true;
         }
@@ -286,6 +584,7 @@ public sealed class DrawingCanvas : Control
             return;
         }
         Point p = e.GetPosition(this);
+        BeginInteraction();
         ViewModel.PanBy(p.X - _lastPanPosition.X, p.Y - _lastPanPosition.Y);
         _lastPanPosition = p;
         e.Handled = true;

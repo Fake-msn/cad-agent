@@ -295,6 +295,24 @@ public sealed class RenderItemDrawer
             DrawItemCore(ctx, projection, item, pens.ColorPen(item.ColorRgb), quality, pens, texts, bold: false);
         }
 
+        DrawSelection(ctx, projection, items, indices, quality, pens, texts,
+            selected, highlighted, selectionBudgetExceeded, cull);
+    }
+
+    /// <summary>
+    /// 仅画选中/高亮叠加层（项3 T3 位图缓存：基元已烘焙进缓存位图，叠加层须实时绘制）。
+    /// 语义与 <see cref="Draw"/> 的叠加段完全一致（cull + LOD + 预算：超预算 → bbox + 2px 描边）。
+    /// </summary>
+    public void DrawSelection(
+        DrawingContext ctx, CanvasProjection projection, IReadOnlyList<RenderItem> items,
+        IReadOnlyList<int>? indices, RenderQuality quality, PenResolver pens, TextCache? texts,
+        RenderItem? selected, IReadOnlySet<string>? highlighted,
+        bool selectionBudgetExceeded = false, bool cull = true)
+    {
+        if (selected is null && (highlighted is null || highlighted.Count == 0)) return;
+        bool useIndices = cull && indices is not null;
+        int count = useIndices ? indices!.Count : items.Count;
+
         for (int n = 0; n < count; n++)
         {
             int i = useIndices ? indices![n] : n;

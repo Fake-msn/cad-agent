@@ -45,11 +45,21 @@ public sealed record CanvasProjection(
     /// 当前视口世界矩形（归一，Min≤Max）；未 Fit（视口 ≤0）→ 反相空标记 (0,0,-1,-1)，
     /// 调用方以 Min&gt;Max 判空（与 <see cref="CanvasViewModel.WorldViewport"/> 同口径）。
     /// </summary>
-    public (double MinX, double MinY, double MaxX, double MaxY) WorldViewport()
+    public (double MinX, double MinY, double MaxX, double MaxY) WorldViewport() =>
+        WorldRectOf(0, 0, ViewportW, ViewportH);
+
+    /// <summary>
+    /// 屏幕矩形 → 世界矩形（含额外偏移，用于缓存位图的外扩视口）；归一 Min≤Max。
+    /// 未 Fit（视口 ≤0）→ 反相空标记 (0,0,-1,-1)（同 <see cref="WorldViewport"/> 口径）。
+    /// </summary>
+    public (double MinX, double MinY, double MaxX, double MaxY) WorldRectOf(
+        double sx0, double sy0, double sx1, double sy1)
     {
         if (ViewportW <= 0 || ViewportH <= 0) return (0, 0, -1, -1);
-        (double x0, double y0) = ScreenToWorld(0, 0);
-        (double x1, double y1) = ScreenToWorld(ViewportW, ViewportH);
+        double x0 = (sx0 - PanX - OffsetX - ExtraOffsetX) / Scale + MinX;
+        double x1 = (sx1 - PanX - OffsetX - ExtraOffsetX) / Scale + MinX;
+        double y0 = (ViewportH - sy0 - OffsetY - ExtraOffsetY) / Scale + MinY;
+        double y1 = (ViewportH - sy1 - OffsetY - ExtraOffsetY) / Scale + MinY;
         return (Math.Min(x0, x1), Math.Min(y0, y1), Math.Max(x0, x1), Math.Max(y0, y1));
     }
 }
