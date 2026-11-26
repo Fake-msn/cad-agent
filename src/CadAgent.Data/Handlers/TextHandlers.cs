@@ -83,6 +83,7 @@ public sealed class SetTextHandler : IStepHandler
         var s = HandlerHelpers.AsDrawing(session);
         if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
         var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
         if (target == null)
             return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");

@@ -147,6 +147,13 @@ public class PaperEditHeadlessTests
         saved.Doc.Layouts.First(l => l.Name == LayoutName)
             .AssociatedBlock!.Entities.OfType<Line>().Single();
 
+    private static Insert SavedTitleInsert(CadAgent.Data.DrawingSession saved) =>
+        saved.Doc.Layouts.First(l => l.Name == LayoutName)
+            .AssociatedBlock!.Entities.OfType<Insert>().Single();
+
+    private static int PaperAttributeIndex(MainWindow window) =>
+        window.Canvas!.Items.ToList().FindIndex(i => i.AttributeTag == "图名");
+
     private static JsonElement Params(AuditRecord record) =>
         JsonDocument.Parse(record.Entry.ParamsJson).RootElement;
 
@@ -295,6 +302,7 @@ public class PaperEditHeadlessTests
             ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
             window.EditTextInput!.Text = "纸面字";
+            window.TextHeightInput!.Text = "12"; // 纸面单位字高（不做换算）
             await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 700, 600));
 
             Assert.Null(window.Edit!.ErrorMessage);
@@ -303,6 +311,7 @@ public class PaperEditHeadlessTests
             var text = Assert.Single(saved.Doc.Layouts.First(l => l.Name == LayoutName)
                 .AssociatedBlock!.Entities.OfType<TextEntity>());
             Assert.Equal("纸面字", text.Value);
+            Assert.Equal(12, text.Height, 6); // 落盘字高 = 输入值（纸面单位不换算）
             Assert.Equal(700, text.InsertPoint.X, 6);
             Assert.Equal(600, text.InsertPoint.Y, 6);
             Assert.Empty(saved.Doc.Entities.OfType<TextEntity>()); // 模型空间未写
@@ -337,6 +346,93 @@ public class PaperEditHeadlessTests
             // RefreshAfterEdit 重建纸面：画布属性文本随之更新
             var item = Assert.Single(window.Canvas!.Items, i => i.AttributeTag == "图名");
             Assert.Equal("新图名", item.Text);
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 6b. 纸面属性项 Delete / Move：实例级（Insert 保留原位）I1 纸面回归 ----
+
+    [AvaloniaFact]
+    public async Task PaperAttribute_Delete_RemovesAttrib_InsertKept_OneTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf());
+        try
+        {
+            SelectLayoutSheet(window);
+            int index = PaperAttributeIndex(window);
+            Assert.True(index >= 0);
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.Canvas!.Select(index);
+            window.ConfirmDeleteOverride = _ => Task.FromResult(true);
+            await ActAndWaitForEditAsync(window, () =>
+                ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            Assert.Empty(SavedTitleInsert(saved).Attributes); // 仅 ATTRIB 移除
+            Assert.Contains(SavedTitleInsert(saved), saved.Doc.Layouts.First(l => l.Name == LayoutName)
+                .AssociatedBlock!.Entities); // 父 Insert 保留
+            AssertPaperScopeAudited(projectDir, "delete-entity");
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    [AvaloniaFact]
+    public async Task PaperAttribute_Move_WritesPaperDelta_InsertUnchanged()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf());
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 305, 618); // 命中属性文字 → 选中 + 基准 (300,620)
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+            Assert.Contains(":attr:", window.Canvas.SelectedHandle);
+
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 405, 620)); // 纸面增量 +105
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            Insert insert = SavedTitleInsert(saved);
+            AttributeEntity attr = Assert.Single(insert.Attributes);
+            Assert.Equal(405, attr.InsertPoint.X, 6);
+            Assert.Equal(405, attr.AlignmentPoint.X, 6); // AlignmentPoint 与 InsertPoint 同施增量
+            Assert.Equal(300, insert.InsertPoint.X, 6); // 父 Insert 原位
+            AssertPaperScopeAudited(projectDir, "move-entity");
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 6c. Undo：纸面属性改文字经整文档快照回滚（盘上值还原） ----
+
+    [AvaloniaFact]
+    public async Task UndoAfterPaperAttributeSetText_RestoresOnDiskValue()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf());
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "新图名";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 305, 618));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            Assert.Equal("新图名", Assert.Single(
+                SavedTitleInsert(CadAgent.Data.DrawingSession.Load(path)).Attributes).Value);
+
+            await ActAndWaitForEditAsync(window, () =>
+                window.UndoButton!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.Empty(window.Edit.RecentTxIds);
+            Assert.Equal("旧图名", Assert.Single(
+                SavedTitleInsert(CadAgent.Data.DrawingSession.Load(path)).Attributes).Value); // 盘上值还原
         }
         finally { Cleanup(window, path, projectDir); }
     }

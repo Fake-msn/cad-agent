@@ -58,6 +58,27 @@ internal static class HandlerHelpers
     }
 
     /// <summary>
+    /// 句柄类编辑（delete/move/change-layer/set-text）的 space/layout/attribute 语义预校验：
+    /// 先于 Resolver 给出准确原因——显式限定非法时 Resolver fail-closed 返回 null，调用方
+    /// 会把限定错误误报成"句柄不存在"。space 取值本身仍由 <see cref="RejectUnsupportedSpace"/> 先行拒绝。
+    /// </summary>
+    public static StepResult? RejectInvalidTargetScope(DrawingSession s, JsonElement p)
+    {
+        if (p.TryGetProperty("attribute", out var attr)
+            && attr.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
+            && attr.ValueKind != JsonValueKind.True)
+            return new StepResult(false, "attribute 仅支持 true", "");
+        if (!string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase)) return null;
+        string? layoutName = OptString(p, "layout");
+        if (string.IsNullOrEmpty(layoutName))
+            return new StepResult(false, "space:\"paper\" 须配 layout", "");
+        var layout = EditTargetResolver.FindLayout(s, layoutName);
+        if (layout is null || !layout.IsPaperSpace || layout.AssociatedBlock is null)
+            return new StepResult(false, $"布局不存在或非纸面布局: {layoutName}", "");
+        return null;
+    }
+
+    /// <summary>
     /// 新建实体目标集合：默认模型（历史行为不变）；space:"paper"+layout → 该布局纸面关联块
     /// 实体集合（layout 必须存在且 IsPaperSpace，否则 fail-closed）。
     /// </summary>

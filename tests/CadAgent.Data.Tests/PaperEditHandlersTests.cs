@@ -480,6 +480,81 @@ public class PaperEditHandlersTests : IDisposable
         Assert.Contains("仅支持 paper", r.Error);
     }
 
+    // ---- 终审修复：space/layout/attribute 语义预校验文案（先于 Resolver，不得塌陷为"句柄不存在"） ----
+
+    [Fact]
+    public void Move_PaperWithoutLayout_ReportsLayoutRequired()
+    {
+        var (s, layout) = New();
+        var r = new MoveEntityHandler().Apply(s, P(new
+        {
+            handle = PaperLine(layout).Handle.ToString(), dx = 1, dy = 1, space = "paper"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("space:\"paper\" 须配 layout", r.Error);
+    }
+
+    [Fact]
+    public void Delete_PaperWithNonPaperLayout_ReportsLayoutName()
+    {
+        var (s, _) = New();
+        string modelLayout = s.Doc.Layouts.First(l => !l.IsPaperSpace).Name;
+        var r = new DeleteEntityHandler().Apply(s, P(new
+        {
+            handle = "1234", space = "paper", layout = modelLayout
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal($"布局不存在或非纸面布局: {modelLayout}", r.Error);
+    }
+
+    [Fact]
+    public void Delete_PaperWithUnknownLayout_ReportsLayoutName()
+    {
+        var (s, _) = New();
+        var r = new DeleteEntityHandler().Apply(s, P(new
+        {
+            handle = "1234", space = "paper", layout = "不存在的布局"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("布局不存在或非纸面布局: 不存在的布局", r.Error);
+    }
+
+    [Fact]
+    public void ChangeLayer_AttributeNotTrue_ReportsExplicitMessage()
+    {
+        var (s, layout) = New();
+        var r = new ChangeLayerHandler().Apply(s, P(new
+        {
+            handle = PaperLine(layout).Handle.ToString(), layer = "0", attribute = false
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("attribute 仅支持 true", r.Error);
+    }
+
+    [Fact]
+    public void SetText_PaperWithoutLayout_ReportsLayoutRequired()
+    {
+        var (s, layout) = New();
+        var r = new SetTextHandler().Apply(s, P(new
+        {
+            handle = PaperLine(layout).Handle.ToString(), text = "改", space = "paper"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("space:\"paper\" 须配 layout", r.Error);
+    }
+
+    [Fact]
+    public void SetText_AttributeNonBoolean_ReportsExplicitMessage()
+    {
+        var (s, layout) = New();
+        var r = new SetTextHandler().Apply(s, P(new
+        {
+            handle = PaperLine(layout).Handle.ToString(), text = "改", attribute = "true"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("attribute 仅支持 true", r.Error);
+    }
+
     [Fact]
     public void Delete_PaperBoundaryViewport_Rejected()
     {

@@ -2131,10 +2131,16 @@ public sealed class MainWindow : Window
         }
     }
 
-    /// <summary>纸面目标句柄：属性取 ATTRIB 句柄（SourceHandle；Handle 为 "{insert}:attr:{tag}" 展示形），
-    /// 其余取实体句柄（子图元剥后缀——块子图元在布局幅面已被守卫拒绝，此处为模型幅面防御）。</summary>
-    private static string PaperEditHandle(RenderItem item) =>
-        item.AttributeTag is not null ? item.SourceHandle ?? item.Handle : ParentHandle(item.Handle);
+    /// <summary>
+    /// 编辑目标句柄统一解析（Move/Delete/ChangeLayer 三入口）：属性项 → ATTRIB 实例句柄
+    /// （SourceHandle；Handle 为 "{insert}:attr:{tag}" 展示形）；纸面 → SourceHandle（实体自身，
+    /// 块子图元已被守卫拒绝）；模型 → 父句柄（Imp#3 块子图元按父实体整体）。
+    /// I1：属性项**不分幅面**均取实例句柄——模型幅面落回 ParentHandle 会误中整个 Insert
+    /// （删/移/改层命中父块而非属性文本）。</summary>
+    private static string EditTargetHandle(RenderItem item, bool paper) =>
+        item.AttributeTag is not null ? item.SourceHandle ?? item.Handle
+        : paper ? item.SourceHandle ?? item.Handle
+        : ParentHandle(item.Handle);
 
     /// <summary>
     /// 布局幅面按选中图元守卫（Move/Delete/ChangeLayer/改文字 等按图元动作）：Locked → 只读；
@@ -2226,7 +2232,8 @@ public sealed class MainWindow : Window
             EditSpaceIntent intent = EditSpaceIntent.Model;
             if (item is not null && !TryGuardSelection(item, out intent)) return;
             bool paper = item is not null && intent == EditSpaceIntent.Paper;
-            string handle = paper ? PaperEditHandle(item!) : ParentHandle(selected); // Imp#3：子图元→父实体
+            bool attribute = item?.AttributeTag is not null; // I1：属性项实例级（模型/纸面同口径）
+            string handle = EditTargetHandle(item!, paper);
             string msg = $"确认删除选中实体（句柄 {handle}）？删除经审计管线，可 Undo 撤回。";
             bool confirmed = ConfirmDeleteOverride is not null
                 ? await ConfirmDeleteOverride(msg)
@@ -2235,8 +2242,8 @@ public sealed class MainWindow : Window
             // 确认等待期间编辑/diff 抢跑 → 硬闸兜底（模态阻塞 owner 时理论不可达，seam 路径防御）。
             if (_editBusy || _diffBusy) return;
             await RunEditAsync(() => paper
-                ? Edit.DeleteAsync(handle, PaperSpace, _currentLayoutName, attribute: item!.AttributeTag is not null)
-                : Edit.DeleteAsync(handle));
+                ? Edit.DeleteAsync(handle, PaperSpace, _currentLayoutName, attribute: attribute)
+                : Edit.DeleteAsync(handle, attribute: attribute));
         }
         else
             SetActiveTool(EditTool.Delete);
@@ -2266,10 +2273,12 @@ public sealed class MainWindow : Window
             EditSpaceIntent intent = EditSpaceIntent.Model;
             if (item is not null && !TryGuardSelection(item, out intent)) return;
             bool paper = item is not null && intent == EditSpaceIntent.Paper;
-            // Imp#3：模型幅面仍按父实体整体改层；纸面取纸面句柄 + space/layout。
+            // Imp#3：模型块子图元仍按父实体整体改层；纸面取纸面句柄 + space/layout；
+            // I1：属性项（不分幅面）取 ATTRIB 句柄实例级改层。
+            string handle = EditTargetHandle(item!, paper);
             _ = RunEditAsync(() => paper
-                ? Edit.ChangeLayerAsync(PaperEditHandle(item!), layer, PaperSpace, _currentLayoutName)
-                : Edit.ChangeLayerAsync(ParentHandle(selected), layer));
+                ? Edit.ChangeLayerAsync(handle, layer, PaperSpace, _currentLayoutName)
+                : Edit.ChangeLayerAsync(handle, layer));
         }
     }
 
@@ -2369,9 +2378,10 @@ public sealed class MainWindow : Window
                     // 防选中漂移绕过守卫（布局下的 BlockChild 整父移动）。
                     if (selected is not null && !TryGuardSelection(selected, out _)) return true;
                     if (!TryMoveDelta(bx, by, wx, wy, out double dx, out double dy, out EditSpaceIntent intent)) return true;
-                    // Imp#3：模型幅面/模型空间子图元句柄→父 Insert/Dimension 整体移动；纸面取纸面句柄。
+                    // Imp#3：模型块子图元句柄→父 Insert/Dimension 整体移动；纸面取纸面句柄；
+                    // I1：属性项（不分幅面）取 ATTRIB 句柄实例级移动。
                     bool paper = intent == EditSpaceIntent.Paper;
-                    string handle = paper ? PaperEditHandle(selected!) : ParentHandle(moveHandle);
+                    string handle = EditTargetHandle(selected!, paper);
                     _ = RunEditAsync(() => paper
                         ? Edit.MoveAsync(handle, dx, dy, PaperSpace, _currentLayoutName)
                         : Edit.MoveAsync(handle, dx, dy));
