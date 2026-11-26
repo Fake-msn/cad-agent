@@ -1521,35 +1521,40 @@ public sealed class MainWindow : Window
             DateTimeOffset issuedAt = DateTimeOffset.Now;
             string outPath = Path.Combine(_projectDir, "reports",
                 $"{Path.GetFileNameWithoutExtension(_title)}-{issuedAt:yyyyMMdd-HHmmss}-review.pdf");
+            IReadOnlyList<Issue> issueSnapshot = Issues.Issues.Select(ToIssue).ToList();
+            int issueCount = issueSnapshot.Count;
 
+            // 哈希须与导出时的会话状态一致，且不得在 UI 线程等待会话闸（在途编辑
+            // 持闸时整窗冻结）——放入后台任务：闸内取哈希，随后生成 PDF。
             string hash = "";
-            if (_sessionGate is not null) _sessionGate.Wait();
-            try { hash = _session.ComputeHash(); }
-            finally { _sessionGate?.Release(); }
-
-            var input = new ReviewReportInput
+            ReviewReportResult result = await Task.Run(() =>
             {
-                DrawingPath = _session.SourcePath,
-                ProjectDir = _projectDir,
-                Identity = new ReportIdentity(op.Account, op.Role.ToString()),
-                IssuedAt = issuedAt,
-                DrawingHash = hash,
-                RulePackVersion = rulePackVersion,
-                AdjudicationHash = adjudicationHash,
-                OverlayPresent = Issues.OverlayPresent,
-                Issues = Issues.Issues.Select(ToIssue).ToList(),
-                RulesRun = Issues.RulesRun,
-                RulesSkipped = Issues.RulesSkipped,
-                Skipped = Issues.SkippedReasons,
-                Adjudications = adjudications,
-                Signoffs = signoffs,
-                Audit = auditSummary,
-                ThumbnailPng = thumbnail,
-                RuleVerifications = verifications
-            };
+                if (_sessionGate is not null) _sessionGate.Wait();
+                try { hash = _session.ComputeHash(); }
+                finally { _sessionGate?.Release(); }
 
-            ReviewReportResult result = await Task.Run(
-                () => ReviewReportExporter.Export(input, outPath));
+                var input = new ReviewReportInput
+                {
+                    DrawingPath = _session.SourcePath,
+                    ProjectDir = _projectDir,
+                    Identity = new ReportIdentity(op.Account, op.Role.ToString()),
+                    IssuedAt = issuedAt,
+                    DrawingHash = hash,
+                    RulePackVersion = rulePackVersion,
+                    AdjudicationHash = adjudicationHash,
+                    OverlayPresent = Issues.OverlayPresent,
+                    Issues = issueSnapshot,
+                    RulesRun = Issues.RulesRun,
+                    RulesSkipped = Issues.RulesSkipped,
+                    Skipped = Issues.SkippedReasons,
+                    Adjudications = adjudications,
+                    Signoffs = signoffs,
+                    Audit = auditSummary,
+                    ThumbnailPng = thumbnail,
+                    RuleVerifications = verifications
+                };
+                return ReviewReportExporter.Export(input, outPath);
+            });
 
             try
             {
@@ -1559,7 +1564,7 @@ public sealed class MainWindow : Window
                     JsonSerializer.Serialize(new
                     {
                         outPath = result.Path,
-                        issueCount = input.Issues.Count,
+                        issueCount,
                         mandatoryViolations = Issues.MandatoryCount,
                         auditChainOk = result.AuditChainOk,
                         thumbnail = thumbnail is not null
