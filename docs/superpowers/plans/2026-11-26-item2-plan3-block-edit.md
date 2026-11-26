@@ -134,7 +134,7 @@ public static (bool Ok, double Dx, double Dy, string Error) WorldDeltaToBlockDel
 ```
 - 链解析：chain[0] 在模型顶层或任一纸面顶层按句柄找 Insert；后续句柄在前一 Insert.Block.Entities 中找；缺失 → 失败“插入链解析失败: <handle>”。
 - 复合：`t = t.Compose(OcsAffine(ins.Normal).Compose(Affine.InsertAffine(ins)))`（与 RenderModel 同序）；线性逆解 delta；奇异 → “块插入变换不可逆（零缩放）”。
-- 测试：单层旋转 90°+缩放(2,3)：世界 (10,6) → 局部 (3,2)（按 2*3 推导）；两层嵌套旋转+缩放链往返；纸面布局顶层 Insert 链（paper coords）；缺失链/零缩放失败。
+- 测试：单层旋转 0°+缩放(2,3)：世界 (10,6) → 局部 (5,2)；旋转 90°+缩放(2,3) 用正向 Apply 推导期望（不写死手算）；两层嵌套旋转+缩放链往返；纸面布局顶层 Insert 链（paper coords）；缺失链/零缩放失败。
 
 - [ ] **Step 1: 失败测试 → 红**
 
