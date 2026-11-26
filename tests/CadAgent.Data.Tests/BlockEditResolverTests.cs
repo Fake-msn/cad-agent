@@ -20,6 +20,8 @@ namespace CadAgent.Data.Tests;
 internal static class BlockFixtures
 {
     public const string BlockName = "TITLE_BLOCK";
+    public const string OuterBlockName = "OUTER_BLOCK";
+    public const string InnerBlockName = "INNER_BLOCK";
     public const string LayoutName = "布局1";
 
     public static (DrawingSession Session, BlockRecord Block, Line BlockLine, string Path) BlockSession()
@@ -67,12 +69,29 @@ internal static class BlockFixtures
         typeof(CadObject).GetField("_xdictionary", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(block, xd);
     }
+
+    /// <summary>嵌套块夹具（直接块经 DxfFixture 落盘取句柄）：OUTER_BLOCK 内 Insert(INNER_BLOCK)，INNER_BLOCK 内一条 Line。</summary>
+    public static (DrawingSession Session, Line InnerLine, string Path) NestedBlockSession()
+    {
+        var doc = new CadDocument();
+        var inner = new BlockRecord(InnerBlockName);
+        var innerLine = new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 1, 0) };
+        inner.Entities.Add(innerLine);
+        doc.BlockRecords.Add(inner);
+        var outer = new BlockRecord(OuterBlockName);
+        outer.Entities.Add(new Insert(inner) { InsertPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(outer);
+        doc.Entities.Add(new Insert(outer) { InsertPoint = new XYZ(0, 0, 0) });
+
+        string path = DxfFixture.WriteTempDxf(doc);
+        return (new DrawingSession(path, doc), innerLine, path);
+    }
 }
 
 /// <summary>
 /// Plan-3 Task 1 块定义目标解析矩阵：block+handle 仅检索命名块 Entities、块名大小写不敏感、
-/// 未知/受保护块拒绝、block 与 space/layout/attribute 互斥、默认（无 block）不检索块定义。
-/// 处理器仍在入口预拒 block（Task 5 才接通），本文件直接考解析器。
+/// 未知/受保护/布局块拒绝、非块空间句柄不回退、块嵌套不递归、block 与 space/layout/attribute 互斥、
+/// 默认（无 block）不检索块定义。处理器仍在入口预拒 block（Task 5 才接通），本文件直接考解析器。
 /// </summary>
 public class BlockEditResolverTests : IDisposable
 {
@@ -192,6 +211,85 @@ public class BlockEditResolverTests : IDisposable
         Assert.True(block.IsUnloaded);
         Assert.False(EditTargetResolver.IsBlockEditable(block));
         Assert.Null(EditTargetResolver.Resolve(s, P(new { handle = line.Handle.ToString(), block = block.Name })));
+    }
+
+    [Fact]
+    public void Resolve_LayoutBlockName_ReturnsNull()
+    {
+        // 布局块（布局1 / *Model_Space / *Paper_Space）属系统块，不是可编辑块定义：
+        // 纸面实体只能经 Paper 空间到达（否则会绕过纸面唯一入口）。
+        var (s, _, _) = New();
+        var paperLine = s.Doc.Layouts.First(l => l.Name == BlockFixtures.LayoutName)
+            .AssociatedBlock!.Entities.OfType<Line>().Single();
+        Assert.NotEqual(0UL, paperLine.Handle);
+
+        Assert.Null(EditTargetResolver.FindBlock(s, BlockFixtures.LayoutName));
+        Assert.Null(EditTargetResolver.Resolve(s, P(new
+        {
+            handle = paperLine.Handle.ToString(),
+            block = BlockFixtures.LayoutName
+        })));
+        foreach (Layout layout in s.Doc.Layouts)
+            Assert.Null(EditTargetResolver.FindBlock(s, layout.AssociatedBlock!.Name));
+    }
+
+    [Fact]
+    public void Resolve_FractionalBlockParam_ReturnsNull()
+    {
+        // 非字符串/非整数 block 值 fail-closed（不抛异常；OptString 对 1.5 会抛 InvalidOperationException）。
+        var (s, _, line) = New();
+        JsonElement p = JsonSerializer.SerializeToElement(new { handle = line.Handle.ToString(), block = 1.5 });
+        Assert.Equal(JsonValueKind.Number, p.GetProperty("block").ValueKind);
+        Assert.Null(EditTargetResolver.Resolve(s, p));
+    }
+
+    [Fact]
+    public void Resolve_BlockWithModelOrPaperHandle_ReturnsNull()
+    {
+        // 显式 block 只检索该块自身实体：模型/纸面实体句柄不得回退命中。
+        var (s, block, _) = New();
+        var modelInsert = s.Doc.Entities.OfType<Insert>().Single();
+        var paperLine = s.Doc.Layouts.First(l => l.Name == BlockFixtures.LayoutName)
+            .AssociatedBlock!.Entities.OfType<Line>().Single();
+        Assert.NotEqual(0UL, modelInsert.Handle);
+        Assert.NotEqual(0UL, paperLine.Handle);
+
+        Assert.Null(EditTargetResolver.Resolve(s, P(new
+        {
+            handle = modelInsert.Handle.ToString(),
+            block = block.Name
+        })));
+        Assert.Null(EditTargetResolver.Resolve(s, P(new
+        {
+            handle = paperLine.Handle.ToString(),
+            block = block.Name
+        })));
+    }
+
+    [Fact]
+    public void Resolve_NestedBlockEntity_OuterBlockMisses_InnerBlockHits()
+    {
+        // 单层不递归：块 B 内实体用 block:"A"（A 仅 Insert 引用 B）→ null；用 block:"B" → 命中。
+        var (s, innerLine, path) = BlockFixtures.NestedBlockSession();
+        _paths.Add(path);
+        Assert.NotEqual(0UL, innerLine.Handle);
+        string handle = innerLine.Handle.ToString();
+
+        Assert.Null(EditTargetResolver.Resolve(s, P(new
+        {
+            handle,
+            block = BlockFixtures.OuterBlockName
+        })));
+
+        var target = EditTargetResolver.Resolve(s, P(new
+        {
+            handle,
+            block = BlockFixtures.InnerBlockName
+        }));
+        Assert.NotNull(target);
+        Assert.Equal(EditOwnerKind.BlockDefinition, target!.Owner);
+        Assert.Equal(BlockFixtures.InnerBlockName, target.BlockName);
+        Assert.Same(innerLine, target.Entity);
     }
 
     // ---- 互斥限定（fail-closed） ----

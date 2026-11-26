@@ -48,8 +48,9 @@ public static class EditTargetResolver
         {
             // 与纸面/属性限定互斥：多空间信号即 fail-closed，不猜优先级。
             if (HasValue(p, "space") || HasValue(p, "layout") || HasValue(p, "attribute")) return null;
-            string? blockName = HandlerHelpers.OptString(p, "block");
-            BlockRecord? block = FindBlock(s, blockName ?? "");
+            string? blockName = ReadBlockName(p);
+            if (blockName is null) return null; // 非字符串/非整数 → fail-closed
+            BlockRecord? block = FindBlock(s, blockName);
             if (block is null || !IsBlockEditable(block)) return null; // 处理器用 FindBlock/IsBlockEditable 给专用文案
             Entity? match = block.Entities.FirstOrDefault(e => e.Handle == handle);
             return match is null
@@ -101,11 +102,15 @@ public static class EditTargetResolver
         return matches[0];
     }
 
-    /// <summary>块名 OrdinalIgnoreCase 精确匹配（块表名大小写不敏感，DXF 语义）。</summary>
+    /// <summary>
+    /// 块名 OrdinalIgnoreCase 精确匹配（块表名大小写不敏感，DXF 语义）。
+    /// 布局/系统块（布局1、*Model_Space、*Paper_Space）带 Layout → 排除：纸面实体只能经 Paper 空间到达。
+    /// </summary>
     public static BlockRecord? FindBlock(DrawingSession s, string name) =>
         string.IsNullOrEmpty(name)
             ? null
-            : s.Doc.BlockRecords.FirstOrDefault(b => string.Equals(b.Name, name, StringComparison.OrdinalIgnoreCase));
+            : s.Doc.BlockRecords.FirstOrDefault(b => b.Layout is null
+                && string.Equals(b.Name, name, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>匿名/动态/外部参照（含覆盖与依赖）/未加载 → 不可编辑（spec §5.3 非目标）。</summary>
     public static bool IsBlockEditable(BlockRecord b) =>
@@ -157,9 +162,19 @@ public static class EditTargetResolver
                && ulong.TryParse(hEl.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out handle);
     }
 
-    private static bool HasValue(JsonElement p, string name) =>
-        p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+    // block 名严格读取：string 原样 / number 仅整数（invariant）；其余（含 1.5）→ null，不抛。
+    private static string? ReadBlockName(JsonElement p)
+    {
+        if (!p.TryGetProperty("block", out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.String => v.GetString(),
+            JsonValueKind.Number when v.TryGetUInt64(out ulong n) => n.ToString(CultureInfo.InvariantCulture),
+            _ => null
+        };
+    }
 
-    private static bool IsTrue(JsonElement p, string name) =>
+    private static bool HasValue(JsonElement p, string name) =>
+        p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);    private static bool IsTrue(JsonElement p, string name) =>
         p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
 }

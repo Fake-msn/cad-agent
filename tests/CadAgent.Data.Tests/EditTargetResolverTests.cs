@@ -71,7 +71,7 @@ internal static class PaperFixtures
 
 /// <summary>
 /// Task 1 Resolver 矩阵：默认检索序（模型→纸面→顶层属性）、显式限定 fail-closed、
-/// 多空间同句柄拒绝、block 参数不检索块定义。
+/// 多空间同句柄拒绝、未知 block 名 fail-closed（块内编辑矩阵见 BlockEditResolverTests）。
 /// </summary>
 public class EditTargetResolverTests : IDisposable
 {
@@ -364,15 +364,16 @@ public class EditTargetResolverTests : IDisposable
     // ---- 拒绝面 ----
 
     [Fact]
-    public void Resolve_BlockParam_ReturnsNull()
+    public void Resolve_UnknownBlockName_ReturnsNull()
     {
-        // 块定义检索属 Plan-3：含 block 一律不解析（处理器入口先拒）。
+        // 显式 block 只检索该块定义自身：未知块名 fail-closed，不回退模型/纸面。
         var (s, layout) = New();
         var line = layout.AssociatedBlock!.Entities.OfType<Line>().Single();
+        Assert.NotEqual(0UL, line.Handle);
         Assert.Null(EditTargetResolver.Resolve(s, P(new
         {
             handle = line.Handle.ToString(),
-            block = "图框"
+            block = "无此块"
         })));
     }
 
