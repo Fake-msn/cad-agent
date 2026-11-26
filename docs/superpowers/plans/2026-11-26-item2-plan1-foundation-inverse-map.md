@@ -765,11 +765,12 @@ private void ProjectEntity(StringBuilder sb, string prefix, Entity e)
             foreach (var v in p2.Vertices)
                 sb.Append(FormattableString.Invariant($"|{v.Location.X:R},{v.Location.Y:R},{v.Location.Z:R}"));
             break;
-        case Circle circle:
-            sb.Append(FormattableString.Invariant($"|{circle.Center.X:R}|{circle.Center.Y:R}|{circle.Radius:R}"));
-            break;
+        // Arc : Circle（ACadSharp 3.8.35）——必须先于 Circle，否则 CS8120 不可达。
         case Arc arc:
             sb.Append(FormattableString.Invariant($"|{arc.Center.X:R}|{arc.Center.Y:R}|{arc.Radius:R}|{arc.StartAngle:R}|{arc.EndAngle:R}"));
+            break;
+        case Circle circle:
+            sb.Append(FormattableString.Invariant($"|{circle.Center.X:R}|{circle.Center.Y:R}|{circle.Radius:R}"));
             break;
         case Insert insert:
             sb.Append(FormattableString.Invariant($"|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));

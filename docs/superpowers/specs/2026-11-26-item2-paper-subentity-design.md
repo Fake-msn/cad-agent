@@ -67,8 +67,8 @@ record RenderItem(..., string Handle, bool Closed = false,
   - `E|{handle}|…` 模型顶层实体（扩展类型字段，MText 等纳入）；
   - `P|{layout}|{handle}|…` 纸面顶层实体（仅 `IsPaperSpace` 布局；模型布局不重复投影）；
   - `B|{block}|{handle}|…` 块定义实体；
-  - `A|{insert}|{tag}|{value}|{layer}|{x:R},{y:R}|{height:R}` 属性值（含位置/层/字高——ATTRIB 移动/改层可审计）；
-  - `ADEF|{block}|{handle}|{tag}|{value}|{height:R}|{rotation:R}` 属性定义默认值。
+  - Insert 行内追加属性子行 `|A|{tag}|{value}|{layer}|{x:R},{y:R}|{height:R}`（含位置/层/字高——ATTRIB 移动/改层可审计）；
+  - 块内 `AttributeDefinition` 行 `|ADEF|{tag}|{value}|{height:R}|{rotation:R}|{x:R}|{y:R}` 属性定义默认值。
 - 排序：布局名/块名 Ordinal、实体句柄升序 → 确定性。
 - 迁移注记：哈希值相对旧版本变化；旧审计记录按存储字段验链不受影响；深读面板旧 overlay 的 DrawingHash 可能提示「来源哈希不一致」（既有文案，诚实保留）。
 - 单测：纸面移动/块定义移动/属性改值 → 哈希变化；无修改 Save/Reload → 稳定；排序确定性。
