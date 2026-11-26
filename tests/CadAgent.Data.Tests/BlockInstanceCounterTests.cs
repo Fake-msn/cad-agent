@@ -10,8 +10,9 @@ namespace CadAgent.Data.Tests;
 /// <summary>
 /// Plan-3 T4：块实例计数（确认提示用，约值）。夹具经 DxfFixture 落盘回读
 /// （计数对象总来自读回的文档，与真实调用链同源）。
-/// 深度口径 = 渲染器 MaxInsertDepth=2：根 0、顶层 Insert 的子实体 1、
-/// depth>=2 仍计数但不再深入；纸面布局（IsPaperSpace）顶层同为根，布局关联块自身不作实例。
+/// 下探口径 = 渲染器 MaxInsertDepth=2：根 0、depth>=2 仍计数但不再深入
+/// → 约值/下界，非渲染可见实例数（渲染器 depth>=2 跳绘）；纸面布局（IsPaperSpace）
+/// 顶层同为根，布局关联块自身不作实例。
 /// </summary>
 public class BlockInstanceCounterTests : IDisposable
 {
@@ -121,6 +122,28 @@ public class BlockInstanceCounterTests : IDisposable
     }
 
     [Fact]
+    public void Count_MaxDepthTightened_TruncatesDeeperNesting_NoCycle()
+    {
+        // 无环链 A→B→C→D：默认深度 2 截断 D（深度 3）；maxDepth:3 时计入。
+        var doc = Load(d =>
+        {
+            var a = Block(d, "A");
+            var b = Block(d, "B");
+            var c = Block(d, "C");
+            var last = Block(d, "D");
+            d.Entities.Add(new Insert(a) { InsertPoint = new XYZ(0, 0, 0) });
+            a.Entities.Add(new Insert(b) { InsertPoint = new XYZ(1, 0, 0) });
+            b.Entities.Add(new Insert(c) { InsertPoint = new XYZ(2, 0, 0) });
+            c.Entities.Add(new Insert(last) { InsertPoint = new XYZ(3, 0, 0) });
+        });
+
+        Assert.Equal(1, BlockInstanceCounter.Count(doc, "B")); // 深度 1
+        Assert.Equal(1, BlockInstanceCounter.Count(doc, "C")); // 深度 2：计数、不再深入
+        Assert.Equal(0, BlockInstanceCounter.Count(doc, "D")); // 深度 3：默认截断
+        Assert.Equal(1, BlockInstanceCounter.Count(doc, "D", maxDepth: 3));
+    }
+
+    [Fact]
     public void Count_NameMatching_IsCaseInsensitive_AndDegenerateInputsAreZero()
     {
         var doc = Load(d =>
@@ -133,7 +156,8 @@ public class BlockInstanceCounterTests : IDisposable
         Assert.Equal(2, BlockInstanceCounter.Count(doc, "b"));
         Assert.Equal(0, BlockInstanceCounter.Count(doc, "NOPE"));
         Assert.Equal(0, BlockInstanceCounter.Count(doc, ""));
-        Assert.Equal(0, BlockInstanceCounter.Count(null!, "B"));
+        Assert.Equal(0, BlockInstanceCounter.Count(doc, null!));
+        Assert.Equal(0, BlockInstanceCounter.Count(null, "B"));
     }
 
     [Fact]
@@ -147,10 +171,15 @@ public class BlockInstanceCounterTests : IDisposable
             d.Entities.Add(new Insert(b) { InsertPoint = new XYZ(0, 0, 0) });
         });
 
+        // 回读文档必带非纸面 model 布局且其关联块非空：IsPaperSpace 过滤为排除逻辑的承重前提
+        var model = doc.Layouts.Single(l => !l.IsPaperSpace);
+        Assert.NotNull(model.AssociatedBlock);
+        Assert.Single(model.AssociatedBlock!.Entities.OfType<Insert>());
+
         var paper = doc.Layouts.Single(l => l.Name == "布局1" && l.IsPaperSpace);
         Assert.Single(paper.AssociatedBlock!.Entities.OfType<Insert>());
         Assert.Single(doc.Entities.OfType<Insert>());
-        Assert.Equal(2, BlockInstanceCounter.Count(doc, "B")); // 含纸面一处
+        Assert.Equal(2, BlockInstanceCounter.Count(doc, "B")); // 含纸面一处，model 布局不双计
     }
 
     [Fact]
