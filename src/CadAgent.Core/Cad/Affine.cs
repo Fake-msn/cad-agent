@@ -24,7 +24,9 @@ public readonly record struct Affine(double A, double B, double C, double D, dou
         C * inner.Tx + D * inner.Ty + Ty);
 
     /// <summary>
-    /// 线性部逆（Tx/Ty 置 0）：世界/纸面增量→块局部增量用。det≈0 → false。
+    /// 线性部逆（Tx/Ty 置 0）：世界/纸面增量→块局部增量用。det≈0 → false 且 <paramref name="inverse"/> = default，
+    /// 调用方必须检查返回值再用 <paramref name="inverse"/>。阈值 1e-12 为<b>绝对值</b>：常规块缩放比范围内足够，
+    /// 近奇异的超大尺度矩阵（如 A~1e6）可能仍判为可逆（已知局限）。
     /// </summary>
     public bool TryInvertLinear(out Affine inverse)
     {
