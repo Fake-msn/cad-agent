@@ -17,8 +17,8 @@ namespace CadAgent.Cli.Tests;
 /// 纸面文字「待删纸面字」（删除目标）、纸面文字「旧图名」（改字目标）、标题块
 /// Insert(Tag=图号, Value=OLD)。断言口径：纸面改动落盘回读正确、模型语义逐字不变、
 /// tx-start/tx-commit 哈希可辨、audit verify 绿。
-/// 已知边界（无代码改动）：--live 经 ComReplayService 重放，未映射 set-text/set-attribute
-/// 及纸面 space/layout 参数 → 响亮失败「COM 重放不支持步骤类型」（不伪造成功）。
+/// 已知边界（无代码改动）：--live 经 ComReplayService 重放——set-text/set-attribute 未映射 →
+/// 响亮「COM 重放不支持步骤类型」；纸面 add-* 经总数读回闸口「读回分歧」；纸面 change-layer+space 未证 fail-closed（待跟踪）。
 /// </summary>
 public class PaperPlanE2ETests : IDisposable
 {
@@ -191,6 +191,9 @@ public class PaperPlanE2ETests : IDisposable
         Assert.NotEqual(preBytes, File.ReadAllBytes(_drawing)); // 确实落盘
         Assert.Equal(15, after.PaperLine.StartPoint.X, 6);
         Assert.Equal(17, after.PaperLine.StartPoint.Y, 6);
+        // 夹具纸面线 (10,10)-(60,10) + (dx,dy)=(5,7)：端点同样平移
+        Assert.Equal(65, after.PaperLine.EndPoint.X, 6);
+        Assert.Equal(17, after.PaperLine.EndPoint.Y, 6);
         Assert.Equal(2, after.Paper.AssociatedBlock!.Entities.OfType<Line>().Count()); // 新增线
         Assert.Single(after.Paper.AssociatedBlock!.Entities.OfType<TextEntity>());     // 删除后剩 1 条
         var paperTexts = after.Paper.AssociatedBlock!.Entities.OfType<TextEntity>()
@@ -218,6 +221,15 @@ public class PaperPlanE2ETests : IDisposable
         Assert.NotEqual(txStart.Entry.AfterHash, txCommit.Entry.AfterHash);
         Assert.Equal(postHash, txCommit.Entry.AfterHash); // 审计哈希=真实落盘状态
         Assert.Equal(5, records.Count(r => r.Entry.Kind == "step"));
+        // spec §3.2：审计 params 逐字含 space/layout（非 ASCII 经默认编码器转义 → 解析后比较原文）
+        var moveStep = Assert.Single(records,
+            r => r.Entry.Kind == "step" && r.Entry.ParamsJson.Contains("\"move-entity\""));
+        using (var stepParams = JsonDocument.Parse(moveStep.Entry.ParamsJson))
+        {
+            var stepArgs = stepParams.RootElement.GetProperty("Params");
+            Assert.Equal("paper", stepArgs.GetProperty("space").GetString());
+            Assert.Equal(LayoutName, stepArgs.GetProperty("layout").GetString());
+        }
         Assert.DoesNotContain(records, r => r.Entry.Kind is "step-failed" or "tx-failed");
         Assert.True(audit.VerifyChain(out _));
 
