@@ -79,6 +79,7 @@ public static partial class CommandRouter
                 case "review": return Review(args, positional, agentDir, session, stdout, stderr);
                 case "repl": return ReplLoop(args, Console.In, stdout, stderr);
                 case "export": return Export(args, agentDir, session, stdout, stderr);
+                case "report": return Report(args, positional, agentDir, session, stdout, stderr);
                 case "vendor": return Vendor(positional, stdout, stderr);
                 default: return Usage(stderr);
             }
@@ -1414,7 +1415,7 @@ public static partial class CommandRouter
 
     private static int Usage(TextWriter stderr)
     {
-        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run|view> [参数] [--project <dir>]");
+        stderr.WriteLine("用法: cadagent <intake|run|rollback|audit verify|roles show|semantic scan|semantic show|semantic map|semantic promote|check|rule adjudicate|rule list|skill list|skill validate|skill run|report export|view> [参数] [--project <dir>]");
         return 1;
     }
 
