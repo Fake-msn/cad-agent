@@ -278,3 +278,16 @@ public static int Count(CadDocument doc, string blockName, int maxDepth = 2)
 ---
 
 ## 执行记录（执行中追加）
+
+### Task 8 收尾记录（2026-11-26，feat/cad-agent-block-edit）
+
+- 计划/勘误：6ddf7d8（计划入册）、8fe163c（Task3 期望值示例修正）、bce9b20（Task6 逆解示例数值更正）。
+- Task 1：0b6dbf3（resolver/块守卫）→ 977530b、702181c（评审修复）。
+- Task 2：751f53e（`Affine.TryInvertLinear`）→ d8f71b4（det≠1 用例/失败契约）。
+- Task 3：e9bb9d5、6cfea6d（`BlockEditMath` 局部增量逆解）→ 8e05c2e（链首跨空间歧义 fail-closed）。
+- Task 4：641cdfc（`BlockInstanceCounter`）→ 07aea06（计数口径澄清/补强）。
+- Task 5：cff2f99（四类处理器块定义化）→ c6af41d（未知块文案/互斥优先/断言）。
+- Task 6：6aeeabf（子图元模式/确认/路由）→ f0156fd（SourceHandle 定位/目标空间状态/文案）。
+- Task 7：a2da287（CLI 块计划 E2E + 契约收尾）。
+- Task 8：927cade（评审 Minor 文案收尾 + 两步部分写入 E2E）→ 本提交（本执行记录 + spec §12 注记）。
+- **门禁（Task 8 实测，outputs/plan3-gates/）**：套件 Core 288 / Data 652 / View 507 / Cli 368 / Report 31 / Llm 33 / TArchBridge 76 / Zwcad 16 / Acad 181（180 通过 + 1 既有设计内 skip）；全 sln `dotnet test CadAgent.sln --nologo` **2152 例 = 2151 通过 / 0 失败 / 1 跳过**（一次通过，0 flake）。基线 main 31534c8：2042 通过 / 0 失败 / 1 skip → **净增 109 例**。本计划门禁轮零事实漂移修复（无新增测试改动）；Task 8 代码改动仅文案/常量/用例，聚焦复跑 Cli BlockPlan 6/6、Data SetAttribute+HandlerKindDocs 34/34、View 状态栏 1/1 先行确认。
