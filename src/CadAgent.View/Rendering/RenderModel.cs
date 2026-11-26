@@ -150,6 +150,60 @@ public static class RenderModelBuilder
     }
 
     /// <summary>
+    /// 纸面空间读图（项2 F）：布局关联块内实体（排除 Viewport——视口内容与框线分别由
+    /// <see cref="BuildViewport"/>/<see cref="BuildViewportFrame"/> 表达）以 Space=PaperSpace
+    /// 展开，复用同一 Append 管线（块展开/属性/线型口径不变）。未知布局名→空（不抛）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> BuildPaperSpace(CadDocument doc, string layoutName)
+    {
+        var layout = doc.Layouts?.FirstOrDefault(l => string.Equals(l.Name, layoutName, StringComparison.Ordinal));
+        if (layout?.AssociatedBlock is null) return Array.Empty<RenderItem>();
+        var items = new List<RenderItem>();
+        int skipped = 0;
+        var ctx = new EmitContext(RenderSpace.PaperSpace, null, null, null, null);
+        foreach (Entity e in layout.AssociatedBlock.Entities)
+        {
+            if (e is Viewport) continue;
+            Append(e, items, ref skipped, Affine.Identity, rotationDeg: 0, heightScale: 1,
+                byBlockColor: null, depth: 0, ctx: ctx);
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// 锁定视口框（项2 F）：视口纸面 bounds 的 4 条边线（底/右/顶/左顺序），
+    /// Space=PaperSpace、Locked=true（将来编辑锁定位：框线不可选/不可拖）、
+    /// Handle=SourceHandle=视口句柄（溯源到视口实体）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> BuildViewportFrame(Viewport vp)
+    {
+        double minX = vp.Center.X - vp.Width / 2, maxX = vp.Center.X + vp.Width / 2;
+        double minY = vp.Center.Y - vp.Height / 2, maxY = vp.Center.Y + vp.Height / 2;
+        string h = vp.Handle.ToString(CultureInfo.InvariantCulture);
+        RenderItem Seg(double x1, double y1, double x2, double y2) => new(
+            RenderKind.Line, new[] { (x1, y1), (x2, y2) }, "0", 0x808080, null, 0, 0, h,
+            Space: RenderSpace.PaperSpace, SourceHandle: h, Locked: true);
+        return new[] { Seg(minX, minY, maxX, minY), Seg(maxX, minY, maxX, maxY),
+                       Seg(maxX, maxY, minX, maxY), Seg(minX, maxY, minX, minY) };
+    }
+
+    /// <summary>
+    /// 布局合成（项2 F）：纸面图元 → 视口内模型图元（纸面坐标）→ 视口框（框最后，
+    /// 画布按序绘制→框覆盖在模型之上）。vp=null 时仅纸面（退化布局诚实降级）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> ComposeLayout(CadDocument doc, string layoutName, Viewport? vp)
+    {
+        var list = new List<RenderItem>();
+        list.AddRange(BuildPaperSpace(doc, layoutName));
+        if (vp is not null)
+        {
+            list.AddRange(BuildViewport(doc, vp));
+            list.AddRange(BuildViewportFrame(vp));
+        }
+        return list;
+    }
+
+    /// <summary>
     /// 模型幅面裁剪（幅面感知 T5）：保留锚点（Points[0]）落在图框 bounds 内的图元，
     /// 与 SheetIdForPoint/BlockWalker 锚点归属同口径。无图框单幅面 bounds=ModelBounds →
     /// 全部锚点在内 → 全保留（legacy 单幅面行为无感，R4）。
@@ -292,6 +346,12 @@ public static class RenderModelBuilder
 
         switch (e)
         {
+            // Ruling R8：ATTDEF 是块模板定义（不可见），实例值仅经 Insert.Attributes 渲染；
+            // 须先于 TextEntity 分支（ACadSharp AttributeBase 派生自 TextEntity）。
+            // 不计数 skipped——定义不属于渲染对象，不是"不支持的实体"。
+            case AttributeDefinition:
+                break;
+
             case Line line:
                 // Line 端点为 WCS（DXF 约定：LINE 不受 OCS 法向影响）——不接 OCS。
                 items.Add(new RenderItem(RenderKind.Line,
