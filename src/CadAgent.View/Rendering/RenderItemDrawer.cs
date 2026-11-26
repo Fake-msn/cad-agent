@@ -252,15 +252,24 @@ public sealed class RenderItemDrawer
         return closed;
     }
 
-    /// <summary>选中/高亮图元是否超出全细节预算（点数&gt;2000 或投影包围盒&gt;25% 视口）。</summary>
+    /// <summary>选中/高亮图元是否超出全细节预算（有效点数&gt;2000 或投影包围盒&gt;25% 视口）。</summary>
     internal static bool IsOverBudget(CanvasProjection projection, RenderItem item)
     {
-        if (item.Kind is RenderKind.Hatch or RenderKind.Polyline && item.Points.Count > MaxBudgetPoints)
+        if (item.Kind is RenderKind.Hatch or RenderKind.Polyline && CountFinitePoints(item.Points) > MaxBudgetPoints)
             return true;
         if (!TryScreenBounds(projection, item, out ScreenBox box)) return false;
         double viewportArea = projection.ViewportW * projection.ViewportH;
         if (!(viewportArea > 0)) return false;
         return (box.MaxX - box.MinX) * (box.MaxY - box.MinY) > viewportArea * MaxBudgetViewportFraction;
+    }
+
+    /// <summary>有效顶点数（Hatch 的 (NaN,NaN) 是路径分隔符，不计入预算）。</summary>
+    private static int CountFinitePoints(IReadOnlyList<(double X, double Y)> pts)
+    {
+        int count = 0;
+        foreach ((double x, double y) in pts)
+            if (double.IsFinite(x) && double.IsFinite(y)) count++;
+        return count;
     }
 
     // ---- 绘制入口 ----
@@ -275,7 +284,6 @@ public sealed class RenderItemDrawer
         RenderItem? selected, IReadOnlySet<string>? highlighted,
         bool selectionBudgetExceeded = false, bool cull = true)
     {
-        ResetCounters();
         bool useIndices = cull && indices is not null;
         int count = useIndices ? indices!.Count : items.Count;
 
@@ -308,13 +316,15 @@ public sealed class RenderItemDrawer
 
     /// <summary>
     /// 单图元绘制（diff before 层/删除线等复用）：无调用方画笔/文本缓存，
-    /// 虚线笔走实例内部解析器（与旧画布逐图元等价）。
+    /// 虚线笔走实例内部解析器（与旧画布逐图元等价）。帧计数由调用方 BeginFrame 管理。
     /// </summary>
     public void DrawOne(DrawingContext ctx, CanvasProjection projection, RenderItem item, Pen pen, RenderQuality quality)
     {
-        ResetCounters();
         DrawItemCore(ctx, projection, item, pen, quality, _fallbackPens, texts: null, bold: false);
     }
+
+    /// <summary>帧开始：清零本帧 LOD 计数（DrawingCanvas 每帧调用一次；Draw/DrawOne 不重置）。</summary>
+    public void BeginFrame() => ResetCounters();
 
     private void ResetCounters()
     {
@@ -427,8 +437,7 @@ public sealed class RenderItemDrawer
             LastTextSkipped++;
             return;
         }
-        double sx = (item.Points[0].X - p.MinX) * p.Scale + p.PanX + p.OffsetX + p.ExtraOffsetX;
-        double sy = p.ViewportH - ((item.Points[0].Y - p.MinY) * p.Scale + p.PanY) - p.OffsetY - p.ExtraOffsetY;
+        (double sx, double sy) = p.WorldToScreen(item.Points[0].X, item.Points[0].Y);
         if (!double.IsFinite(sx) || !double.IsFinite(sy)) return;
 
         if (decision == RenderDecision.Simplified)
@@ -441,9 +450,11 @@ public sealed class RenderItemDrawer
             return;
         }
 
-        FormattedText text = texts is null
+        // 交互档不走文字缓存（spec §3.1：交互期只变换缓存位图/粗绘，缓存仅静止精绘复用）。
+        TextCache? cache = quality == RenderQuality.Refined ? texts : null;
+        FormattedText text = cache is null
             ? CreateFormattedText(item.Text, fontPx, bold, pen.Brush!)
-            : texts.GetOrAdd(item.Text, fontPx, bold, PenResolver.RgbOf(pen.Brush),
+            : cache.GetOrAdd(item.Text, fontPx, bold, PenResolver.RgbOf(pen.Brush),
                 () => CreateFormattedText(item.Text, fontPx, bold, pen.Brush!));
         // CAD 插入点=基线左端；FormattedText 以左上角定位 → 上移文本高度。
         ctx.DrawText(text, new Point(sx, sy - text.Height));
@@ -455,7 +466,6 @@ public sealed class RenderItemDrawer
         if (item.Points.Count < 3) return;
         double area = (box.MaxX - box.MinX) * (box.MaxY - box.MinY);
         RenderDecision decision = DecideHatch(item.Points.Count, area, quality);
-        if (decision == RenderDecision.Skip) return;
         if (decision != RenderDecision.Full) LastHatchDowngraded++;
 
         if (decision == RenderDecision.Bbox)
@@ -572,6 +582,7 @@ public sealed class RenderItemDrawer
             (double sx, double sy) = p.WorldToScreen(cx, cy);
             double sr = r * p.Scale;
             if (!double.IsFinite(sx) || !double.IsFinite(sy) || !double.IsFinite(sr)) return false;
+            // Circle 与 Arc 同用整圆包围盒（Arc 保守取整圆，与索引 TryBox 口径一致）。
             box = new ScreenBox(sx - sr, sy - sr, sx + sr, sy + sr);
             return true;
         }

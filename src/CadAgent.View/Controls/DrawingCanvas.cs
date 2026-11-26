@@ -46,7 +46,8 @@ public sealed class DrawingCanvas : Control
     private readonly PenResolver _pens = new();
     private readonly TextCache _texts = new();
     private IReadOnlyList<RenderItem>? _textMarginItems;
-    private double _textCullingMarginWorld;
+    private double _textMarginAscentWorld;
+    private double _textMarginRightWorld;
     private bool _panning;
     private Point _lastPanPosition;
     private Size _lastFitSize;
@@ -100,8 +101,9 @@ public sealed class DrawingCanvas : Control
         base.Render(context);
         context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
 
-        // 项3 T2：帧开始冻结变换快照，绘制器不再回读 VM。
+        // 项3 T2：帧开始冻结变换快照，绘制器不再回读 VM；帧计数只在此清零一次（diff 各 DrawOne 累加）。
         CanvasProjection projection = CanvasProjection.From(ViewModel);
+        _drawer.BeginFrame();
 
         // T6 对比叠加：before 幽灵层 + after 层（diff 模式保持全量语义，暂不走裁剪/位图缓存）。
         DiffOverlay? diff = ViewModel.DiffOverlay;
@@ -166,8 +168,9 @@ public sealed class DrawingCanvas : Control
 
     /// <summary>
     /// 视口索引查询：视口全覆盖内容且无隐藏层 → null（绘制器全量，省一次查询）；
-    /// 否则按世界视口查询（隐藏层在索引内过滤）。文本剔除按 T1 评审留字形上升边距
-    /// （绘制 ≈1.2×字高，索引盒只含逻辑字盒），边距单位=世界单位。
+    /// 否则按世界视口查询（隐藏层在索引内过滤）。内容包围盒取索引构造时预计算值
+    /// （O(1)，避免每帧全顶点扫描）。文本剔除留字形边距（绘制 ≈1.2×字高；字盒只含
+    /// 逻辑字盒），右侧另按最大文本世界宽度加宽（文本向右延伸），均世界单位。
     /// </summary>
     private IReadOnlyList<int>? QueryIndices(CanvasProjection projection)
     {
@@ -175,25 +178,37 @@ public sealed class DrawingCanvas : Control
         if (!(minX <= maxX && minY <= maxY)) return null; // 未 Fit：无有效视口（画布零尺寸）
         if (ViewModel.HiddenLayers.Count == 0)
         {
-            (double bMinX, double bMinY, double bMaxX, double bMaxY) = RenderModelBuilder.Bounds(ViewModel.Items);
-            if (minX <= bMinX && minY <= bMinY && maxX >= bMaxX && maxY >= bMaxY) return null;
+            (double bMinX, double bMinY, double bMaxX, double bMaxY) = ViewModel.Index.ContentBounds;
+            if (!double.IsNaN(bMinX)
+                && minX <= bMinX && minY <= bMinY && maxX >= bMaxX && maxY >= bMaxY)
+                return null;
         }
-        double margin = TextCullingMarginWorld();
-        return ViewModel.QueryViewport((minX - margin, minY - margin, maxX + margin, maxY + margin));
+        (double ascent, double right) = TextCullingMarginsWorld();
+        return ViewModel.QueryViewport((minX - ascent, minY - ascent,
+            maxX + Math.Max(ascent, right), maxY + ascent));
     }
 
-    /// <summary>文本剔除边距 = 1.2×最大世界字高（Items 引用变化时重算一次）。</summary>
-    private double TextCullingMarginWorld()
+    /// <summary>
+    /// 文本剔除边距（Items 引用变化时重算一次）：上升边距=1.2×最大世界字高（字形超出
+    /// 逻辑字盒）；右向边距=最大文本世界宽度（len×字高×0.6，文本自插入点向右延伸）。
+    /// </summary>
+    private (double Ascent, double Right) TextCullingMarginsWorld()
     {
         if (!ReferenceEquals(_textMarginItems, ViewModel.Items))
         {
-            double maxHeight = 0;
+            double maxHeight = 0, maxWidth = 0;
             foreach (RenderItem item in ViewModel.Items)
-                if (item.Kind == RenderKind.Text && item.TextHeight > maxHeight) maxHeight = item.TextHeight;
-            _textCullingMarginWorld = 1.2 * maxHeight;
+            {
+                if (item.Kind != RenderKind.Text) continue;
+                if (item.TextHeight > maxHeight) maxHeight = item.TextHeight;
+                double width = (item.Text?.Length ?? 0) * item.TextHeight * 0.6;
+                if (width > maxWidth) maxWidth = width;
+            }
+            _textMarginAscentWorld = 1.2 * maxHeight;
+            _textMarginRightWorld = maxWidth;
             _textMarginItems = ViewModel.Items;
         }
-        return _textCullingMarginWorld;
+        return (_textMarginAscentWorld, _textMarginRightWorld);
     }
 
     /// <summary>

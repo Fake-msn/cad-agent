@@ -231,28 +231,51 @@ public class RenderItemDrawerTests
     public void Text_SimplifiedBar_DrawnAtBaseline_NoGlyphs()
     {
         // scale=20、TextHeight=0.15 → 3px：Refined 2–6px → 简化条（基线处 1px 横线）。
+        // 字形探针取基线上方 2–3px（3px 字形必经带）与条 x 范围内：若画了字形必亮。
         var item = Text("AAAA", 1, 1, 0.15);
         var drawer = new RenderItemDrawer();
         PixelBuffer frame = RenderPixels(ctx =>
             drawer.Draw(ctx, Projection(), new[] { item }, null, RenderQuality.Refined,
                 new PenResolver(), new TextCache(), null, null));
 
-        (double bx, double by) = Projection().WorldToScreen(1.3, 1); // 条中点，基线 y
-        Assert.True(frame.MaxBrightness((int)bx, (int)by) > 100, "简化条须在基线落像素");
-        Assert.True(frame.MaxBrightness((int)bx, (int)by - 8) < 90, "简化条不画字形（基线上方为空）");
+        (double bx0, double by) = Projection().WorldToScreen(1, 1);
+        (double bx1, _) = Projection().WorldToScreen(1 + 4 * 0.15 * 0.6, 1);
+        Assert.True(frame.RegionMaxBrightness((int)bx0 + 1, (int)by, (int)bx1 - 1, (int)by) > 100,
+            "简化条须在基线落像素");
+        Assert.True(frame.RegionMaxBrightness((int)bx0 + 1, (int)by - 3, (int)bx1 - 1, (int)by - 2) < 90,
+            "简化条不画字形（基线上方 2–3px、条 x 范围内为空）");
+    }
+
+    [AvaloniaFact]
+    public void Text_FullGlyph_RegionAboveBaseline_IsBright()
+    {
+        // 对照：8px 字号（Refined ≥6 → 画字形），同一探针带（基线上方 2–3px）必须亮
+        // —— 证明上面的负探针落在字形必经区域，而非无关空白。
+        var item = Text("MMMM", 1, 1, 0.4);
+        var drawer = new RenderItemDrawer();
+        PixelBuffer frame = RenderPixels(ctx =>
+            drawer.Draw(ctx, Projection(), new[] { item }, null, RenderQuality.Refined,
+                new PenResolver(), new TextCache(), null, null));
+
+        (double bx0, double by) = Projection().WorldToScreen(1, 1);
+        (double bx1, _) = Projection().WorldToScreen(1 + 4 * 0.4 * 0.6, 1);
+        Assert.True(frame.RegionMaxBrightness((int)bx0 + 1, (int)by - 3, (int)bx1 - 1, (int)by - 2) > 100,
+            "8px 字形须覆盖基线上方 2–3px 探针带");
     }
 
     [AvaloniaFact]
     public void Text_BelowSkipThreshold_DrawsNothing_AndCountsSkip()
     {
-        // Refined <2px → Skip（1.5px）。
+        // Refined <2px → Skip（1.5px）。整块字形盒（基线至上方 4px、字盒 x 范围）须全空。
         var item = Text("MMMM", 1, 1, 0.075);
         var drawer = new RenderItemDrawer();
         PixelBuffer frame = RenderPixels(ctx =>
             drawer.Draw(ctx, Projection(), new[] { item }, null, RenderQuality.Refined,
                 new PenResolver(), new TextCache(), null, null));
-        (double bx, double by) = Projection().WorldToScreen(2, 1.1);
-        Assert.True(frame.MaxBrightness((int)bx, (int)by) < 90, "跳过阈值以下不落任何像素");
+        (double bx0, double by) = Projection().WorldToScreen(1, 1);
+        (double bx1, _) = Projection().WorldToScreen(1 + 4 * 0.075 * 0.6, 1);
+        Assert.True(frame.RegionMaxBrightness((int)bx0, (int)by - 4, (int)bx1, (int)by + 1) < 90,
+            "跳过阈值以下不落任何像素（含基线与字形盒）");
         Assert.Equal(1, drawer.LastTextSkipped);
         Assert.Equal(RenderDecision.Skip, RenderItemDrawer.DecideText(0.075 * 20, RenderQuality.Refined));
     }
@@ -345,6 +368,64 @@ public class RenderItemDrawerTests
             drawer.Draw(ctx, Projection(), new[] { bad }, null, RenderQuality.Refined,
                 new PenResolver(), null, null, null));
         Assert.True(frame.MaxBrightness(100, 100) < 90);
+    }
+
+    [AvaloniaFact]
+    public void Draw_Interactive_BypassesTextCache()
+    {
+        // spec §3.1：交互档不走文字缓存。12px 字形在 Interactive（≥10）仍全细节绘制，
+        // 但缓存零未命中；同项 Refined 重绘才写缓存。
+        var item = Text("HI", 4, 4, 0.6); // 12px @ scale 20
+        var drawer = new RenderItemDrawer();
+        var cache = new TextCache();
+        var pens = new PenResolver();
+
+        RenderPixels(ctx => drawer.Draw(ctx, Projection(), new[] { item }, null,
+            RenderQuality.Interactive, pens, cache, null, null));
+        Assert.Equal(0, cache.Misses);
+        Assert.Equal(0, cache.Count);
+
+        RenderPixels(ctx => drawer.Draw(ctx, Projection(), new[] { item }, null,
+            RenderQuality.Refined, pens, cache, null, null));
+        Assert.Equal(1, cache.Misses);
+        Assert.Equal(1, cache.Count);
+    }
+
+    [AvaloniaFact]
+    public void DrawOne_DoesNotResetCounters_BeginFrameResets()
+    {
+        // 帧计数由调用方 BeginFrame 清零一次；逐图元 DrawOne 只累加（diff 路径各层共享）。
+        var tiny = Text("MM", 1, 1, 0.05); // Refined 1px → Skip
+        var drawer = new RenderItemDrawer();
+        Pen pen = new PenResolver().ColorPen(0xFFFFFF);
+
+        RenderPixels(ctx =>
+        {
+            drawer.BeginFrame();
+            drawer.DrawOne(ctx, Projection(), tiny, pen, RenderQuality.Refined);
+            drawer.DrawOne(ctx, Projection(), tiny, pen, RenderQuality.Refined);
+        });
+        Assert.Equal(2, drawer.LastTextSkipped);
+
+        drawer.BeginFrame();
+        Assert.Equal(0, drawer.LastTextSkipped);
+    }
+
+    [Fact]
+    public void IsOverBudget_HatchBudget_CountsFinitePointsOnly()
+    {
+        // (NaN,NaN) 是路径分隔符：2001 个总点但 1996 有效顶点 → 不因点数超预算
+        // （投影盒 10×10px 远小于 25% 视口，面积条件亦不触发）。
+        RenderItem Finite() => HatchMany(0xFFFFFF, true, 2001,
+            new[] { (1.0, 1.0), (2.0, 1.0), (2.0, 2.0), (1.0, 2.0) });
+        Assert.True(RenderItemDrawer.IsOverBudget(Projection(10), Finite()));
+
+        var pts = new List<(double X, double Y)>();
+        for (int i = 0; i < 1996; i++) pts.Add(i % 2 == 0 ? (1.0, 1.0) : (2.0, 2.0));
+        for (int i = 0; i < 5; i++) pts.Add((double.NaN, double.NaN));
+        var withSeparators = new RenderItem(RenderKind.Hatch, pts, "0", 0xFFFFFF, null, 0, 0, "H", Fill: true);
+        Assert.Equal(2001, withSeparators.Points.Count);
+        Assert.False(RenderItemDrawer.IsOverBudget(Projection(10), withSeparators));
     }
 
     [AvaloniaFact]
@@ -448,6 +529,17 @@ public class RenderItemDrawerTests
                 for (int dx = -2; dx <= 2; dx++)
                     for (int c = 0; c < 3; c++)
                         max = Math.Max(max, Channel(x + dx, y + dy, c));
+            return max;
+        }
+
+        /// <summary>矩形区域（闭区间、裁剪到帧）三通道最大值；用于字形盒内/外的严格探针。</summary>
+        public int RegionMaxBrightness(int x0, int y0, int x1, int y1)
+        {
+            int max = 0;
+            for (int y = Math.Max(0, y0); y <= Math.Min(Height - 1, y1); y++)
+                for (int x = Math.Max(0, x0); x <= Math.Min(Width - 1, x1); x++)
+                    for (int c = 0; c < 3; c++)
+                        max = Math.Max(max, Channel(x, y, c));
             return max;
         }
 

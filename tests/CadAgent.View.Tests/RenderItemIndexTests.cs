@@ -442,6 +442,34 @@ public class RenderItemIndexTests
         Assert.Equal(new[] { 0, 1, 2 }, visible);
     }
 
+    // ---- 预计算内容包围盒（O(1) 全视图捷径）----
+
+    [Fact]
+    public void ContentBounds_UnionsItemBoxes_IncludingTextExtentAndSkippingNaNSeparators()
+    {
+        var index = new RenderItemIndex(new[]
+        {
+            Line(2, 3, 4, 5),                                    // 0
+            Circle(10, 10, 2),                                   // 1
+            TextItem("ABCD", 5, 5, 2),                           // 2: 字盒向右上延伸 (5,5)-(9.8,7)
+            Hatch(new[] { -1.0, 0.0, double.NaN, 8.0, 9.0 },
+                  new[] { -2.0, 0.0, double.NaN, 1.0, 2.0 }),    // 3: NaN 分隔符不计
+        });
+        AssertBounds(index.ContentBounds, -1, -2, 12, 12); // Circle(10,10,r2) 主导右上界
+    }
+
+    [Fact]
+    public void ContentBounds_NoValidItems_IsNaNEmptyMarker()
+    {
+        Assert.True(double.IsNaN(new RenderItemIndex(Array.Empty<RenderItem>()).ContentBounds.MinX));
+        var degenerate = new RenderItemIndex(new[]
+        {
+            new RenderItem(RenderKind.Polyline, new[] { (double.NaN, double.NaN) }, "0", 0xFFFFFF, null, 0, 0, "X"),
+        });
+        (double minX, double minY, double maxX, double maxY) = degenerate.ContentBounds;
+        Assert.True(double.IsNaN(minX) && double.IsNaN(minY) && double.IsNaN(maxX) && double.IsNaN(maxY));
+    }
+
     // ---- local linear reference = old CanvasViewModel.HitTest + Hits 数学 ----
 
     private static int? LinearFirstHit(

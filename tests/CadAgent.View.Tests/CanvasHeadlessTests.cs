@@ -304,6 +304,98 @@ public class CanvasHeadlessTests
         finally { window.Close(); }
     }
 
+    // ---- 项3 T2 修复轮：画布级裁剪 E2E 与质量 seam ----
+
+    private static RenderItem HatchSquare(double x0, double y0, double size, string layer, string handle) =>
+        new(RenderKind.Hatch,
+            new[] { (x0, y0), (x0 + size, y0), (x0 + size, y0 + size), (x0, y0 + size) },
+            layer, 0xFFFFFF, null, 0, 0, handle, Fill: true);
+
+    [AvaloniaFact]
+    public void Canvas_ZoomedViewport_DrawsPartiallyVisibleItem_AndCullsOffscreenOne()
+    {
+        // 缩放锚在 A 中心：视口（世界 x≈[0.78,2.72]）只覆盖 A(0..2) 一部分，
+        // C(12..14) 完全出屏 → QueryIndices 走视口子集（非全量捷径）。
+        // A 的屏内部分必须照常绘制（索引查询不得漏掉相交项）。
+        RenderItem a = HatchSquare(0, 0, 2, "0", "A");
+        RenderItem c = HatchSquare(12, 0, 2, "0", "C");
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { a, c }, 200, 200);
+        try
+        {
+            (double ax, double ay) = vm.WorldToScreen(1, 1); // A 中心（视口锚点保持不动）
+            vm.ZoomAt(8, ax, ay);
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+
+            (double cx, _) = vm.WorldToScreen(12, 1);
+            Assert.True(cx > canvas.Bounds.Width, "C 须完全出屏（右侧视口外）");
+            (double ix, double iy) = vm.WorldToScreen(1.5, 1); // A 内部、仍在屏内
+            Assert.True(ix > 0 && ix < canvas.Bounds.Width, "A 探针点须在屏内");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ix), (int)Math.Round(iy)) > 150,
+                "部分可见项 A 的屏内填充必须绘制（裁剪不得漏项）");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_HiddenLayer_ItemNotDrawn_WhileVisibleItemDrawn()
+    {
+        // HiddenLayers 非空 → 全量捷径关闭，走 QueryViewport 的隐藏层过滤：
+        // 隐藏层 B 屏内位置必须为背景，可见层 A 照常绘制。
+        RenderItem a = HatchSquare(0, 0, 2, "Visible", "A");
+        RenderItem b = HatchSquare(5, 0, 2, "Hidden", "B");
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { a, b }, 200, 200);
+        try
+        {
+            vm.HiddenLayers.Add("Hidden");
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+
+            (double bx, double by) = vm.WorldToScreen(6, 1);
+            (double ax, double ay) = vm.WorldToScreen(1, 1);
+            Assert.True(bx > 0 && bx < canvas.Bounds.Width, "B 屏内位置须在视口内（证明是隐藏过滤不是裁剪）");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(bx), (int)Math.Round(by)) < 90,
+                "隐藏层图元不得绘制");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ax), (int)Math.Round(ay)) > 150,
+                "可见层图元须照常绘制");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_SetQualityForTests_Interactive_ReachesDraw()
+    {
+        // 退化包围盒（单文本插入点）→ baseScale=1、插入点屏幕 (100,100)。
+        // 3px 文本：Refined 2–6px 画简化条（基线亮、字形带空）；
+        // Interactive 4px 以下 → Skip（基线与字形带均无像素）。
+        var text = new RenderItem(RenderKind.Text, new[] { (0.0, 0.0) }, "0", 0xFFFFFF, "MMMM", 3, 0, "T1");
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { text }, 200, 200);
+        try
+        {
+            (double bx, double by) = vm.WorldToScreen(3, 0); // 基线正上方一点（屏 103,100）
+            window.CaptureRenderedFrame();
+            WriteableBitmap? refined = window.CaptureRenderedFrame();
+            Assert.NotNull(refined);
+            Assert.True(NeighborhoodBrightness(refined!, (int)Math.Round(bx), (int)Math.Round(by)) > 100,
+                "Refined 3px 文本须画简化条（基线落像素）");
+
+            canvas.SetQualityForTests(RenderQuality.Interactive);
+            canvas.InvalidateVisual();
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            WriteableBitmap? interactive = window.CaptureRenderedFrame();
+            Assert.NotNull(interactive);
+            Assert.True(NeighborhoodBrightness(interactive!, (int)Math.Round(bx), (int)Math.Round(by)) < 90,
+                "Interactive 3px 文本须跳过（quality seam 到达 Render）");
+        }
+        finally { window.Close(); }
+    }
+
     /// <summary>Max RGB channel in a 5x5 neighborhood (anti-aliased 1px stroke may
     /// not fully cover the exact mathematical point), bounds-checked.</summary>
     private static int NeighborhoodBrightness(WriteableBitmap frame, int x, int y)

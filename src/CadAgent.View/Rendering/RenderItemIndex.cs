@@ -30,6 +30,7 @@ public sealed class RenderItemIndex
     private readonly Box[] _boxes;
     private readonly int _cellsX, _cellsY;
     private readonly double _gridMinX, _gridMinY, _gridMaxX, _gridMaxY, _cellSize;
+    private readonly bool _hasContent;
     private readonly List<int>?[] _cells;
     private readonly int[] _overflow;
     /// <summary>去重戳（长度=Items.Count）：每查询自增，免去对重复登记项排序。</summary>
@@ -90,6 +91,7 @@ public sealed class RenderItemIndex
         _gridMinY = minY;
         _gridMaxX = maxX;
         _gridMaxY = maxY;
+        _hasContent = true;
         _cellSize = cell;
         _cellsX = AxisCells(width, cell, hi);
         _cellsY = AxisCells(height, cell, hi);
@@ -114,6 +116,14 @@ public sealed class RenderItemIndex
 
         _overflow = overflow.ToArray();
     }
+
+    /// <summary>
+    /// 全部图元包围盒并集（构造时预计算，O(1)；Text 含字盒宽高，比裸插入点保守）。
+    /// 无有效图元 → NaN 角空标记（调用方以 NaN 判空）。
+    /// </summary>
+    public (double MinX, double MinY, double MaxX, double MaxY) ContentBounds =>
+        _hasContent ? (_gridMinX, _gridMinY, _gridMaxX, _gridMaxY)
+                    : (double.NaN, double.NaN, double.NaN, double.NaN);
 
     /// <summary>
     /// 视口矩形查询：返回包围盒与矩形相交（闭区间）且未被隐藏层过滤的图元索引，
