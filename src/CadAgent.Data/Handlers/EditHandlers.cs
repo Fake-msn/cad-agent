@@ -198,6 +198,7 @@ public static class HandlerRegistry
     {
         new AddLineHandler(), new AddTextHandler(),
         new DeleteEntityHandler(), new MoveEntityHandler(), new ChangeLayerHandler(),
+        new SetTextHandler(), new SetAttributeHandler(),
         new InsertBlockHandler(), new LayoutLightingHandler(), new LabelLuminairesHandler(),
         new AddCircleHandler()
     };
