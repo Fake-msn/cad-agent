@@ -18,6 +18,10 @@ public sealed class DeleteEntityHandler : IStepHandler
         if (target == null)
             return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        // 属性定义是实例属性模板（删除会毁全实例属性结构）：任何目标空间（模型/纸面/块定义）
+        // 一律 fail-closed，先于所有者分派，保护不得按空间收窄。
+        if (target.Entity is AttributeDefinition)
+            return new StepResult(false, "属性定义不可删除", "");
         // 移除后 ACadSharp 会清空句柄：审计/返回的目标句柄必须先取。
         string handle = target.Entity.Handle.ToString();
         // 按所有者集合移除：纸面实体不在 Doc.Entities 中，删错集合会静默无效。
@@ -44,9 +48,6 @@ public sealed class DeleteEntityHandler : IStepHandler
                     : EditTargetResolver.FindBlock(s, target.BlockName);
                 if (block is null)
                     return new StepResult(false, $"块定义不存在：{target.BlockName}", "");
-                // 属性定义是实例属性模板（删除会毁全实例属性结构），定义层保护。
-                if (target.Entity is AttributeDefinition)
-                    return new StepResult(false, "属性定义不可删除", "");
                 if (!block.Entities.Remove(target.Entity))
                     return new StepResult(false, "实体移除失败", "");
                 break;

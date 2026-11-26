@@ -35,6 +35,20 @@ public class BlockPlanE2ETests : IDisposable
     private readonly List<string> _drawings = new();
     private readonly string _drawing;
 
+    /// <summary>
+    /// 成功 run 的既定 stderr：夹具无语义标注 → 回归检查输出 1 条提示 + 3 条 NotEvaluable 跳过。
+    /// 逐字钉住（替代旧「不含 未注册」弱断言）：任何新增/变化输出（真正的异常/警告）即为契约漂移。
+    /// </summary>
+    private const string ExpectedRegressionStderr =
+        "提示: 无语义标注，轴号/标高规则未评估（请先 semantic scan/map）\n" +
+        "跳过: [NotEvaluable] R-50001-11.8.4: 规则 R-50001-11.8.4 无语义标注，未评估\n" +
+        "跳过: [NotEvaluable] R-50001-11.8.5: 规则 R-50001-11.8.5 无语义标注，未评估\n" +
+        "跳过: [NotEvaluable] R-50001-8.0.4: 规则 R-50001-8.0.4 无语义标注，未评估";
+
+    /// <summary>stderr 逐字等于既定回归提示（换行归一化；容忍末尾空行）。</summary>
+    private static void AssertExpectedStderr(string stderr) =>
+        Assert.Equal(ExpectedRegressionStderr, stderr.Replace("\r\n", "\n").TrimEnd('\n'));
+
     public BlockPlanE2ETests()
     {
         Directory.CreateDirectory(_project);
@@ -184,7 +198,7 @@ public class BlockPlanE2ETests : IDisposable
         var (code, stdout, stderr) = Run("run", planPath, "--drawing", _drawing);
         Assert.Equal(0, code);
         Assert.Contains("\"ok\":true", stdout.Replace(" ", ""));
-        Assert.True(string.IsNullOrEmpty(stderr) || !stderr.Contains("未注册"), stderr);
+        AssertExpectedStderr(stderr); // 仅既定回归提示（无异常/未注册等意外输出）
 
         // 落盘回读：块定义改动生效
         var after = Probe.Read(_drawing);
@@ -393,6 +407,35 @@ public class BlockPlanE2ETests : IDisposable
         using (var failedParams = JsonDocument.Parse(failed.Entry.ParamsJson))
             Assert.Contains("块不可编辑", failedParams.RootElement.GetProperty("Error").GetString());
         Assert.DoesNotContain(records, r => r.Entry.Kind == "tx-commit");
+        Assert.True(audit.VerifyChain(out _));
+    }
+
+    [Fact]
+    public void ForgedAffectedInstances_EngineIgnores_AuditPreservesVerbatim()
+    {
+        // affectedInstances 仅为审计附注（视图确认计数），引擎不读：伪造值（999）不得改变执行，
+        // 审计须逐字保留计划给出的值（可复算/可追责，不做校验或重写）。
+        var before = Probe.Read(_drawing);
+        string planPath = WritePlan("blk-forged", new[]
+        {
+            Step("move-entity", new
+            {
+                block = TitleName, handle = before.BlockLine.Handle.ToString(),
+                dx = 2, dy = 0, affectedInstances = 999
+            })
+        }, "forged.json");
+
+        var (code, stdout, stderr) = Run("run", planPath, "--drawing", _drawing);
+        Assert.Equal(0, code);
+        Assert.Contains("\"ok\":true", stdout.Replace(" ", ""));
+        AssertExpectedStderr(stderr);
+
+        Assert.Equal(2, Probe.Read(_drawing).BlockLine.StartPoint.X, 6); // 按计划位移执行
+        using var audit = OpenAudit();
+        var records = audit.ReadAll();
+        var step = Assert.Single(records, r => r.Entry.Kind == "step");
+        Assert.Contains("\"affectedInstances\":999", step.Entry.ParamsJson.Replace(" ", ""));
+        Assert.Single(records, r => r.Entry.Kind == "tx-commit");
         Assert.True(audit.VerifyChain(out _));
     }
 }

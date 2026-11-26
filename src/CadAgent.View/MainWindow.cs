@@ -80,7 +80,8 @@ namespace CadAgent.View;
 /// （编辑/问题刷新在闸上阻塞——计划明示）。
 /// 幅面感知 T5 修复波：①布局幅面编辑硬闸（旧语义，项2 A 已替换为空间路由：布局幅面 =
 /// 纸面视图，视口内可编辑模型（纸→模型逆映射）；项2 Plan-2 T5 起纸面编辑启用——
-/// 移动/删除/改层/新建线·字/改文字按 space:"paper"+layout 落盘，块子图元留 Plan-3）；
+/// 移动/删除/改层/新建线·字/改文字按 space:"paper"+layout 落盘；块子图元经「子图元」模式
+/// 按块定义编辑（项2 Plan-3，全实例生效））；
 /// ②OnSheetSelected 补
 /// _editBusy 硬闸（在途编辑期间幅面不切换，selector 索引恢复，防 torn read）。
 /// §4.1④ 勾选→意图补全（Imp#5 deferred 闭合）：问题行 CheckBox（TwoWay IsChecked）
@@ -2137,10 +2138,10 @@ public sealed class MainWindow : Window
 
     /// <summary>
     /// Imp#3：Insert/Dimension 子图元渲染句柄为 "{parent}:{i}"（嵌套 "{top}:{i}:{j}"，
-    /// RenderModel 展开口径）。编辑语义 = 编辑父实体/块整体——剥后缀取顶层句柄传处理器
+    /// RenderModel 展开口径）。默认语义 = 编辑父实体/块整体——剥后缀取顶层句柄传处理器
     /// （EditViewModel.WithHandle 的 ulong.TryParse 只认十进制顶层句柄，后缀会致"非法句柄"
-    /// 拒绝，块/标注几何在视图内 Move/Delete/ChangeLayer 不可达）。独立子图元编辑 deferred
-    /// （spec §12 注记）。三编辑入口（Move/Delete/ChangeLayer）统一经此。
+    /// 拒绝）。独立子图元编辑经「子图元」模式（项2 Plan-3：块定义/块内实体编辑，
+    /// 全实例生效）提供；块子图元路径自带 SourceHandle，不经本方法。三编辑入口统一经此。
     /// </summary>
     private static string ParentHandle(string handle) => handle.Split(':')[0];
 

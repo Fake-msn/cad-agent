@@ -74,8 +74,9 @@ public class BlockEditHeadlessTests
         });
     });
 
-    /// <summary>两实例 + 布局视口 + 纸面线（状态栏目标空间夹具）。</summary>
-    private static string TwoInsertLayoutWithPaperDxf() => DxfFixture.CreateTempDxf(doc =>
+    /// <summary>两实例 + 布局视口 + 纸面线（状态栏目标空间夹具）。
+    /// twist 非 0 → 布局仍登记（尺寸合法）但纸→模型不可映射（块子图元守卫夹具）。</summary>
+    private static string TwoInsertLayoutWithPaperDxf(double twist = 0) => DxfFixture.CreateTempDxf(doc =>
     {
         AddTitleBlock(doc);
         var layout = new Layout("布局1");
@@ -87,6 +88,7 @@ public class BlockEditHeadlessTests
             Height = 700,
             ViewTarget = new XYZ(50, 0, 0),
             ViewHeight = 200,
+            TwistAngle = twist,
         });
         layout.AssociatedBlock!.Entities.Add(
             new Line { StartPoint = new XYZ(100, 100, 0), EndPoint = new XYZ(200, 100, 0) });
@@ -215,8 +217,9 @@ public class BlockEditHeadlessTests
     {
         window.Close();
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); // 编辑测试惰性建库，释放文件句柄
-        File.Delete(path);
-        if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
+        // 清理失败不得掩盖测试结论（Data 侧同口径 try/catch）。
+        try { File.Delete(path); } catch (IOException) { }
+        try { if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true); } catch (IOException) { }
     }
 
     private static Button ToolButton(MainWindow window, string label) =>
@@ -557,10 +560,10 @@ public class BlockEditHeadlessTests
         finally { Cleanup(window, path, projectDir); }
     }
 
-    // ---- 8. 取消确认 → 无 tx、盘上不变 ----
+    // ---- 8. 取消确认 → 无 tx、盘上不变、无 EditCompleted（有界抽水，防 fire-and-forget 假绿） ----
 
     [AvaloniaFact]
-    public void ToggleOn_ConfirmFalse_NoTx()
+    public async Task ToggleOn_ConfirmFalse_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(TwoInsertDxf());
         try
@@ -570,12 +573,27 @@ public class BlockEditHeadlessTests
             window.ConfirmEditOverride = _ => { confirmInvoked = true; return Task.FromResult(false); };
             ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
-            ClickCanvasAtWorld(window, 5, 0);
-            ClickCanvasAtWorld(window, 25, 0);
-            Dispatcher.UIThread.RunJobs();
 
-            Assert.True(confirmInvoked);
-            Assert.Empty(window.Edit!.RecentTxIds);
+            bool editCompleted = false;
+            void Handler() => editCompleted = true;
+            window.Edit!.EditCompleted += Handler;
+            try
+            {
+                ClickCanvasAtWorld(window, 5, 0);
+                ClickCanvasAtWorld(window, 25, 0);
+                // 有界抽水等待确认被调用（回调同步完成；取消分支不得进入编辑执行）。
+                for (int i = 0; i < 50 && !confirmInvoked; i++)
+                {
+                    Dispatcher.UIThread.RunJobs();
+                    await Task.Delay(10);
+                }
+                Dispatcher.UIThread.RunJobs();
+            }
+            finally { window.Edit.EditCompleted -= Handler; }
+
+            Assert.True(confirmInvoked, "块定义确认未被调用（点击未进入块编辑路径）");
+            Assert.False(editCompleted, "取消确认不得产生 EditCompleted（无编辑执行）");
+            Assert.Empty(window.Edit.RecentTxIds);
             var saved = DrawingSession.Load(path);
             Line line = SavedBlockLine(saved, TitleBlockName);
             Assert.Equal(0, line.StartPoint.X, 9);
@@ -831,6 +849,118 @@ public class BlockEditHeadlessTests
             Assert.Empty(window.Edit!.RecentTxIds);
             var saved = DrawingSession.Load(path);
             Assert.Equal(0, SavedBlockLine(saved, TitleBlockName).StartPoint.X, 9); // 盘上不变
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 14. twist 视口 + 子图元模式开：Move 二击 / Delete 均被共享守卫拒绝（无 tx/无确认/无审计）----
+
+    /// <summary>
+    /// 布局视口带旋转（0.3）→ 纸→模型不可映射：子图元模式下块子图元编辑（Move/Delete）
+    /// 必须命中 <c>!route.CanMapModel</c> 共享守卫（先于选中/确认），文案取路由原因。
+    /// Move 走真实二击路径（首击纸面线取基准 → 选中漂移到块子图元 → 第二击复检拒绝）。
+    /// 退化/无视口变体不可达（退化视口不登记为布局幅面且 ComposeLayout 丢弃模型内容），
+    /// 视口上下文为 null 的原因文案由 EditRoutingTests 纯函数层钉住。
+    /// </summary>
+    [AvaloniaFact]
+    public void ToggleOn_TwistedViewport_BlockChildMoveAndDelete_Guarded_NoTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(TwoInsertLayoutWithPaperDxf(twist: 0.3));
+        try
+        {
+            window.SheetSelector!.SelectedIndex = 1; // 布局幅面（旋转不影响登记）
+            Dispatcher.UIThread.RunJobs();
+            EnableSubEntityMode(window);
+            int index = BlockChildIndex(window, RenderKind.Line);
+            Assert.True(index >= 0, "夹具块子图元未入视口");
+
+            bool confirmInvoked = false;
+            window.ConfirmEditOverride = _ => { confirmInvoked = true; return Task.FromResult(true); };
+
+            // Move：首击纸面线（允许）→ 选中漂移到块子图元 → 第二击复检须拒绝。
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 150, 100);
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+            RenderItem child = window.Canvas.Items.First(i => i.BlockName == TitleBlockName
+                && i.Space == RenderSpace.ModelSpace && i.Kind == RenderKind.Line && !i.Locked);
+            Assert.True(window.Canvas.SelectByHandle(child.Handle));
+            ClickCanvasAtWorld(window, 400, 200); // 空点：复检 !CanMapModel → 拒绝
+            Assert.False(confirmInvoked);
+            Assert.True(window.EditError?.IsVisible ?? false);
+            Assert.Contains("视口带旋转，布局内模型编辑暂不支持", window.EditError!.Text);
+
+            // Delete：选中块子图元后按删除 → 守卫先于确认。
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.Canvas.Select(index);
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.False(confirmInvoked);
+            Assert.Contains("视口带旋转，布局内模型编辑暂不支持", window.EditError!.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
+            // 块定义盘上不变（未被移动/删除）。
+            var saved = DrawingSession.Load(path);
+            Line line = SavedBlockLine(saved, TitleBlockName);
+            Assert.Equal(0, line.StartPoint.X, 9);
+            Assert.Equal(10, line.EndPoint.X, 9);
+            Assert.Equal(2, saved.Doc.Entities.OfType<Insert>().Count());
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 15. 子图元模式开 + Move 二击选中漂移：第二击复检按块定义执行（两实例同步）----
+
+    /// <summary>
+    /// 镜像模式关的漂移用例（PaperEditHeadlessTests #11）：首击纸面线取基准后选中漂移到块子图元，
+    /// 第二击复检 → BlockChild → 块定义移动（block 参数 + affectedInstances 审计），两实例同步。
+    /// 基准沿用首击图元（当前设计），世界增量 ÷ 视口比例后经插入链逆解为块局部增量。
+    /// </summary>
+    [AvaloniaFact]
+    public async Task ToggleOn_Move_SelectionDriftToBlockChild_SecondClick_EditsBlockDefinition()
+    {
+        (MainWindow window, string path, string projectDir) = Show(TwoInsertLayoutWithPaperDxf());
+        try
+        {
+            window.SheetSelector!.SelectedIndex = 1;
+            Dispatcher.UIThread.RunJobs();
+            EnableSubEntityMode(window);
+
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 150, 100); // 纸面线中点 → 选中 + 基准 (100,100)
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+
+            RenderItem child = window.Canvas.Items.First(i => i.BlockName == TitleBlockName
+                && i.Space == RenderSpace.ModelSpace && i.Kind == RenderKind.Line && !i.Locked);
+            Assert.True(window.Canvas.SelectByHandle(child.Handle));
+            Assert.Equal(child.Handle, window.Canvas.SelectedHandle);
+
+            string? confirmMessage = null;
+            window.ConfirmEditOverride = msg => { confirmMessage = msg; return Task.FromResult(true); };
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 300, 200)); // 世界增量 (200,100)
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            Assert.NotNull(confirmMessage);
+            Assert.Contains($"将修改块定义 {TitleBlockName}", confirmMessage);
+            var saved = DrawingSession.Load(path);
+            Line line = SavedBlockLine(saved, TitleBlockName);
+            Assert.Equal(200.0 / 3.5, line.StartPoint.X, 9); // 世界增量 ÷ 视口比例（s=700/200）
+            Assert.Equal(100.0 / 3.5, line.StartPoint.Y, 9);
+            List<RenderItem> after = window.Canvas.Items
+                .Where(i => i.BlockName == TitleBlockName && i.Kind == RenderKind.Line && !i.Locked)
+                .OrderBy(i => i.Points[0].X).ToList();
+            Assert.Equal(2, after.Count);
+            Assert.Equal(525, after[0].Points[0].X, 6); // 原 325 + 200
+            Assert.Equal(450, after[0].Points[0].Y, 6); // 原 350 + 100
+            Assert.Equal(875, after[1].Points[0].X, 6); // 第二实例同步
+            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
+            AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
+            Assert.Contains("\"block\":\"" + TitleBlockName + "\"", step.Entry.ParamsJson);
+            Assert.Contains("\"affectedInstances\":2", step.Entry.ParamsJson);
         }
         finally { Cleanup(window, path, projectDir); }
     }

@@ -202,6 +202,38 @@ public class BlockEditHandlerTests : IDisposable
         Assert.Equal(before, adef.Layer.Name);
     }
 
+    // ---- move-entity：镜像法向块内 Circle（OCS 增量）----
+
+    [Fact]
+    public void Move_BlockMirroredNormalCircle_OcsDelta_BothInstancesFollow()
+    {
+        // 法向 (0,0,-1)：WCS dx/dy 须逆投影到 OCS（odx=-dx, ody=dy），与渲染侧同口径。
+        var (s, _, _, _, _, _, _, _) = New();
+        var circle = new Circle { Center = new XYZ(5, 5, 0), Radius = 2, Normal = new XYZ(0, 0, -1) };
+        var mirror = new BlockRecord("MIRROR_EDIT");
+        mirror.Entities.Add(circle);
+        s.Doc.BlockRecords.Add(mirror);
+        var first = new Insert(mirror) { InsertPoint = new XYZ(0, 0, 0) };
+        var second = new Insert(mirror) { InsertPoint = new XYZ(80, 0, 0) };
+        s.Doc.Entities.Add(first);
+        s.Doc.Entities.Add(second);
+        PaperFixtures.ForceHandle(circle, 7401);
+
+        var r = new MoveEntityHandler().Apply(s, P(new
+        {
+            handle = "7401", block = mirror.Name, dx = 3.0, dy = 4.0
+        }));
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(2, circle.Center.X, 6); // 5 + (-3)
+        Assert.Equal(9, circle.Center.Y, 6); // 5 + (+4)
+        // 两实例共享同一块定义：经任一实例可达的圆即同一对象（全实例同步的证据）。
+        Assert.Same(mirror, first.Block);
+        Assert.Same(mirror, second.Block);
+        Assert.Same(circle, first.Block!.Entities.OfType<Circle>().Single());
+        Assert.Same(circle, second.Block!.Entities.OfType<Circle>().Single());
+    }
+
     // ---- delete-entity：从块定义集合移除 ----
 
     [Fact]
@@ -239,6 +271,25 @@ public class BlockEditHandlerTests : IDisposable
         Assert.Contains(adef, block.Entities); // 定义模板保护：删除失败不改集合
     }
 
+    [Fact]
+    public void Delete_NonBlockAttributeDefinition_Rejected()
+    {
+        // ADEF 删除保护不按所有者空间收窄：顶层出现（脏图）同样 fail-closed，实体保留。
+        var (s, _, _, _, _, _, _, _) = New();
+        var adef = new AttributeDefinition
+        {
+            Tag = "T", Value = "默认值", InsertPoint = new XYZ(7, 8, 0)
+        };
+        PaperFixtures.ForceHandle(adef, 7203);
+        s.Doc.Entities.Add(adef);
+
+        var r = new DeleteEntityHandler().Apply(s, P(new { handle = "7203" }));
+
+        Assert.False(r.Ok);
+        Assert.Equal("属性定义不可删除", r.Error);
+        Assert.Contains(adef, s.Doc.Entities); // 实体保留（失败先于移除）
+    }
+
     // ---- change-layer ----
 
     [Fact]
@@ -267,6 +318,26 @@ public class BlockEditHandlerTests : IDisposable
         Assert.True(r.Ok, r.Error);
         Assert.Equal("新图名", text.Value);
         Assert.Equal(text.Handle.ToString(), r.TargetHandle);
+    }
+
+    [Fact]
+    public void SetText_BlockInternalMText_ChangesValue()
+    {
+        // 块内 MText 走块定义路径：多行值可改（不得被单行 TEXT 语义拦截）。
+        var (s, block, _, _, _, _, _, _) = New();
+        var mtext = new MText { Value = "多行旧值", InsertPoint = new XYZ(1, 3, 0) };
+        PaperFixtures.ForceHandle(mtext, 7301);
+        block.Entities.Add(mtext);
+
+        var r = new SetTextHandler().Apply(s, P(new
+        {
+            handle = "7301", block = block.Name, text = "多行\n新值"
+        }));
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("多行\n新值", mtext.Value);
+        Assert.Equal("7301", r.TargetHandle);
+        Assert.Contains(mtext, block.Entities);
     }
 
     [Fact]
@@ -377,6 +448,21 @@ public class BlockEditHandlerTests : IDisposable
         Assert.False(r.Ok);
         Assert.StartsWith("非法 block 参数: 1.5", r.Error);
         Assert.Equal(0, line.StartPoint.X, 6);
+    }
+
+    [Fact]
+    public void BlockPath_EmptyBlockName_RejectedAsUnknownBlockName()
+    {
+        // 空串 block 属"查无此块"（不是"非法参数"）：文案钉住实际输出（块名回显为空）。
+        var (s, _, line, _, _, _, _, _) = New();
+        var r = new MoveEntityHandler().Apply(s, P(new
+        {
+            handle = line.Handle.ToString(), block = "", dx = 1, dy = 1
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("未知块名: ", r.Error);
+        Assert.Contains(line, s.Doc.BlockRecords.First(b => b.Name == EditBlockFixtures.TitleName).Entities);
+        Assert.Equal(0, line.StartPoint.X, 6); // 失败先于变更
     }
 
     [Theory]

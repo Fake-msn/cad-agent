@@ -244,6 +244,56 @@ public class BlockEditResolverTests : IDisposable
     }
 
     [Fact]
+    public void Resolve_IntegerBlockParam_MatchesNumericBlockName()
+    {
+        // 数字 block 参数按 invariant 十进制串匹配同名块（ReadBlockName 契约）。
+        var (s, _, _) = New();
+        var numeric = new BlockRecord("123");
+        var numericLine = new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 1, 0) };
+        numeric.Entities.Add(numericLine);
+        s.Doc.BlockRecords.Add(numeric);
+        PaperFixtures.ForceHandle(numericLine, 7501);
+
+        JsonElement p = JsonSerializer.SerializeToElement(new { handle = "7501", block = 123 });
+        Assert.Equal(JsonValueKind.Number, p.GetProperty("block").ValueKind);
+
+        var target = EditTargetResolver.Resolve(s, p);
+        Assert.NotNull(target);
+        Assert.Equal(EditOwnerKind.BlockDefinition, target!.Owner);
+        Assert.Equal("123", target.BlockName);
+        Assert.Same(numericLine, target.Entity);
+    }
+
+    [Fact]
+    public void Resolve_NullBlockParam_BehavesAsAbsent_ThreeSpaceSearch()
+    {
+        // block:null 与缺省同义（HasValue 口径）：模型优先命中，纸面经 layout 限定仍可命中。
+        var (s, _, _) = New();
+        var modelLine = new Line { StartPoint = new XYZ(0, 30, 0), EndPoint = new XYZ(2, 30, 0) };
+        s.Doc.Entities.Add(modelLine);
+        PaperFixtures.ForceHandle(modelLine, 7502);
+        var paperLine = s.Doc.Layouts.First(l => l.Name == BlockFixtures.LayoutName)
+            .AssociatedBlock!.Entities.OfType<Line>().Single();
+
+        JsonElement model = JsonSerializer.SerializeToElement(
+            (object)new { handle = "7502", block = (string?)null });
+        Assert.Equal(JsonValueKind.Null, model.GetProperty("block").ValueKind);
+        var modelTarget = EditTargetResolver.Resolve(s, model);
+        Assert.NotNull(modelTarget);
+        Assert.Equal(EditOwnerKind.Model, modelTarget!.Owner);
+
+        JsonElement paper = JsonSerializer.SerializeToElement(new
+        {
+            handle = paperLine.Handle.ToString(), block = (string?)null, space = "paper",
+            layout = BlockFixtures.LayoutName
+        });
+        var paperTarget = EditTargetResolver.Resolve(s, paper);
+        Assert.NotNull(paperTarget);
+        Assert.Equal(EditOwnerKind.Paper, paperTarget!.Owner);
+        Assert.Same(paperLine, paperTarget.Entity);
+    }
+
+    [Fact]
     public void Resolve_BlockWithModelOrPaperHandle_ReturnsNull()
     {
         // 显式 block 只检索该块自身实体：模型/纸面实体句柄不得回退命中。

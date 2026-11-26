@@ -184,7 +184,8 @@ public static class EditTargetResolver
                 matches.Add(new EditTarget(e, owner, layoutName));
     }
 
-    /// <summary>仅顶层 Insert 的属性（实例语义）；不递归块内 Insert（块定义属 Plan-3）。</summary>
+    /// <summary>仅顶层 Insert 的属性（实例语义）；不递归块内 Insert（块内属性编辑未支持，
+    /// 块定义实体只能经显式 block 路径到达）。</summary>
     private static void AddAttributeMatches(List<EditTarget> matches, CadObjectCollection<Entity> entities,
         string? layoutName, ulong handle)
     {
