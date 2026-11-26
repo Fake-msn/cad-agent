@@ -1579,9 +1579,13 @@ public sealed class MainWindow : Window
                     }),
                     hash, hash, "", ""), result.Path);
             }
-            catch (ReviewReportException ex)
+            catch (Exception ex)
             {
-                SetReportStatus(ex.Message, error: true);
+                // 审计块内任何异常同样不得留下无审计产物（helper 已自删；此处幂等补删）。
+                try { File.Delete(result.Path); } catch { /* 撤销清理失败不掩盖审计错误 */ }
+                SetReportStatus(ex is ReviewReportException
+                    ? ex.Message
+                    : $"审计写入失败，已撤销报告: {ex.Message}", error: true);
                 return;
             }
 

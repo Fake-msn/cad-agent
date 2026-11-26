@@ -139,9 +139,12 @@ public static partial class CommandRouter
                 }),
                 input.DrawingHash, input.DrawingHash, "", ""), result.Path);
         }
-        catch (ReviewReportException ex)
+        catch (Exception ex)
         {
-            stderr.WriteLine(ex.Message);
+            // 审计块内任何异常（含 AuditEntry 构造/序列化）同样不得留下无审计产物：
+            // helper 已自删并包装；其余异常在此补删（幂等）。
+            try { File.Delete(result.Path); } catch { /* 撤销清理失败不掩盖审计错误 */ }
+            stderr.WriteLine(ex is ReviewReportException ? ex.Message : $"审计写入失败，已撤销报告: {ex.Message}");
             return 1;
         }
 

@@ -102,4 +102,12 @@ public sealed class ReviewReportTextTests
         Assert.Equal("跳过检查 — 0 条", ReportText.SectionHeader("跳过检查", input.Skipped.Count));
         Assert.Contains("不可用", ReportText.AuditLine(input.Audit));
     }
+
+    [Fact]
+    public void GroupHeader_EmbedsForceLabelAndCount()
+    {
+        Assert.Equal("必须（Mandatory） — 1 项", ReportText.GroupHeader(RuleForce.Mandatory, 1));
+        Assert.Equal("应当（Recommended） — 2 项", ReportText.GroupHeader(RuleForce.Recommended, 2));
+        Assert.Equal("可（Informational） — 0 项", ReportText.GroupHeader(RuleForce.Informational, 0));
+    }
 }
