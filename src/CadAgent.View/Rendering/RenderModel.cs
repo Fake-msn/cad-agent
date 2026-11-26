@@ -11,6 +11,9 @@ namespace CadAgent.View.Rendering;
 /// <summary>Flat render primitive kinds produced by <see cref="RenderModelBuilder"/>.</summary>
 public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 
+/// <summary>渲染图元所属空间：布局幅面下纸面实体=PaperSpace，视口内模型=ModelSpace。</summary>
+public enum RenderSpace { ModelSpace, PaperSpace }
+
 /// <summary>
 /// One flat render primitive. Point conventions (all coordinates already transformed
 /// into drawing space by the builder):
@@ -35,6 +38,10 @@ public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 /// DashStyle；<see cref="Fill"/> 仅对 Hatch 有意义：true=实心
 /// 填充（IsSolid），false=仅描边界轮廓（图案填充的图案线生成 deferred）。
 /// 可选参置于 Handle 之后（Closed→DashPattern→Fill 顺序追加，位置构造兼容）。
+/// 空间/来源（项2 F）：<see cref="Space"/> 区分纸面/模型图元；<see cref="SourceHandle"/>
+/// 为原始实体句柄（Insert 子图元不含子索引后缀，溯源用），<see cref="BlockName"/>/
+/// <see cref="ParentInsertChain"/> 记录块展开路径，<see cref="AttributeTag"/> 标属性
+/// 值文本的 ATTRIB 标签；<see cref="Locked"/> 为将来编辑锁定位（默认 false）。
 /// </summary>
 public sealed record RenderItem(
     RenderKind Kind,
@@ -47,7 +54,13 @@ public sealed record RenderItem(
     string Handle,
     bool Closed = false,
     IReadOnlyList<double>? DashPattern = null,
-    bool Fill = false);
+    bool Fill = false,
+    bool Locked = false,
+    RenderSpace Space = RenderSpace.ModelSpace,
+    string? SourceHandle = null,
+    string? BlockName = null,
+    IReadOnlyList<string>? ParentInsertChain = null,
+    string? AttributeTag = null);
 
 /// <summary>
 /// DrawingSession -> flat render-item list (plan 4 task 2). Pure logic: no Avalonia

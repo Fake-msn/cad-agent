@@ -1191,4 +1191,18 @@ public class RenderModelTests
         Assert.Single(kept);
         Assert.Equal("C2", kept[0].Handle);
     }
+
+    // ---- 项2 F 基础（Task 1）：RenderItem 空间/来源可选字段默认值（位置构造兼容）----
+
+    [Fact]
+    public void RenderItem_NewOptionalFields_DefaultToModelSpaceIdentity()
+    {
+        var item = new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (1.0, 0.0) }, "0", 0xFFFFFF, null, 0, 0, "1A");
+        Assert.Equal(RenderSpace.ModelSpace, item.Space);
+        Assert.Null(item.SourceHandle);
+        Assert.Null(item.BlockName);
+        Assert.Null(item.ParentInsertChain);
+        Assert.Null(item.AttributeTag);
+        Assert.False(item.Locked);
+    }
 }
