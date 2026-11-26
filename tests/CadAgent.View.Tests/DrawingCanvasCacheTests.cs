@@ -151,6 +151,13 @@ public class DrawingCanvasCacheTests
         return count;
     }
 
+    /// <summary>让真实 DispatcherTimer 在 Dispatcher 主循环中到点（RunJobs 自身不推进计时器）。</summary>
+    private static async Task PumpTimersAsync(int ms = 200)
+    {
+        await Task.Delay(ms);
+        Dispatcher.UIThread.RunJobs();
+    }
+
     // ---- 1. 缓存 blit 与直绘等价 ----
 
     [AvaloniaFact]
@@ -282,7 +289,7 @@ public class DrawingCanvasCacheTests
     public void Cache_ZoomDuringInteraction_ScalesOldBitmap_ThenForceRefinedRebuilds()
     {
         (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(NormalItems());
-        canvas.IdleRefineMs = 0; // 不装真实墙钟计时器：交互期行为由 ForceRefinedForTests 收尾
+        canvas.IdleRefineMs = 5_000; // 真实计时器但不至在测试内到点：交互期行为由 ForceRefinedForTests 收尾
         try
         {
             WriteableBitmap initial = Capture(window);
@@ -293,8 +300,9 @@ public class DrawingCanvasCacheTests
             WriteableBitmap scaled = Capture(window);
 
             Assert.Equal(RenderQuality.Interactive, canvas.Quality);
-            Assert.Equal("概览", canvas.LastRenderNote);
-            Assert.False(canvas.HasIdleTimer);
+            // 显示的是 Refined 位图按比例缩放 → 不标「概览」（只有交互档位图才标）
+            Assert.Null(canvas.LastRenderNote);
+            Assert.True(canvas.HasIdleTimer, "交互期须装真实静止计时器");
             Assert.Equal(baseline, canvas.BaseRenderCount); // 交互期只缩放旧位图
 
             vm.ZoomAt(3, 120, 100); // 继续放大 → 旧位图更明显的插值差
@@ -591,14 +599,14 @@ public class DrawingCanvasCacheTests
     // ---- 8. 编辑工具点击触发交互档 ----
 
     [AvaloniaFact]
-    public void ToolClick_StartsInteraction_NoImmediateRebuild_ForceRefinedRestores()
+    public void ToolClick_Consumed_StartsInteraction_RefinedBitmapNoOverview_RefineNoRebuild()
     {
         (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(NormalItems());
-        canvas.IdleRefineMs = 0; // 不装真实计时器
+        canvas.IdleRefineMs = 5_000; // 真实计时器但不至在测试内到点
         try
         {
             int routed = 0;
-            // 模拟 Line 工具第一击：消费点击并置预览锚点（触发重绘）
+            // 模拟 Line 工具第一击：消费点击并置预览锚点（触发重绘，但不改视图）
             vm.ToolClickHandler = (x, y) => { routed++; vm.SetPendingPoint((x, y)); return true; };
             Capture(window);
             int baseline = canvas.BaseRenderCount;
@@ -610,15 +618,163 @@ public class DrawingCanvasCacheTests
 
             Assert.Equal(1, routed);
             Assert.Equal(RenderQuality.Interactive, canvas.Quality);
-            Assert.Equal("概览", canvas.LastRenderNote);
+            Assert.True(canvas.HasIdleTimer, "消费的点击属交互 → 须装静止计时器");
+            Assert.Null(canvas.LastRenderNote); // 显示 Refined 位图 → 不标「概览」
             Assert.Equal(baseline, canvas.BaseRenderCount); // 工具点击不触发整幅重建
 
-            canvas.ForceRefinedForTests();
+            int beforeRefine = canvas.BaseRenderCount;
+            canvas.ForceRefinedForTests(); // 视图/质量未变 → 精绘不重建
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasIdleTimer);
             Dispatcher.UIThread.RunJobs();
             Capture(window);
             Assert.Null(canvas.LastRenderNote);
+            Assert.Equal(beforeRefine, canvas.BaseRenderCount);
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 8a. 未消费的点击（选择）不算交互 ----
+
+    [AvaloniaFact]
+    public async Task SelectClick_Unconsumed_NoInteraction_NoIdleTimer_NoRebuild()
+    {
+        var line = Line(0, 0, 10, 0);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { line }, 200, 200);
+        canvas.IdleRefineMs = 20; // 短间隔：若误标交互，计时器会在 20ms 后真的到点精绘
+        try
+        {
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+            int routed = 0;
+            // MainWindow 恒装 handler；无活动工具 → 返回 false（未消费）
+            vm.ToolClickHandler = (_, _) => { routed++; return false; };
+
+            (double x, double y) = vm.WorldToScreen(5, 0);
+            window.MouseDown(new Point(x, y), MouseButton.Left);
+            window.MouseUp(new Point(x, y), MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.Equal(1, routed);          // 先经 handler
+            Assert.Equal(0, vm.SelectedIndex); // 未消费 → 走默认选择
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasIdleTimer, "选择不得装静止计时器");
+
+            // 若误标交互，20ms 静止计时器会在此期间到点并重建（计数/注记会变）
+            await PumpTimersAsync();
+            Capture(window);
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasIdleTimer);
+            Assert.Null(canvas.LastRenderNote);
+            Assert.True(baseline == canvas.BaseRenderCount, "选择点击不得触发精绘重建");
+
+            // handler 缺失（VM-only 画布）同样只选择、不交互
+            vm.ToolClickHandler = null;
+            vm.Select(null);
+            Dispatcher.UIThread.RunJobs();
+            window.MouseDown(new Point(x, y), MouseButton.Left);
+            window.MouseUp(new Point(x, y), MouseButton.Left);
+            await PumpTimersAsync();
+            Capture(window);
+
+            Assert.Equal(0, vm.SelectedIndex);
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasIdleTimer);
+            Assert.Null(canvas.LastRenderNote);
+            Assert.True(baseline == canvas.BaseRenderCount, "选择点击不得重建基元层");
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 8b. 「概览」只跟交互档位图：交互档重建后才标注 ----
+
+    [AvaloniaFact]
+    public void Interaction_InteractiveBitmap_ShowsOverview_RefineRebuildsAndClearsNote()
+    {
+        var line = Line(0, 0, 10, 0);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { line }, 200, 200);
+        canvas.IdleRefineMs = 5_000;
+        try
+        {
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+
+            window.MouseWheel(new Point(100, 100), new Vector(0, 0)); // 仅标记交互（缩比 1）
+            vm.PanBy(0, 200); // 越界平移 → 交互期重建（Interactive 位图）
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+
+            Assert.Equal(RenderQuality.Interactive, canvas.Quality);
             Assert.Equal(baseline + 1, canvas.BaseRenderCount);
+            Assert.Equal("概览", canvas.LastRenderNote); // 交互档位图 → 标概览
+
+            int refined = canvas.BaseRenderCount;
+            canvas.ForceRefinedForTests(); // 交互档 → Refined：须重建并清注记
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.Equal(refined + 1, canvas.BaseRenderCount);
+            Assert.Null(canvas.LastRenderNote);
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 8c. 原点属缓存 key（仅 MinX 变化也失效）----
+
+    [AvaloniaFact]
+    public void Cache_OriginChangeOnly_Rebuilds()
+    {
+        var line = Line(0, 0, 10, 0);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { line }, 200, 200);
+        try
+        {
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+            double scale = vm.Scale, offsetX = vm.OffsetX, offsetY = vm.OffsetY;
+
+            (double minX, double minY, double maxX, double maxY) = RenderModelBuilder.Bounds(vm.Items);
+            // 同宽高平移 1 → 仅世界原点变化（scale/offset/viewport/items 全不变）
+            vm.Fit((minX + 1, minY, maxX + 1, maxY), vm.ViewportWidth, vm.ViewportHeight);
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+
+            Assert.Equal(scale, vm.Scale);
+            Assert.Equal(offsetX, vm.OffsetX);
+            Assert.Equal(offsetY, vm.OffsetY);
+            Assert.Equal(0.0, vm.Pan.X);
+            Assert.True(canvas.BaseRenderCount > baseline, "仅原点变化也须重建（原点属缓存 key）");
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 8d. 短间隔真实计时器确实到点精绘（无视图变化则不重建）----
+
+    [AvaloniaFact]
+    public async Task IdleTimer_ShortInterval_FiresRefine_WithoutViewChangeNoRebuild()
+    {
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(NormalItems());
+        canvas.IdleRefineMs = 20; // 短间隔：真实验证计时器会到点（非「不装计时器」的空断言）
+        try
+        {
+            vm.ToolClickHandler = (_, _) => true; // 消费但不改视图
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+
+            window.MouseDown(new Point(120, 100), MouseButton.Left);
+            window.MouseUp(new Point(120, 100), MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(RenderQuality.Interactive, canvas.Quality);
+            Assert.True(canvas.HasIdleTimer, "IdleRefineMs>0 时交互须装真实计时器");
+
+            await PumpTimersAsync();
+            Assert.False(canvas.HasIdleTimer, "静止计时器须在短间隔后到点");
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.Equal(baseline, canvas.BaseRenderCount); // 视图/质量未变 → 精绘不重建
+
+            Capture(window);
+            Assert.Null(canvas.LastRenderNote);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
         }
         finally { window.Close(); }
     }

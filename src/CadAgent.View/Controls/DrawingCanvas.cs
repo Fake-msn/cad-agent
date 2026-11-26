@@ -165,19 +165,23 @@ public sealed class DrawingCanvas : Control
 
         // T6 对比叠加：diff 模式直接绘（全量语义），不进缓存；关 diff 后按需重建。
         DiffOverlay? diff = ViewModel.DiffOverlay;
+        bool baseInteractive; // 基元层实际呈现的是否交互档（注记「概览」只跟它走，不跟 Quality）
         if (diff is not null)
         {
             DisposeCache();
             RenderDiff(context, projection, diff);
+            baseInteractive = Quality == RenderQuality.Interactive;
         }
         else if (TryDrawFromCache(context, projection))
         {
             // 基元来自缓存位图；选中/高亮叠加实时绘制（不烘焙，受 §3.2 预算）。
+            baseInteractive = _cacheQuality == RenderQuality.Interactive;
             DrawSelectionOverlay(context, projection);
         }
         else
         {
             RenderBase(context, projection);
+            baseInteractive = Quality == RenderQuality.Interactive;
         }
 
         // 天读证据：中心线叠加（ShowCenterlines 开时绘制；只读，不参与命中/选择）。
@@ -195,13 +199,13 @@ public sealed class DrawingCanvas : Control
             context.DrawLine(PreviewPen, new Point(anchor.X, anchor.Y - 6), new Point(anchor.X, anchor.Y + 6));
         }
 
-        UpdateRenderNote();
+        UpdateRenderNote(baseInteractive);
     }
 
-    /// <summary>状态注记：叠加降级优先（数据在途），其次交互概览。</summary>
-    private void UpdateRenderNote() =>
+    /// <summary>状态注记：叠加降级优先（数据在途），其次基元层为交互档位图时标「概览」。</summary>
+    private void UpdateRenderNote(bool baseInteractive) =>
         LastRenderNote = _drawer.LastSelectionDowngraded ? "高亮为包围盒（图元过密）"
-            : Quality == RenderQuality.Interactive ? "概览"
+            : baseInteractive ? "概览"
             : null;
 
     /// <summary>
@@ -459,16 +463,35 @@ public sealed class DrawingCanvas : Control
         RefineNow();
     }
 
-    /// <summary>静止精绘：先停表（不得再触发一次精绘）、回 Refined、立即重建缓存并请求重绘。</summary>
+    /// <summary>静止精绘：先停表；视图/质量未变（缓存已是当前 Refined 快照）则只清注记，不重建。</summary>
     private void RefineNow()
     {
         StopIdleTimer();
         _interacting = false;
         Quality = RenderQuality.Refined;
+        CanvasProjection projection = CanvasProjection.From(ViewModel);
+        if (CacheIsRefinedSnapshot(projection))
+        {
+            // 无变化的精绘（如工具点击后静止）：不重新栅格化；仍显示「概览」时清注记并重绘一次。
+            if (LastRenderNote is not null)
+            {
+                LastRenderNote = null;
+                InvalidateVisual();
+            }
+            return;
+        }
         if (_cacheBitmap is not null && Bounds.Width > 0 && Bounds.Height > 0)
-            RebuildCache(CanvasProjection.From(ViewModel));
+            RebuildCache(projection);
         InvalidateVisual();
     }
+
+    /// <summary>缓存即当前视图的 Refined 快照：结构键（含原点）+ 缩放 + 锚点均一致。</summary>
+    private bool CacheIsRefinedSnapshot(CanvasProjection projection) =>
+        _cacheBitmap is not null
+        && _cacheQuality == RenderQuality.Refined
+        && CacheStructureMatches(projection)
+        && Math.Abs(_cacheScale - projection.Scale) <= 1e-12
+        && _cachePan == (projection.PanX, projection.PanY);
 
     private void StopIdleTimer()
     {
@@ -588,12 +611,13 @@ public sealed class DrawingCanvas : Control
         }
         else if (point.Properties.IsLeftButtonPressed)
         {
-            // 编辑工具点击同属交互（brief：滚轮/中键拖动/工具点击触发）——先切交互档，
-            // 避免点击瞬间同步重建整幅基元缓存；静止 150ms 后精绘。
-            if (ViewModel.ToolClickHandler is not null) BeginInteraction();
             (double wx, double wy) = ViewModel.ScreenToWorld(point.Position.X, point.Position.Y);
-            // T9：工具点击拦截（MainWindow 按 ActiveTool 路由）；未消费 → 默认选择。
-            if (ViewModel.ToolClickHandler is not { } handler || !handler(wx, wy))
+            // T9：工具点击拦截（MainWindow 按 ActiveTool 路由）。只有「消费」才算交互——点击瞬间
+            // 复用已烘焙位图、不整幅同步重建，静止 150ms 后精绘；未消费 → 默认选择（选择不是交互：
+            // 不切交互档、不装计时器，避免每次选中都白重建一次）。
+            bool consumed = ViewModel.ToolClickHandler?.Invoke(wx, wy) ?? false;
+            if (consumed) BeginInteraction();
+            else
             {
                 double tolerance = PickTolerancePixels / ViewModel.Scale;
                 ViewModel.Select(ViewModel.HitTest(wx, wy, tolerance));

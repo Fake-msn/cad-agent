@@ -53,7 +53,7 @@
 ## 3. §2 LOD（两阶段）
 
 ### 3.1 质量档
-- `RenderQuality { Interactive, Refined }`；`DrawingCanvas` 交互期（pan/zoom/拖动）用 Interactive，停止交互 150ms 后以 Refined 重绘一次（DispatcherTimer）。
+- `RenderQuality { Interactive, Refined }`；`DrawingCanvas` 交互期（滚轮缩放 / 中键平移拖动 / 编辑工具点击）用 Interactive，停止交互 150ms 后以 Refined 重绘一次（DispatcherTimer）。
 - 测试 seam：`internal void SetQualityForTests(RenderQuality q)`（计时器仅在生产路径触发；headless 测试直接切档，不依赖真实计时）。
 - 阈值（Refined / Interactive）：
 
@@ -76,9 +76,9 @@
 
 ## 4. §3 位图平移缓存（DrawingCanvas）
 
-- 缓存内容：当前 Zoom/尺寸/Items/隐藏层/diff 状态下的视口位图，**四周外扩 128px**。
+- 缓存内容：当前 Zoom/尺寸/Items/隐藏层状态下的视口位图，**每边外扩 128px**（长/宽各 +2×128）。
 - pan：新旧视口在缓存范围内 → 直接 blit 偏移（含 InterpolationMode.None）；超出边距 → 重建缓存。
-- 失效：Zoom 变化（交互期先缩放旧位图，静止 150ms 重建）、控件尺寸/DPI 缩放、`Refresh`（编辑/撤销）、HiddenLayers 变化、Diff 开关。
+- 失效：Zoom 变化（交互期先缩放旧位图，静止 150ms 重建）、控件尺寸/DPI 缩放、`Refresh`（编辑/撤销）、HiddenLayers 变化、世界原点变化；Diff 开关**绕过缓存**（diff 帧直绘并释放缓存位图，diff 内容不进缓存）。
 - 叠加层（选中/高亮/中心线/预览/悬停）不烘焙进缓存，实时绘制在 blit 之后；叠加层自身走 §3.2 预算。
 - 内存：缓存 ≈ 视口面积+四周 128px（1600×1000+128 ≈9.3MB/位）；单缓存，重建先释放旧位图再渲染
   （DPI=2 时像素面积 ×4，缓存约 37MB/位——峰值仍按单缓存披露，Skia 渲染目标内部可能临时再分配）。
