@@ -23,8 +23,9 @@ namespace CadAgent.TArchBridge
         [CommandMethod("CADAGENT_TARCH_READ")]
         public void ReadCmd()
         {
-            var doc = Application.DocumentManager.MdiActiveDocument;
-            var ed = doc.Editor;
+            // 消息面仍走活动文档编辑器（命令行输出与目标文档无关）；目标文档按请求名解析（见下）。
+            var active = Application.DocumentManager.MdiActiveDocument;
+            var ed = active.Editor;
             string channel = BridgeFiles.ChannelDir();
             // 通道不可用（env 未设置/空串/目录不存在）：只提示，不抛异常、不写任何文件。
             if (string.IsNullOrEmpty(channel) || !System.IO.Directory.Exists(channel))
@@ -44,8 +45,11 @@ namespace CadAgent.TArchBridge
                 var req = BridgeRequest.Parse(System.IO.File.ReadAllText(p.ReqPath));
                 // M10（复审修复波）：命令只服务 op=read——错 op 请求一律拒绝（不碰库）。
                 req.RequireOp("read");
-                if (!string.Equals(System.IO.Path.GetFileName(doc.Name), System.IO.Path.GetFileName(req.Dwg), StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("错图: 当前文档 " + doc.Name + " ≠ " + req.Dwg);
+                // 目标文档按请求 dwg 名在 DocumentManager 内解析（不再用 MdiActiveDocument）：
+                // 宿主 Documents.Open 打开新图后未必激活它——真机 T5（elec-tdbe-01）实证活动文档
+                // 仍是 Drawing1.dwg，旧"错图"守卫把正确打开的请求误判为错图。按名解析让"打开即读、
+                // 与激活状态无关"；请求的图确实未打开时仍响亮失败（ResolveTargetDocument 抛出）。
+                Document doc = ResolveTargetDocument(req.Dwg);
                 ReadInto(result, doc.Database, req.MaxDepth, req.IncludeBlockDefs);
             }
             catch (System.Exception ex)
@@ -67,6 +71,27 @@ namespace CadAgent.TArchBridge
                 return;
             }
             ed.WriteMessage("\nCADAGENT_TARCH_READ done\n");
+        }
+
+        /// <summary>
+        /// 按请求的 dwg 名解析**目标文档**（READ / EXPLODE_REPLACE 共用）。
+        /// 用 DocumentManager 按文件名匹配，而非 <c>MdiActiveDocument</c>：宿主侧的
+        /// <c>Documents.Open</c> 只负责打开，不保证把新文档置为活动文档——真机证据（T5
+        /// elec-tdbe-01）是 Open 成功后活动文档仍为 Drawing1.dwg，任何"以活动文档为准"的命令
+        /// 都会读错图或误报"错图"。按名解析把"命令服务哪张图"与"当前窗口是哪张图"解耦。
+        /// 匹配口径：<see cref="System.IO.Path.GetFileName(string)"/> + OrdinalIgnoreCase（与宿主
+        /// 下发 <c>Path.GetFileName(drawingPath)</c> 的请求口径一致）；未找到即抛——请求的图确实
+        /// 没打开时必须响亮失败，绝不悄悄退回活动文档。
+        /// </summary>
+        internal static Document ResolveTargetDocument(string requestedDwg)
+        {
+            string requestedBase = System.IO.Path.GetFileName(requestedDwg);
+            foreach (Document doc in Application.DocumentManager)
+            {
+                if (string.Equals(System.IO.Path.GetFileName(doc.Name), requestedBase, StringComparison.OrdinalIgnoreCase))
+                    return doc;
+            }
+            throw new InvalidOperationException("目标文档未打开: " + requestedDwg);
         }
 
         internal static void ReadInto(BridgeResult result, Database db, int maxDepth, bool includeBlockDefs)

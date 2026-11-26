@@ -25,6 +25,12 @@ public sealed class DiffOverlay
 }
 
 /// <summary>
+/// 中心线叠加段（天读证据）：世界坐标直段 + 来源实体句柄（只读叠加，不参与命中/选择）。
+/// 数据来自 ExplodeEvidence.CenterlineJson（kind=line），由 DeepReadViewModel 解析。
+/// </summary>
+public sealed record CenterlineSeg(string Handle, double X1, double Y1, double X2, double Y2);
+
+/// <summary>
 /// 画布视图模型（计划4 T3）：纯 C#，无 Avalonia 依赖，可单测。
 /// 变换约定（brief）：
 /// screenX = (worldX-minX)*baseScale*Zoom + panX + offsetX；
@@ -54,6 +60,7 @@ public sealed class CanvasViewModel
     private double _viewportW, _viewportH;
     private double _offsetX, _offsetY;
     private readonly HashSet<string> _highlightedHandles = new(StringComparer.Ordinal);
+    private bool _showCenterlines;
 
     public CanvasViewModel(IReadOnlyList<RenderItem> items) => Items = items;
 
@@ -131,6 +138,52 @@ public sealed class CanvasViewModel
     {
         DiffOverlay = overlay;
         RenderInvalidated?.Invoke();
+    }
+
+    /// <summary>
+    /// 中心线叠加段（天读证据，只读）：SetCenterlines 替换并触发重绘；
+    /// 仅 <see cref="ShowCenterlines"/> 时绘制，不参与命中/选择/包围盒。
+    /// </summary>
+    public IReadOnlyList<CenterlineSeg> Centerlines { get; private set; } = Array.Empty<CenterlineSeg>();
+
+    /// <summary>是否绘制中心线叠加（默认关）；变化触发一次重绘。</summary>
+    public bool ShowCenterlines
+    {
+        get => _showCenterlines;
+        set
+        {
+            if (_showCenterlines == value) return;
+            _showCenterlines = value;
+            RenderInvalidated?.Invoke();
+        }
+    }
+
+    /// <summary>替换中心线叠加段（只读预览数据），触发一次重绘。</summary>
+    public void SetCenterlines(IReadOnlyList<CenterlineSeg> segs)
+    {
+        Centerlines = segs ?? Array.Empty<CenterlineSeg>();
+        RenderInvalidated?.Invoke();
+    }
+
+    /// <summary>
+    /// 按真实句柄定位（天读证据行点击）：命中图元含 Insert 展开子图元
+    /// "{handle}:{i}"（与 RenderModel 展开口径一致）→ 沿用 T5 定位模式
+    /// SelectHandles 高亮 + CenterOn 居中。无命中 → 返回 false（不改选择）。
+    /// </summary>
+    public bool SelectByHandle(string handle)
+    {
+        if (string.IsNullOrEmpty(handle)) return false;
+        List<string> matched = Items
+            .Where(i => i.Handle.Length > 0
+                && (string.Equals(i.Handle, handle, StringComparison.Ordinal)
+                    || i.Handle.StartsWith(handle + ":", StringComparison.Ordinal)))
+            .Select(i => i.Handle)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (matched.Count == 0) return false;
+        SelectHandles(matched);
+        CenterOn(matched);
+        return true;
     }
 
     /// <summary>视图状态变化（Fit/ZoomAt/PanBy/Select/Invalidate）→ 画布 InvalidateVisual。</summary>

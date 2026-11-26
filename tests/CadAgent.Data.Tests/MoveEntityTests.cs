@@ -217,6 +217,85 @@ public class MoveEntityTests
         finally { File.Delete(path); }
     }
 
+    // ---- 终审 Important I1：Insert 属性随父移动 ----
+    // 项2 F 按"已放置"坐标渲染属性（RenderModel.EmitAttribute），属性坐标即 INSERT 的
+    // OCS 空间坐标——父移动而属性不动会留下孤悬文字（CAD 不产生该状态）；故属性
+    // InsertPoint/AlignmentPoint 须施加与父相同的 OCS 增量。
+
+    [Fact]
+    public void Move_Insert_MovesAttributesWithParent()
+    {
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("LUM_ATTR");
+            block.Entities.Add(new Line { StartPoint = new XYZ(-1, -1, 0), EndPoint = new XYZ(1, 1, 0) });
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block) { InsertPoint = new XYZ(1, 2, 7) };
+            var attr = new AttributeEntity { Tag = "编号", Value = "L-01" };
+            attr.InsertPoint = new XYZ(1, 2, 7);
+            attr.AlignmentPoint = new XYZ(3, 4, 7);
+            ins.Attributes.Add(attr);
+            doc.Entities.Add(ins);
+        });
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var insert = s.Doc.Entities.OfType<Insert>().Single();
+            var attr = Assert.Single(insert.Attributes);
+            var beforeIp = attr.InsertPoint;
+            var beforeAp = attr.AlignmentPoint;
+            var r = new MoveEntityHandler().Apply(s, P($"{{\"handle\":\"{insert.Handle}\",\"dx\":3,\"dy\":4}}"));
+            Assert.True(r.Ok);
+            var after = Assert.Single(s.Doc.Entities.OfType<Insert>().Single().Attributes);
+            // 属性与父同增量；Z（OCS 高程）保持。
+            Assert.Equal(beforeIp.X + 3, after.InsertPoint.X, 6);
+            Assert.Equal(beforeIp.Y + 4, after.InsertPoint.Y, 6);
+            Assert.Equal(beforeIp.Z, after.InsertPoint.Z, 6);
+            Assert.Equal(beforeAp.X + 3, after.AlignmentPoint.X, 6);
+            Assert.Equal(beforeAp.Y + 4, after.AlignmentPoint.Y, 6);
+            Assert.Equal(beforeAp.Z, after.AlignmentPoint.Z, 6);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Move_MirroredNormalInsert_MovesAttributesWithSameOcsDelta()
+    {
+        // 镜像法向 N=(0,0,-1)：父与属性同施 (odx,ody)=(-3,+4)（属性坐标同属父 OCS 空间）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("LUM_MIRROR");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block) { InsertPoint = new XYZ(10, 20, 0), Normal = new XYZ(0, 0, -1) };
+            var attr = new AttributeEntity { Tag = "T", Value = "M" };
+            attr.InsertPoint = new XYZ(10, 20, 0);
+            attr.AlignmentPoint = new XYZ(12, 22, 0);
+            ins.Attributes.Add(attr);
+            doc.Entities.Add(ins);
+        });
+        try
+        {
+            var s = DrawingSession.Load(path);
+            var insert = s.Doc.Entities.OfType<Insert>().Single();
+            Assert.Equal(-1, insert.Normal.Z, 3); // 镜像法向经 DXF 往返保持
+            var beforeIp = Assert.Single(insert.Attributes).InsertPoint;
+            var beforeAp = insert.Attributes.First().AlignmentPoint;
+            var r = new MoveEntityHandler().Apply(s, P($"{{\"handle\":\"{insert.Handle}\",\"dx\":3,\"dy\":4}}"));
+            Assert.True(r.Ok);
+            var after = s.Doc.Entities.OfType<Insert>().Single();
+            var attr = Assert.Single(after.Attributes);
+            // OCS 增量 (-3,+4)：与父 InsertPoint 同口径（父 10-3=7, 20+4=24）。
+            Assert.Equal(7, after.InsertPoint.X, 6);
+            Assert.Equal(24, after.InsertPoint.Y, 6);
+            Assert.Equal(beforeIp.X - 3, attr.InsertPoint.X, 6);
+            Assert.Equal(beforeIp.Y + 4, attr.InsertPoint.Y, 6);
+            Assert.Equal(beforeAp.X - 3, attr.AlignmentPoint.X, 6);
+            Assert.Equal(beforeAp.Y + 4, attr.AlignmentPoint.Y, 6);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Move_UnsupportedEntity_StillHonestStepFailed()
     {

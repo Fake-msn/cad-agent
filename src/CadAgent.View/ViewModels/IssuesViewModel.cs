@@ -131,6 +131,9 @@ public sealed class IssuesViewModel
     /// <summary>生效强制力为 Mandatory 的问题数（裁定覆写后口径，同 CLI mandatoryViolations）。</summary>
     public int MandatoryCount { get; private set; }
 
+    /// <summary>执行规则数（最近一次评估）。</summary>
+    public int RulesRun { get; private set; }
+
     /// <summary>跳过规则数（豁免/待原件核验/无检查器/检查器异常/无语义标注）。</summary>
     public int RulesSkipped { get; private set; }
 
@@ -139,6 +142,9 @@ public sealed class IssuesViewModel
 
     /// <summary>最近一次刷新失败原因（skill 冲突/文件损坏等）；null=成功。</summary>
     public string? ErrorMessage { get; private set; }
+
+    /// <summary>最近一次评估时语义标注是否存在（报告导出的如实标注用）。</summary>
+    public bool OverlayPresent { get; private set; }
 
     /// <summary>刷新完成（成功或失败）→ UI 重建列表/计数。在调用方上下文触发。</summary>
     public event Action? IssuesChanged;
@@ -171,8 +177,10 @@ public sealed class IssuesViewModel
                     return entry;
                 }).ToList();
                 MandatoryCount = Issues.Count(i => i.Force == RuleForce.Mandatory);
+                RulesRun = summary.RulesRun;
                 RulesSkipped = summary.RulesSkipped;
                 SkippedReasons = summary.StructuredSkips ?? Array.Empty<SkipReason>();
+                OverlayPresent = eval.OverlayPresent;
                 ErrorMessage = null;
 
                 if (_audit is not null && _identity is not null)
@@ -207,6 +215,7 @@ public sealed class IssuesViewModel
                         // 清空列表+ErrorMessage；不崩 UI。
                         Issues = Array.Empty<IssueEntry>();
                         MandatoryCount = 0;
+                        OverlayPresent = false;
                         ErrorMessage = $"检查审计写入失败: {ex.Message}";
                     }
                 }
@@ -215,8 +224,10 @@ public sealed class IssuesViewModel
             {
                 Issues = Array.Empty<IssueEntry>();
                 MandatoryCount = 0;
+                RulesRun = 0;
                 RulesSkipped = 0;
                 SkippedReasons = Array.Empty<SkipReason>();
+                OverlayPresent = false;
                 ErrorMessage = ex.Message;
             }
             IssuesChanged?.Invoke();

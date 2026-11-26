@@ -1191,4 +1191,147 @@ public class RenderModelTests
         Assert.Single(kept);
         Assert.Equal("C2", kept[0].Handle);
     }
+
+    // ---- 项2 F 基础（Task 1）：RenderItem 空间/来源可选字段默认值（位置构造兼容）----
+
+    [Fact]
+    public void RenderItem_NewOptionalFields_DefaultToModelSpaceIdentity()
+    {
+        var item = new RenderItem(RenderKind.Line, new[] { (0.0, 0.0), (1.0, 0.0) }, "0", 0xFFFFFF, null, 0, 0, "1A");
+        Assert.Equal(RenderSpace.ModelSpace, item.Space);
+        Assert.Null(item.SourceHandle);
+        Assert.Null(item.BlockName);
+        Assert.Null(item.ParentInsertChain);
+        Assert.Null(item.AttributeTag);
+        Assert.False(item.Locked);
+    }
+
+    // ---- 项2 F（Task 2）：Insert 属性文本入图 + 图元来源戳记 ----
+
+    [Fact]
+    public void Build_InsertWithAttribute_RendersAttributeText_WithSourceHandleAndTag()
+    {
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("图框");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block) { InsertPoint = new XYZ(10, 20, 0) };
+            ins.Attributes.Add(new AttributeEntity
+            {
+                Tag = "图号", Value = "Z-E01", InsertPoint = new XYZ(5, 5, 0), Height = 2.5
+            });
+            doc.Entities.Add(ins);
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            var items = RenderModelBuilder.Build(session);
+            var attr = Assert.Single(items, i => i.AttributeTag == "图号");
+            Assert.Equal(RenderKind.Text, attr.Kind);
+            Assert.Equal("Z-E01", attr.Text);
+            Assert.EndsWith(":attr:图号", attr.Handle);
+            Assert.NotNull(attr.SourceHandle);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Build_InsertAttribute_UsesPlacedCoordinates_NotBlockLocal()
+    {
+        // DXF ATTRIB 的 10/11 组码是"已放置"坐标（INSERT 的 OCS 最终空间），不是块局部坐标：
+        // 顶层 Insert 的仿射绝不能再施加一次（旧实现全实例偏移数百至数千单位的实证缺陷）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("B");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block)
+            {
+                InsertPoint = new XYZ(100, 200, 0), Rotation = Math.PI / 2,
+                XScale = 1, YScale = 1
+            };
+            var attr = new AttributeEntity { Tag = "T", Value = "V" };
+            attr.InsertPoint = new XYZ(150, 250, 0);
+            attr.AlignmentPoint = new XYZ(150, 250, 0);
+            ins.Attributes.Add(attr);
+            doc.Entities.Add(ins);
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(0, 0, 0), Value = "锚点", Height = 1 });
+        });
+        try
+        {
+            var items = RenderModelBuilder.Build(DrawingSession.Load(path));
+            var attrItem = Assert.Single(items, i => i.AttributeTag == "T");
+            Assert.Equal(150, attrItem.Points[0].X, 6);
+            Assert.Equal(250, attrItem.Points[0].Y, 6);
+            Assert.NotNull(attrItem.SourceHandle);
+            Assert.EndsWith(":attr:T", attrItem.Handle);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Build_AttributeNonDefaultAlignment_UsesAlignmentPoint()
+    {
+        // 非默认对齐（真图标题栏多为居中）的语义锚点是 AlignmentPoint（组码 11），
+        // 而非组码 10 的 InsertPoint。plain TextEntity 口径不变（仍用 InsertPoint）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("B2");
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block) { InsertPoint = new XYZ(0, 0, 0) };
+            var attr = new AttributeEntity
+            {
+                Tag = "C", Value = "居中",
+                HorizontalAlignment = TextHorizontalAlignment.Center,
+                VerticalAlignment = TextVerticalAlignmentType.Middle
+            };
+            attr.InsertPoint = new XYZ(0, 0, 0);
+            attr.AlignmentPoint = new XYZ(5, 5, 0);
+            ins.Attributes.Add(attr);
+            doc.Entities.Add(ins);
+        });
+        try
+        {
+            var items = RenderModelBuilder.Build(DrawingSession.Load(path));
+            var attrItem = Assert.Single(items, i => i.AttributeTag == "C");
+            Assert.Equal(5, attrItem.Points[0].X, 6);
+            Assert.Equal(5, attrItem.Points[0].Y, 6);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Build_InsertChildren_StampedWithBlockNameAndInsertChain()
+    {
+        // 块子图元来源戳记：BlockName=最内层块名，ParentInsertChain=Insert 句柄链（外→内），
+        // SourceHandle=块内实体自身句柄（不带子索引后缀）；顶层实体 SourceHandle 回落自身 Handle。
+        WithSession(doc =>
+        {
+            AddSymBlock(doc);
+            var nest = new BlockRecord("NEST");
+            nest.Entities.Add(new Insert(doc.BlockRecords["SYM"]) { InsertPoint = new XYZ(5, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+            doc.BlockRecords.Add(nest);
+            doc.Entities.Add(new Insert(nest) { InsertPoint = new XYZ(0, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            Assert.Equal(2, items.Count);
+
+            RenderItem top = items[1];
+            Assert.Equal(top.Handle, top.SourceHandle); // 顶层回落自身句柄
+            Assert.Null(top.BlockName);
+            Assert.Null(top.ParentInsertChain);
+
+            RenderItem child = items[0];
+            Assert.Equal("SYM", child.BlockName); // 最内层块名（非 NEST）
+            var topIns = s.Doc.Entities.OfType<Insert>().Single();
+            var nestIns = topIns.Block.Entities.OfType<Insert>().Single();
+            Assert.Equal(new[] { topIns.Handle.ToString(), nestIns.Handle.ToString() },
+                child.ParentInsertChain!.ToArray());
+            Assert.DoesNotContain(":", child.SourceHandle); // 来源句柄不含子索引后缀
+            Assert.Equal(nestIns.Block.Entities.OfType<Line>().Single().Handle.ToString(), child.SourceHandle);
+        });
+    }
 }

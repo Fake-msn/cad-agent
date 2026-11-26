@@ -12,7 +12,10 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CadAgent.Core;
+using CadAgent.Data.Rules;
+using CadAgent.Report;
 using CadAgent.View.Controls;
+using CadAgent.View.Editing;
 using CadAgent.View.Rendering;
 using CadAgent.View.Services;
 using CadAgent.View.ViewModels;
@@ -73,14 +76,21 @@ namespace CadAgent.View;
 /// →人工确认→StepEngine 执行（无审计旁路）；首次云端出境同意提示；执行成功→
 /// 全视图刷新 + 问题清单重评 + 审计 live-rebuild。编排期间会话闸粗粒度持有
 /// （编辑/问题刷新在闸上阻塞——计划明示）。
-/// 幅面感知 T5 修复波：①布局幅面只读硬闸（_layoutSheetActive 结构性标志——编辑
-/// 工具激活/画布点击/删除/撤销/改层一律拒绝，纸面坐标绝不进模型空间；状态栏只读
-/// 注记 + EditError 引导；不做纸→模型逆映射，deferred）；②OnSheetSelected 补
+/// 幅面感知 T5 修复波：①布局幅面编辑硬闸（旧语义，项2 A 已替换为空间路由：布局幅面 =
+/// 纸面视图，视口内可编辑模型（纸→模型逆映射），纸面编辑后续切片）；②OnSheetSelected 补
 /// _editBusy 硬闸（在途编辑期间幅面不切换，selector 索引恢复，防 torn read）。
 /// §4.1④ 勾选→意图补全（Imp#5 deferred 闭合）：问题行 CheckBox（TwoWay IsChecked）
 /// → 填充意图勾选项优先（"{RuleId} [{Force}]: {Suggestion}"）+ 零勾选 mandatory
 /// 兜底（旧格式保持）+ recommended 采纳审计 rule-adopted（Source=rule，经既有
 /// writeAudit/signoffIdentity 同源实例，无旁路）；忽略=未勾选正常决策不留痕。
+/// 天读证据（只读）：左栏第五 tab——DeepReadViewModel 从 .cadagent/semantic.json
+/// 重建五区（原生参数/炸开证据/符号候选/块定义/证据状态）+ 中心线叠加开关
+/// （Canvas.ShowCenterlines，有中心线才可勾选）；a/b/e 区行点击 → Canvas.SelectByHandle
+/// 定位；未命中（TDb 实体仅存在于深读证据）→ 清画布选中/高亮 + 状态栏提示
+/// （下一次成功定位/选中接管清除）。块定义区来源哈希不一致 → 行内明示"图纸可能
+/// 已编辑或来自他图"（tooltip 同口径），哈希缺失 → "—"（不猜）。
+/// 刷新=初始 / 语义扫描·映射完成（SemanticChanged）/ 编辑后 RefreshAfterEdit；
+/// 面板只读（不写审计、不落盘），overlay 损坏 → 行内错误 + 五区清空。
 /// </summary>
 public sealed class MainWindow : Window
 {
@@ -95,9 +105,20 @@ public sealed class MainWindow : Window
     /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
     private const double PickTolerancePixels = 5;
 
+    /// <summary>项2 A：Plan-1 纸面编辑未启用的行内拒绝文案（Route Paper 意图）。</summary>
+    private static string PaperEditMessage(string action) =>
+        $"纸面编辑将在后续切片提供；当前仅视口内可编辑模型（动作: {action}）";
+
     private string _baseStatus = "";
     private string _diffSummary = "";
     private TextBlock? _semanticHeader;
+
+    /// <summary>天读证据五区小节名（与 <see cref="_deepReadSectionHeaders"/> 同序）。</summary>
+    private static readonly string[] DeepReadSectionNames =
+        { "原生参数", "炸开证据", "符号候选", "块定义", "证据状态" };
+
+    /// <summary>天读证据五区小节标题（含计数；随 Reload 刷新；与 DeepReadSectionNames 同序）。</summary>
+    private readonly TextBlock[] _deepReadSectionHeaders = new TextBlock[5];
 
     /// <summary>T10：--skill 目录（MainViewModel 承载）——Issues/Adjudication/Semantic 共用。</summary>
     private readonly IReadOnlyList<string> _skillDirs;
@@ -146,14 +167,17 @@ public sealed class MainWindow : Window
     /// <summary>程序性刷新幅面下拉时抑制 SelectionChanged（避免编辑重建二次刷新/重 Fit）。</summary>
     private bool _suppressSheetSelection;
     /// <summary>
-    /// 修复①：布局幅面只读标志（结构性硬闸，非仅 IsEnabled——RaiseEvent/画布点击
-    /// 可绕过禁用态）。布局幅面激活期间编辑工具一律硬禁：纸面坐标绝不提交进模型
-    /// 空间 Doc.Entities（静默损坏）；不做纸→模型逆映射（纸面编辑非本期语义，deferred）。
-    /// Select 只读选择路径不受影响。
+    /// 幅面类型标志：布局幅面（纸面视图）激活——模型编辑经纸→模型逆映射，纸面编辑
+    /// 本切片未启用（见 EditRouting 守卫）；模型幅面保持直通语义（纸面=模型坐标系）。
     /// </summary>
     private bool _layoutSheetActive;
-    /// <summary>修复①：布局幅面只读引导文本（EditError 通道；状态栏另有只读注记）。</summary>
-    private const string LayoutReadOnlyMessage = "布局幅面为只读视图，编辑请切回模型幅面";
+
+    /// <summary>
+    /// 当前布局幅面的视口上下文（纸→模型逆映射/视口矩形）；模型幅面或无可用视口
+    /// （纸边界/退化）为 null。由 ItemsForSheet 与图元同源计算，空间判定唯一经
+    /// <see cref="EditRouting.Route"/>（本类不重复推导 Space/Locked/twist 谓词）。
+    /// </summary>
+    private LayoutViewportContext? _layoutViewport;
     /// <summary>窗口标题图纸名（状态栏 _baseStatus 重建用）。</summary>
     private string _title = "";
 
@@ -164,15 +188,38 @@ public sealed class MainWindow : Window
     /// <summary>§4.1④ 采纳审计身份（构造期 signoffIdentity 同源：签认/编辑/裁定共用）。</summary>
     private readonly IIdentityProvider? _auditIdentity;
 
+    /// <summary>审图报告导出：与 Issues/编辑/签认共用写审计实例（无第二存储）。</summary>
+    private readonly IAuditStore? _reportAuditStore;
+
+    /// <summary>审图报告导出：签认记录来源（导出前 Load 刷新磁盘态）。</summary>
+    private ReviewSignoffStore? _signoffStore;
+
+    /// <summary>审图报告导出重入闸（结构性，不依赖按钮 IsEnabled——RaiseEvent 可绕过）。</summary>
+    private bool _reportBusy;
+
+    /// <summary>项目目录（报告默认输出 &lt;项目&gt;/reports；报告元数据）。</summary>
+    private readonly string _projectDir;
+
+    /// <summary>会话闸（报告取图纸哈希与编辑/后台读互斥）。</summary>
+    private readonly SemaphoreSlim? _sessionGate;
+
     /// <summary>§4.1④ 零勾选兜底状态栏提示（镜像 _editWarning 机制：OnCanvasInvalidated
     /// 拼接待显文本；checked 路径/新填充动作清除，避免陈旧提示误导）。</summary>
     private string _fillIntentNote = "";
+
+    /// <summary>行点击定位失败提示文案：句柄只存在于深读证据（TDb 实体不在渲染图元）。</summary>
+    internal const string LocateMissNote = "该句柄不在当前渲染图元中（TDb 实体仅存在于深读证据）";
+
+    /// <summary>天读证据行点击定位失败提示（镜像 _editWarning 机制：OnCanvasInvalidated
+    /// 拼接到状态栏尾部；下一次成功定位/选中态接管时清除，避免陈旧提示误导）。</summary>
+    private string _deepReadLocateNote = "";
 
     public MainWindow(MainViewModel vm, IIdentityProvider? identity = null, SemaphoreSlim? sessionGate = null,
         PlanPreviewViewModel? planPreview = null)
     {
         DataContext = vm;
         _skillDirs = vm.SkillDirs;
+        _projectDir = vm.ProjectDir;
         Title = $"CadAgent — {vm.Title}"; // T10：窗口标题含应用名 + 图纸名
         Width = 1200;
         Height = 800;
@@ -198,8 +245,8 @@ public sealed class MainWindow : Window
         SheetRecord firstSheet = _sheets[0];
         _currentSheetId = firstSheet.SheetId;
         _currentSheetName = firstSheet.Name;
-        _layoutSheetActive = firstSheet.LayoutName is not null; // 修复①：只读标志与幅面同步
-        IReadOnlyList<RenderItem> items = ItemsForSheet(firstSheet);
+        _layoutSheetActive = firstSheet.LayoutName is not null;
+        IReadOnlyList<RenderItem> items = ItemsForSheet(firstSheet, out _layoutViewport);
         Canvas = new CanvasViewModel(items);
         // T8：传 session → 图层面板 = renderItems ∪ 图层表（空图层计数 0+表色样）。
         var layers = new LayersViewModel(items, Canvas, vm.Session);
@@ -209,6 +256,7 @@ public sealed class MainWindow : Window
         // 共享同一互斥闸——off-thread 读绝不看到被编辑撕扯的 Doc（T6 承接）。
         // T10：可注入（headless 测试持闸制造确定性 in-flight 编辑）。
         sessionGate ??= new SemaphoreSlim(1, 1);
+        _sessionGate = sessionGate;
 
         _baseStatus = $"{vm.Title} — {items.Count} render items";
         var status = new TextBlock { Margin = new Thickness(8, 4), Text = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}" };
@@ -271,11 +319,29 @@ public sealed class MainWindow : Window
         issueList.SelectionChanged += OnIssueSelected;
         IssueList = issueList;
 
+        // 审图报告导出（全量）：与 CLI report export 共用 ReviewReportExporter；
+        // 导出前重评问题清单（留 check-run 审计），成功后追加 report-exported 审计。
+        var exportReport = new Button { Content = "导出报告", Margin = new Thickness(4, 2) };
+        exportReport.Click += OnExportReportClick;
+        ExportReportButton = exportReport;
+        var reportStatus = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.MediumSeaGreen,
+            IsVisible = false
+        };
+        ReportStatus = reportStatus;
+
         var issuesPanel = new DockPanel { Width = 320 };
         DockPanel.SetDock(issuesHeader, Dock.Top);
         issuesPanel.Children.Add(issuesHeader);
         DockPanel.SetDock(refresh, Dock.Top);
         issuesPanel.Children.Add(refresh);
+        DockPanel.SetDock(exportReport, Dock.Top);
+        issuesPanel.Children.Add(exportReport);
+        DockPanel.SetDock(reportStatus, Dock.Top);
+        issuesPanel.Children.Add(reportStatus);
         DockPanel.SetDock(issuesError, Dock.Top);
         issuesPanel.Children.Add(issuesError);
         issuesPanel.Children.Add(issueList); // LastChildFill
@@ -399,6 +465,7 @@ public sealed class MainWindow : Window
             signoffStore = new ReviewSignoffStore(signoffPath, loadOnConstruct: false);
             stateNotes.Add($"signoffs.json 损坏，签认历史不可用（{ex.Message}）");
         }
+        _signoffStore = signoffStore;
         var signoff = new SignoffViewModel(auditStore, signoffStore,
             signoffIdentity, new RoleChecker(), audit.Transactions);
         Signoff = signoff;
@@ -470,6 +537,7 @@ public sealed class MainWindow : Window
         // §4.1④：采纳审计（rule-adopted）经同一写审计实例 + 同一身份（无第二存储/旁路）。
         _writeAudit = writeAudit;
         _auditIdentity = signoffIdentity;
+        _reportAuditStore = writeAudit; // 报告导出审计同源（审计失败→撤销报告）
 
         // T5：右栏问题清单 VM（in-process check；T10：--skill 目录经 MainViewModel 接线）。
         // 视图闭环 T6：刷新留 check-run 审计（parity CLI check）——写审计复用 T8 存储，
@@ -593,6 +661,8 @@ public sealed class MainWindow : Window
             sessionGate: sessionGate);
         Semantic = semantic;
         semantic.SemanticChanged += UpdateSemanticPanel;
+        // 天读证据：扫描/映射落盘后重读 overlay（DeepRead 在下方构造——事件首触发前已就绪）。
+        semantic.SemanticChanged += ReloadDeepRead;
 
         var semanticHeader = new TextBlock
         {
@@ -837,14 +907,113 @@ public sealed class MainWindow : Window
             Audit?.Rebuild();
         });
 
+        // 天读证据 tab（只读）：从 .cadagent/semantic.json 重建五区（原生参数/炸开证据/
+        // 符号候选/块定义/证据状态）+ 中心线叠加开关。不写审计、不落盘；刷新时机=
+        // 初始加载 / 语义扫描·映射完成（SemanticChanged 追加订阅）/ 编辑后 RefreshAfterEdit。
+        var deepRead = new DeepReadViewModel(
+            Path.Combine(vm.ProjectDir, ".cadagent"), () => SafeDrawingHash(vm));
+        DeepRead = deepRead;
+
+        var deepReadHeader = new TextBlock
+        {
+            Text = "天读证据",
+            FontWeight = FontWeight.Bold,
+            Margin = new Thickness(6, 4),
+            TextWrapping = TextWrapping.Wrap
+        };
+        DeepReadHeader = deepReadHeader;
+
+        var showCenterlines = new CheckBox
+        {
+            Content = "显示中心线",
+            IsChecked = false,
+            Margin = new Thickness(4, 2)
+        };
+        showCenterlines.IsCheckedChanged += (_, _) =>
+        {
+            if (Canvas is not null) Canvas.ShowCenterlines = showCenterlines.IsChecked == true;
+        };
+        DeepReadShowCenterlines = showCenterlines;
+
+        var deepReadError = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.IndianRed,
+            IsVisible = false
+        };
+        DeepReadError = deepReadError;
+
+        ListBox nativeList = DeepReadSection<NativeParamRow>(deepRead.NativeRows, r =>
+            $"{r.Handle} · {r.ObjectName} · {r.Class} · {r.Layer} · {(r.ReadOk ? "可读" : "读参失败")}"
+            + $"{Environment.NewLine}{r.ParamsSummary}"
+            + (r.FailReason is null ? "" : $" · 原因：{r.FailReason}"));
+        ListBox explodeList = DeepReadSection<ExplodeRow>(deepRead.ExplodeRows, r =>
+            $"{r.Handle} · {r.RxClass} · {(r.FullyExplodable ? "全炸" : "未全炸")}"
+            + $" · 基元 {r.PrimitiveCount} · 残 TDb {r.NestedTdbCount}{(r.Degenerate ? " · 退化" : "")}"
+            + (r.FailReasonsSummary is null ? "" : $"{Environment.NewLine}{r.FailReasonsSummary}"));
+        ListBox symbolList = DeepReadSection<SymbolCandidateRow>(deepRead.SymbolRows, r =>
+            $"{r.Handle} · {r.BlockName} · {r.Kind} · {r.ClassHint}");
+        ListBox blockDefList = DeepReadSection<BlockDefRow>(deepRead.BlockDefRows,
+            FormatBlockDefRow,
+            r => r.IsCurrentDrawing == false
+                ? "来源哈希不一致（图纸可能已编辑或来自他图）：块定义计数不得与当前图纸混读"
+                : null);
+        ListBox evidenceList = DeepReadSection<EvidenceStateRow>(deepRead.EvidenceRows, r =>
+            $"{r.Handle} · 参数 {r.ParamsState} · 炸开 {r.ExplodeState}{Environment.NewLine}{r.Advisory}");
+        DeepReadNativeList = nativeList;
+        DeepReadExplodeList = explodeList;
+        DeepReadSymbolList = symbolList;
+        DeepReadBlockDefList = blockDefList;
+        DeepReadEvidenceList = evidenceList;
+
+        // 行点击 → 画布按句柄定位（a/b/e 区有句柄；块定义区无句柄不接）。
+        nativeList.SelectionChanged += (_, _) =>
+        {
+            if (nativeList.SelectedItem is NativeParamRow row) LocateDeepReadHandle(row.Handle);
+        };
+        explodeList.SelectionChanged += (_, _) =>
+        {
+            if (explodeList.SelectedItem is ExplodeRow row) LocateDeepReadHandle(row.Handle);
+        };
+        evidenceList.SelectionChanged += (_, _) =>
+        {
+            if (evidenceList.SelectedItem is EvidenceStateRow row) LocateDeepReadHandle(row.Handle);
+        };
+
+        _deepReadSectionHeaders[0] = DeepReadSectionHeader("原生参数");
+        _deepReadSectionHeaders[1] = DeepReadSectionHeader("炸开证据");
+        _deepReadSectionHeaders[2] = DeepReadSectionHeader("符号候选");
+        _deepReadSectionHeaders[3] = DeepReadSectionHeader("块定义");
+        _deepReadSectionHeaders[4] = DeepReadSectionHeader("证据状态");
+
+        var deepReadSections = new StackPanel { Spacing = 2 };
+        ListBox[] deepReadLists = { nativeList, explodeList, symbolList, blockDefList, evidenceList };
+        for (int i = 0; i < deepReadLists.Length; i++)
+        {
+            deepReadSections.Children.Add(_deepReadSectionHeaders[i]);
+            deepReadSections.Children.Add(deepReadLists[i]);
+        }
+
+        var deepReadPanel = new DockPanel();
+        DockPanel.SetDock(deepReadHeader, Dock.Top);
+        deepReadPanel.Children.Add(deepReadHeader);
+        DockPanel.SetDock(showCenterlines, Dock.Top);
+        deepReadPanel.Children.Add(showCenterlines);
+        DockPanel.SetDock(deepReadError, Dock.Top);
+        deepReadPanel.Children.Add(deepReadError);
+        deepReadPanel.Children.Add(new ScrollViewer { Content = deepReadSections }); // LastChildFill
+
         // T8：左栏三 tab（图层默认选中，T4 行为不变；未选中 tab 内容不进入视觉树）。
         // 视图闭环 T10：计划面板加入既有 TabControl（第四 tab）——不动主 DockPanel
         // 子序（LastChildFill 教训：画布必须保持最后一个子控件）。
+        // 天读证据：只读 overlay 深读面板追加为第五 tab。
         var tabs = new TabControl { Width = 220 };
         tabs.Items.Add(new TabItem { Header = "图层", Content = panel });
         tabs.Items.Add(new TabItem { Header = "纠偏", Content = semanticPanel });
         tabs.Items.Add(new TabItem { Header = "裁定", Content = adjudicationPanel });
         tabs.Items.Add(new TabItem { Header = "计划", Content = planPanel });
+        tabs.Items.Add(new TabItem { Header = "天读证据", Content = deepReadPanel });
         LeftTabs = tabs;
 
         var dock = new DockPanel();
@@ -887,6 +1056,7 @@ public sealed class MainWindow : Window
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
         UpdatePlanPanel();
+        UpdateDeepReadPanel(); // 天读证据：初始加载已在 VM 构造完成，此处发布行/计数/开关态
         if (adjudication.ErrorMessage is not null) SetAdjudicationError(adjudication.ErrorMessage);
     }
 
@@ -920,6 +1090,12 @@ public sealed class MainWindow : Window
 
     /// <summary>问题清单刷新按钮（T5）。</summary>
     public Button? RefreshIssuesButton { get; }
+
+    /// <summary>审图报告导出按钮（View 入口；与 CLI report export 共用导出器）。</summary>
+    public Button? ExportReportButton { get; }
+
+    /// <summary>报告导出状态/错误文本（成功绿/失败红；null=隐藏）。</summary>
+    public TextBlock? ReportStatus { get; }
 
     /// <summary>问题清单头部（含 mandatory/skipped 计数；跳过原因 tooltip）。</summary>
     public TextBlock? IssuesHeader { get; }
@@ -960,7 +1136,7 @@ public sealed class MainWindow : Window
     /// <summary>签认错误文本（角色拒绝/自审拒绝/未选事务等，可见时非空）。</summary>
     public TextBlock? SignoffError { get; }
 
-    /// <summary>左栏三 tab 容器（T8：图层/纠偏/裁定；加载成功时非 null）。</summary>
+    /// <summary>左栏 tab 容器（T8：图层/纠偏/裁定；T10 计划；天读证据=第五 tab；加载成功时非 null）。</summary>
     public TabControl? LeftTabs { get; }
 
     /// <summary>语义纠偏视图模型（T8，加载成功时非 null）。</summary>
@@ -1001,6 +1177,33 @@ public sealed class MainWindow : Window
 
     /// <summary>当前裁定列表（T8，同 RuleId 最新裁定生效）。</summary>
     public ListBox? AdjudicationList { get; }
+
+    /// <summary>天读证据视图模型（只读 overlay 五区；加载成功时非 null）。</summary>
+    public DeepReadViewModel? DeepRead { get; }
+
+    /// <summary>天读证据头部（五区计数 + 非放行依据注记）。</summary>
+    public TextBlock? DeepReadHeader { get; }
+
+    /// <summary>原生参数区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadNativeList { get; }
+
+    /// <summary>炸开证据区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadExplodeList { get; }
+
+    /// <summary>符号候选区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadSymbolList { get; }
+
+    /// <summary>块定义区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadBlockDefList { get; }
+
+    /// <summary>证据状态区列表（headless 测试入口）。</summary>
+    public ListBox? DeepReadEvidenceList { get; }
+
+    /// <summary>中心线叠加开关（有中心线才可勾选；headless 测试入口）。</summary>
+    public CheckBox? DeepReadShowCenterlines { get; }
+
+    /// <summary>天读证据错误文本（overlay 损坏/IO 失败时可见）。</summary>
+    public TextBlock? DeepReadError { get; }
 
     /// <summary>手动编辑视图模型（T9，加载成功时非 null；所有编辑经 StepEngine）。</summary>
     public EditViewModel? Edit { get; }
@@ -1256,17 +1459,189 @@ public sealed class MainWindow : Window
         }
     }
 
+    /// <summary>审图报告导出按钮（与 CLI report export 共用导出器；异步防重入）。</summary>
+    private async void OnExportReportClick(object? sender, RoutedEventArgs e) => await ExportReportAsync();
+
+    /// <summary>
+    /// 导出审图报告（全量：问题/跳过/裁定/签认/审计验链/当前幅面缩略图）。
+    /// 先 RefreshAsync 重评（与 CLI check 同语义并留 check-run 审计）；评估失败不导出。
+    /// 缩略图渲染失败→报告标注"未生成"（不阻断）。导出成功后追加 report-exported 审计，
+    /// 审计写入失败→删除本次产物（无审计不留产物）。默认落盘 &lt;项目&gt;/reports/。
+    /// </summary>
+    internal async Task ExportReportAsync()
+    {
+        if (_reportBusy || Issues is null || _reportAuditStore is null || _auditIdentity is null) return;
+        _reportBusy = true;
+        if (ExportReportButton is not null) ExportReportButton.IsEnabled = false;
+        SetReportStatus(null, error: false);
+        try
+        {
+            await Issues.RefreshAsync();
+            if (Issues.ErrorMessage is not null)
+            {
+                SetReportStatus($"审查评估失败，未导出: {Issues.ErrorMessage}", error: true);
+                return;
+            }
+            OperatorIdentity op = _auditIdentity.Current;
+            IReadOnlyList<AuditRecord> auditAll = _reportAuditStore.ReadAll();
+            bool chainOk = _reportAuditStore.VerifyChain(out string chainError);
+            var auditSummary = new ReportAuditSummary(auditAll.Count, chainOk,
+                chainOk ? null : chainError,
+                auditAll.Count > 0 ? auditAll[^1].Seq : 0,
+                auditAll.Count > 0 ? auditAll[^1].Hash : null);
+
+            var verifications = new Dictionary<string, string>(StringComparer.Ordinal);
+            string? rulePackVersion = null;
+            try
+            {
+                SkillSet ruleSet = SkillSet.Compose(BuiltinRules.Load(),
+                    _skillDirs.Select(SkillLoader.LoadDirectory).ToList());
+                rulePackVersion = ruleSet.RulePackVersion;
+                foreach (Rule rule in ruleSet.AllRules)
+                    verifications[rule.Id] = rule.Source.Verification;
+            }
+            catch { /* 规则集重载失败：报告缺核对方式/版本字段，不阻断主数据 */ }
+
+            IReadOnlyList<ReportSignoff> signoffs;
+            try
+            {
+                _signoffStore?.Load();
+                signoffs = _signoffStore is null
+                    ? Array.Empty<ReportSignoff>()
+                    : _signoffStore.Items.Select(s => new ReportSignoff(
+                        s.TxId, s.Operator, s.Role.ToString(), s.Approved, s.Comment, s.Ts)).ToList();
+            }
+            catch { signoffs = Array.Empty<ReportSignoff>(); }
+
+            IReadOnlyList<Adjudication> adjudications;
+            string? adjudicationHash = null;
+            try
+            {
+                AdjudicationSet set = AdjudicationSet.Load(
+                    Path.Combine(_projectDir, ".cadagent", "adjudications.json"));
+                adjudications = set.Items;
+                adjudicationHash = set.Fingerprint();
+            }
+            catch { adjudications = Array.Empty<Adjudication>(); }
+
+            byte[]? thumbnail = TryRenderThumbnail();
+            DateTimeOffset issuedAt = DateTimeOffset.Now;
+            string outPath = Path.Combine(_projectDir, "reports",
+                $"{Path.GetFileNameWithoutExtension(_title)}-{issuedAt:yyyyMMdd-HHmmss}-review.pdf");
+            IReadOnlyList<Issue> issueSnapshot = Issues.Issues.Select(ToIssue).ToList();
+            int issueCount = issueSnapshot.Count;
+
+            // 哈希须与导出时的会话状态一致，且不得在 UI 线程等待会话闸（在途编辑
+            // 持闸时整窗冻结）——放入后台任务：闸内取哈希，随后生成 PDF。
+            string hash = "";
+            ReviewReportResult result = await Task.Run(() =>
+            {
+                if (_sessionGate is not null) _sessionGate.Wait();
+                try { hash = _session.ComputeHash(); }
+                finally { _sessionGate?.Release(); }
+
+                var input = new ReviewReportInput
+                {
+                    DrawingPath = _session.SourcePath,
+                    ProjectDir = _projectDir,
+                    Identity = new ReportIdentity(op.Account, op.Role.ToString()),
+                    IssuedAt = issuedAt,
+                    DrawingHash = hash,
+                    RulePackVersion = rulePackVersion,
+                    AdjudicationHash = adjudicationHash,
+                    OverlayPresent = Issues.OverlayPresent,
+                    Issues = issueSnapshot,
+                    RulesRun = Issues.RulesRun,
+                    RulesSkipped = Issues.RulesSkipped,
+                    Skipped = Issues.SkippedReasons,
+                    Adjudications = adjudications,
+                    Signoffs = signoffs,
+                    Audit = auditSummary,
+                    ThumbnailPng = thumbnail,
+                    RuleVerifications = verifications
+                };
+                return ReviewReportExporter.Export(input, outPath);
+            });
+
+            try
+            {
+                // 审计先行（spec §9 无审计旁路）：失败即撤销本次报告（与 CLI 共用 helper）。
+                ReportAuditCommit.Commit(_reportAuditStore, new AuditEntry(DateTimeOffset.UtcNow,
+                    op.Account, op.Role.ToString(), "view", "view-report", "report-exported",
+                    _session.SourcePath,
+                    JsonSerializer.Serialize(new
+                    {
+                        outPath = result.Path,
+                        issueCount,
+                        mandatoryViolations = Issues.MandatoryCount,
+                        auditChainOk = result.AuditChainOk,
+                        thumbnail = thumbnail is not null
+                    }),
+                    hash, hash, "", ""), result.Path);
+            }
+            catch (Exception ex)
+            {
+                // 审计块内任何异常同样不得留下无审计产物（helper 已自删；此处幂等补删）。
+                try { File.Delete(result.Path); } catch { /* 撤销清理失败不掩盖审计错误 */ }
+                SetReportStatus(ex is ReviewReportException
+                    ? ex.Message
+                    : $"审计写入失败，已撤销报告: {ex.Message}", error: true);
+                return;
+            }
+
+            SetReportStatus($"已导出: {result.Path}", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetReportStatus($"导出失败: {ex.Message}", error: true);
+        }
+        finally
+        {
+            _reportBusy = false;
+            if (ExportReportButton is not null) ExportReportButton.IsEnabled = true;
+        }
+    }
+
+    private static Issue ToIssue(IssueEntry entry) => new(
+        entry.RuleId, entry.Clause, entry.Standard, entry.Excerpt, entry.Force, entry.Severity,
+        entry.Targets, entry.Message, entry.Suggestion, entry.DetectionBasis);
+
+    /// <summary>当前幅面缩略图（离屏 Skia；失败→null，报告如实标注未生成）。</summary>
+    private byte[]? TryRenderThumbnail()
+    {
+        try
+        {
+            SheetRecord sheet = _sheets.FirstOrDefault(s => s.SheetId == _currentSheetId) ?? _sheets[0];
+            var provider = new RenderSnapshotProvider(_session);
+            return provider.RenderPng(sheet.SheetId, sheet.FrameBounds, 640, 480);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void SetReportStatus(string? message, bool error)
+    {
+        if (ReportStatus is null) return;
+        ReportStatus.Text = message ?? "";
+        ReportStatus.IsVisible = message is not null;
+        ReportStatus.Foreground = error ? Brushes.IndianRed : Brushes.MediumSeaGreen;
+    }
+
     /// <summary>画布状态变化（选择/图层可见性/视图）→ 状态栏 + 复选框同步。</summary>
     private void OnCanvasInvalidated()
     {
         if (Status is not null)
         {
             RenderItem? selected = Canvas!.SelectedItem;
+            // 天读证据定位失败提示：任一选中态接管（成功定位/画布点击选择）即清除。
+            if (selected is not null) _deepReadLocateNote = "";
             // T10 状态栏收尾：图纸名/实体计数（_baseStatus）+ 缩放 + 选择 + 审计摘要。
             // T5：幅面名（当前选中幅面）。
             string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}";
-            // 修复①：布局幅面只读注记（UI 提示；编辑尝试另经 EditError 通道引导）。
-            if (_layoutSheetActive) status += "（只读）";
+            // 项2 A：布局幅面 = 纸面视图；视口内模型可编辑（纸面编辑后续切片）。
+            if (_layoutSheetActive) status += "（纸面视图：视口内可编辑模型）";
             if (selected is not null)
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
@@ -1275,6 +1650,8 @@ public sealed class MainWindow : Window
             if (_editWarning.Length > 0) status += $" | {_editWarning}";
             // §4.1④：零勾选兜底填充提示（checked 路径/新填充动作清除）。
             if (_fillIntentNote.Length > 0) status += $" | {_fillIntentNote}";
+            // 天读证据：行点击定位失败提示（下一次成功定位/选中接管时清除）。
+            if (_deepReadLocateNote.Length > 0) status += $" | {_deepReadLocateNote}";
             Status.Text = status;
         }
         if (LayerList is not null)
@@ -1519,6 +1896,120 @@ public sealed class MainWindow : Window
         SemanticError.IsVisible = message is not null;
     }
 
+    /// <summary>天读证据：重读 overlay + 发布面板（语义扫描/映射完成、编辑后调用）。</summary>
+    private void ReloadDeepRead()
+    {
+        DeepRead?.Reload();
+        UpdateDeepReadPanel();
+    }
+
+    /// <summary>天读证据：五区列表源/计数标题/中心线开关态/错误展示刷新。</summary>
+    private void UpdateDeepReadPanel()
+    {
+        if (DeepRead is null) return;
+        Canvas?.SetCenterlines(DeepRead.Centerlines);
+        if (DeepReadShowCenterlines is not null)
+        {
+            DeepReadShowCenterlines.IsEnabled = DeepRead.HasCenterlines; // 无中心线不可开
+            if (!DeepRead.HasCenterlines && DeepReadShowCenterlines.IsChecked == true)
+                DeepReadShowCenterlines.IsChecked = false; // 数据消失 → 叠加关闭（开关事件同步画布）
+        }
+        if (DeepReadHeader is not null)
+            DeepReadHeader.Text =
+                $"天读证据 — {DeepRead.CountsSummary}（只读预览，非放行依据）"
+                + (DeepRead.SkewedCenterlines > 0 ? $"；畸形中心线 {DeepRead.SkewedCenterlines}" : "");
+        int[] counts =
+        {
+            DeepRead.NativeRows.Count, DeepRead.ExplodeRows.Count, DeepRead.SymbolRows.Count,
+            DeepRead.BlockDefRows.Count, DeepRead.EvidenceRows.Count
+        };
+        for (int i = 0; i < _deepReadSectionHeaders.Length; i++)
+            _deepReadSectionHeaders[i].Text = $"{DeepReadSectionNames[i]} ({counts[i]})";
+        SetDeepReadError(DeepRead.ErrorMessage);
+    }
+
+    private void SetDeepReadError(string? message)
+    {
+        if (DeepReadError is null) return;
+        DeepReadError.Text = message ?? "";
+        DeepReadError.IsVisible = message is not null;
+    }
+
+    /// <summary>
+    /// 天读证据行点击定位：命中 → 清定位失败提示；未命中（句柄只存在于深读证据——
+    /// TDb 实体不在当前渲染图元）→ 清画布选中/定位高亮（Select(null)，无独立
+    /// deselect API）+ 状态栏提示。提示在下一次成功定位或画布选中接管时清除
+    /// （OnCanvasInvalidated），避免陈旧提示误导。
+    /// </summary>
+    private void LocateDeepReadHandle(string handle)
+    {
+        if (Canvas is null) return;
+        if (Canvas.SelectByHandle(handle))
+        {
+            SetDeepReadLocateNote("");
+            return;
+        }
+        Canvas.Select(null);
+        SetDeepReadLocateNote(LocateMissNote);
+    }
+
+    /// <summary>天读证据定位失败提示入状态栏（空串=清除）。</summary>
+    private void SetDeepReadLocateNote(string note)
+    {
+        _deepReadLocateNote = note;
+        Canvas?.Invalidate();
+    }
+
+    /// <summary>块定义行文本：来源哈希比对——true="本图"；false=来源哈希不一致
+    /// （图纸可能已编辑或来自他图，计数不得混读）；null=不可比（"—"，不猜）。</summary>
+    internal static string FormatBlockDefRow(BlockDefRow r) =>
+        $"{r.BlockName} · {r.RxClass} · {r.Count}"
+        + $" · {r.IsCurrentDrawing switch
+        {
+            true => "本图",
+            false => "来源哈希不一致（图纸可能已编辑或来自他图）",
+            null => "—"
+        }}"
+        + (r.DrawingHash is null ? "" : $" · {r.DrawingHash}");
+
+    /// <summary>天读证据：当前图纸哈希（块定义来源比对）；不可得 → null（不猜来源）。</summary>
+    private static string? SafeDrawingHash(MainViewModel vm)
+    {
+        try { return vm.Session.ComputeHash(); }
+        catch (Exception) { return null; } // 只读面板：哈希不可得不阻断面板
+    }
+
+    /// <summary>天读证据区列表：ItemsSource=区集合，行模板=单 TextBlock（换行自适应）；
+    /// tooltip 可选（块定义来源哈希不一致提示）。</summary>
+    private static ListBox DeepReadSection<T>(System.Collections.IEnumerable rows, Func<T, string> text,
+        Func<T, string?>? tooltip = null)
+        where T : class => new()
+    {
+        ItemsSource = rows,
+        Height = 110,
+        ItemTemplate = new FuncDataTemplate<T>((row, _) =>
+        {
+            if (row is null) return new Control();
+            var block = new TextBlock
+            {
+                Text = text(row),
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(4, 2)
+            };
+            if (tooltip is not null) ToolTip.SetTip(block, tooltip(row));
+            return block;
+        })
+    };
+
+    /// <summary>天读证据小节标题（计数由 UpdateDeepReadPanel 刷新）。</summary>
+    private static TextBlock DeepReadSectionHeader(string text) => new()
+    {
+        Text = text,
+        FontWeight = FontWeight.SemiBold,
+        Margin = new Thickness(6, 4, 6, 0)
+    };
+
     /// <summary>
     /// T8：Apply → 人工裁定。未选规则 → 引导错误；校验拒绝（互斥/reason 必填/
     /// 孤儿）/存储故障 → 捕获异常行内展示（裁定与审计均未落盘）。
@@ -1570,12 +2061,7 @@ public sealed class MainWindow : Window
     private void SetActiveTool(EditTool tool)
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
-        // 修复①：布局幅面只读硬闸——编辑工具激活一律拒绝（Select 为只读选择路径，放行）。
-        if (_layoutSheetActive && tool != EditTool.Select)
-        {
-            SetEditError(LayoutReadOnlyMessage);
-            return;
-        }
+        // 项2 A：布局幅面不再整体禁用（空间守卫下沉到按图元/按点的 EditRouting 判定）。
         Edit.ActiveTool = tool;
         Canvas.SetPendingPoint(null);
         _moveBase = null;
@@ -1592,22 +2078,98 @@ public sealed class MainWindow : Window
     /// </summary>
     private static string ParentHandle(string handle) => handle.Split(':')[0];
 
+    /// <summary>
+    /// 布局幅面纸面点 → 模型点（Route 唯一判定：未命中按点是否落在视口 PaperRect 内）。
+    /// Model 且可映射才转换；纸面（Plan-1 未启用）与不可映射（旋转/无有效视口）按路由
+    /// 原因拒绝。模型幅面直通（纸面=模型坐标系）。
+    /// </summary>
+    private bool TryModelPoint(double px, double py, string action, out double mx, out double my)
+    {
+        mx = px;
+        my = py;
+        if (!_layoutSheetActive) return true;
+        if (_layoutViewport is null)
+        {
+            // 防御性分支（R15：无有效视口的布局不会登记为幅面）；不得落入纸面文案。
+            SetEditError("当前布局无有效视口，无法编辑模型");
+            return false;
+        }
+        EditRoute route = EditRouting.Route(_layoutViewport, null, (px, py));
+        if (route.Intent == EditSpaceIntent.Model && route.CanMapModel)
+        {
+            (mx, my) = _layoutViewport!.PaperToModel((px, py));
+            return true;
+        }
+        SetEditError(route.Intent == EditSpaceIntent.Paper
+            ? PaperEditMessage(action)
+            : route.Reason ?? PaperEditMessage(action));
+        return false;
+    }
+
+    /// <summary>
+    /// 布局幅面按选中图元守卫（Delete/ChangeLayer 等无坐标动作）：Locked/纸面（含纸面
+    /// 块子图元，R13 以 hit.Space 区分）→ 拒绝对应文案；模型/模型块子图元 → 按父实体整体
+    /// 继续（Route 可映射性同判，twist/无视口拒绝）。模型幅面直通返回 true。
+    /// </summary>
+    private bool TryGuardSelection(RenderItem item, string action)
+    {
+        if (!_layoutSheetActive) return true;
+        EditRoute route = EditRouting.Route(_layoutViewport, item, (0, 0));
+        switch (route.Intent)
+        {
+            case EditSpaceIntent.Locked:
+                // 文案单一来源 EditRouting（"视口边框只读"）；契约违约兜底不得复用纸面文案。
+                SetEditError(route.Reason ?? "视口边框只读");
+                return false;
+            case EditSpaceIntent.Paper:
+            case EditSpaceIntent.BlockChild when item.Space == RenderSpace.PaperSpace:
+                SetEditError(PaperEditMessage(action));
+                return false;
+            case EditSpaceIntent.Model:
+            case EditSpaceIntent.BlockChild:
+                if (!route.CanMapModel)
+                {
+                    SetEditError(route.Reason ?? PaperEditMessage(action));
+                    return false;
+                }
+                return true;
+            default: // Unavailable：Plan-1 路由不产出，防御性拒绝
+                SetEditError(route.Reason ?? PaperEditMessage(action));
+                return false;
+        }
+    }
+
+    /// <summary>布局幅面移动增量 = 纸面增量 ÷ 视口比例（Route 可映射性判定；模型幅面直通）。</summary>
+    private bool TryMoveDelta(double bx, double by, double wx, double wy, out double dx, out double dy)
+    {
+        dx = wx - bx;
+        dy = wy - by;
+        if (!_layoutSheetActive || Canvas?.SelectedItem is not { } selected) return true;
+        EditRoute route = EditRouting.Route(_layoutViewport, selected, (0, 0));
+        if (!route.CanMapModel)
+        {
+            SetEditError(route.Reason ?? PaperEditMessage("移动"));
+            return false;
+        }
+        double s = _layoutViewport!.Scale; // 可映射 ⇒ 非退化，比例可信
+        dx /= s;
+        dy /= s;
+        return true;
+    }
+
     /// <summary>T9 Delete 两段式确认：工具已激活且有选中 → 再按即确认删除；否则激活工具。
     /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
     /// 视图闭环 T9：第二击先经模态确认（ConfirmDialog.ShowDialog&lt;bool&gt;；headless
     /// 测试经 ConfirmDeleteOverride seam 注入）——取消保持选中不清状态；确认后才走
-    /// 既有删除执行逻辑（EditViewModel→StepEngine，无审计旁路）。</summary>
+    /// 既有删除执行逻辑（EditViewModel→StepEngine，无审计旁路）。
+    /// 项2 A：布局幅面按选中图元空间守卫（框只读/纸面未启用）先于确认对话框。</summary>
     private async Task OnDeleteClickAsync()
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
-        // 修复①：布局幅面只读硬闸（确认删除/激活 Delete 均拒绝）。
-        if (_layoutSheetActive)
-        {
-            SetEditError(LayoutReadOnlyMessage);
-            return;
-        }
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string selected)
         {
+            // R5：Locked/PaperSpace 守卫先于确认（不对只读目标弹确认）。
+            if (Canvas.SelectedItem is { } item && !TryGuardSelection(item, "删除")) return;
             string handle = ParentHandle(selected); // Imp#3：子图元句柄→父实体整体删除
             string msg = $"确认删除选中实体（句柄 {handle}）？删除经审计管线，可 Undo 撤回。";
             bool confirmed = ConfirmDeleteOverride is not null
@@ -1623,35 +2185,28 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>T9：撤销最近事务（UndoAsync → StepEngine.Rollback，无旁路）。
-    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
+    /// 项2 A：布局幅面允许撤销（整文档回滚，不改当前幅面渲染口径）。</summary>
     private void OnUndoClick(object? sender, RoutedEventArgs e)
     {
         if (Edit is null || _editBusy || _diffBusy || Edit.RecentTxIds.Count == 0) return;
-        // 修复①：布局幅面只读硬闸——撤销同样改模型空间，布局视图期间拒绝。
-        if (_layoutSheetActive)
-        {
-            SetEditError(LayoutReadOnlyMessage);
-            return;
-        }
         string txId = Edit.RecentTxIds[^1];
         _ = RunEditAsync(() => Edit.UndoAsync(txId));
     }
 
     /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。
-    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。</summary>
+    /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
+    /// 项2 A：布局幅面按选中图元空间守卫（框只读/纸面未启用）先于执行。</summary>
     private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
-        // 修复①：布局幅面只读硬闸——改层写模型空间，布局视图期间拒绝。
-        if (_layoutSheetActive)
-        {
-            SetEditError(LayoutReadOnlyMessage);
-            return;
-        }
         if (Edit.ActiveTool == EditTool.ChangeLayer
             && Canvas.SelectedHandle is string selected
             && EditLayerSelector?.SelectedItem is string layer)
+        {
+            if (Canvas.SelectedItem is { } item && !TryGuardSelection(item, "改层")) return;
             _ = RunEditAsync(() => Edit.ChangeLayerAsync(ParentHandle(selected), layer)); // Imp#3：父实体整体改层
+        }
     }
 
     /// <summary>
@@ -1659,6 +2214,8 @@ public sealed class MainWindow : Window
     /// Line 第一击设预览锚点、第二击提交；Text/InsertBlock 需工具栏输入（空→引导）；
     /// Move 点击实体选中并记首点基准、点击目标点提交 dx/dy；Delete/ChangeLayer
     /// 点击仅选中（确认走工具栏二次按压/层下拉）。Select 走默认选择路径。
+    /// 项2 A：布局幅面坐标经 EditRouting 判定——视口内=模型（纸→模型逆映射），
+    /// 纸面编辑 Plan-1 未启用（拒绝），视口框只读；模型幅面直通不变。
     /// </summary>
     private bool OnCanvasToolClick(double wx, double wy)
     {
@@ -1666,24 +2223,24 @@ public sealed class MainWindow : Window
         // T10 重入闸：编辑在途时忽略画布点击（消费事件，不落预览锚点/不改选择）。
         // 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间同样消费忽略。
         if (_editBusy || _diffBusy) return true;
-        // 修复①：布局幅面只读硬闸——编辑工具点击消费但不提交（纸面坐标绝不进模型
-        // 空间；覆盖模型幅面激活工具后切布局的残留态）；Select 走默认只读选择路径。
-        if (_layoutSheetActive && Edit.ActiveTool != EditTool.Select)
-        {
-            SetEditError(LayoutReadOnlyMessage);
-            return true;
-        }
         switch (Edit.ActiveTool)
         {
             case EditTool.Line:
                 if (Canvas.PendingPoint is (double x1, double y1))
                 {
+                    // 两击都须可映射（首击锚点存纸坐标）；任一失败 → 清 pending + 错误，不提交。
+                    if (!TryModelPoint(x1, y1, "画线", out double mx1, out double my1)
+                        || !TryModelPoint(wx, wy, "画线", out double mx2, out double my2))
+                    {
+                        Canvas.SetPendingPoint(null);
+                        return true;
+                    }
                     Canvas.SetPendingPoint(null);
-                    _ = RunEditAsync(() => Edit.DrawLineAsync(x1, y1, wx, wy));
+                    _ = RunEditAsync(() => Edit.DrawLineAsync(mx1, my1, mx2, my2));
                 }
-                else
+                else if (TryModelPoint(wx, wy, "画线", out _, out _))
                 {
-                    Canvas.SetPendingPoint((wx, wy));
+                    Canvas.SetPendingPoint((wx, wy)); // 预览锚点存纸坐标（模型幅面=模型坐标）
                 }
                 return true;
 
@@ -1694,10 +2251,11 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入文本内容（工具栏 Text content 框）");
                     return true;
                 }
+                if (!TryModelPoint(wx, wy, "写字", out double tx, out double ty)) return true;
                 // 视图闭环 T9：字高取输入框（InvariantCulture；非法/≤0 → 默认 3.5，不崩）。
                 // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查）。
                 double height = double.TryParse(TextHeightInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && double.IsFinite(h) && h > 0 ? h : DefaultTextHeight;
-                _ = RunEditAsync(() => Edit.AddTextAsync(wx, wy, text, height));
+                _ = RunEditAsync(() => Edit.AddTextAsync(tx, ty, text, height));
                 return true;
 
             case EditTool.InsertBlock:
@@ -1707,33 +2265,39 @@ public sealed class MainWindow : Window
                     SetEditError("请先输入块名（工具栏 Block name 框）");
                     return true;
                 }
+                if (!TryModelPoint(wx, wy, "插块", out double bx0, out double by0)) return true;
                 // 视图闭环 T9：缩放非法/≤0 → 1；旋转 UI 度 → handler 弧度（非法 → 0）。
                 // 最终审查顺手修：double.IsFinite 守卫——NaN/Infinity → fallback（∞ 曾通过 >0 检查；
                 // NaN/∞ 入 JsonSerializer 会抛异常致编辑静默失败）。
                 double scale = double.TryParse(BlockScaleInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && double.IsFinite(s) && s > 0 ? s : 1;
                 double rotation = double.TryParse(BlockRotationInput?.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double deg) && double.IsFinite(deg) ? deg * Math.PI / 180.0 : 0;
-                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, wx, wy, scale, rotation));
+                _ = RunEditAsync(() => Edit.InsertBlockAsync(block, bx0, by0, scale, rotation));
                 return true;
 
             case EditTool.Move:
                 int? hit = Canvas.HitTest(wx, wy, PickTolerancePixels / Canvas.Scale);
                 if (hit is int i)
                 {
+                    RenderItem hitItem = Canvas.Items[i];
+                    // 项2 A：布局幅面按下图元空间守卫（框只读/纸面未启用/不可映射含旋转）。
+                    if (!TryGuardSelection(hitItem, "移动")) return true;
                     Canvas.Select(i);
-                    _moveBase = Canvas.Items[i].Points.Count > 0
-                        ? Canvas.Items[i].Points[0]
+                    _moveBase = hitItem.Points.Count > 0
+                        ? hitItem.Points[0]
                         : ((double X, double Y)?)null;
                 }
                 else if (Canvas.SelectedHandle is string moveHandle && _moveBase is (double bx, double by))
                 {
                     _moveBase = null;
+                    if (!TryMoveDelta(bx, by, wx, wy, out double dx, out double dy)) return true;
                     // Imp#3：子图元句柄→父 Insert/Dimension 整体移动（块/标注几何随父平移）。
-                    _ = RunEditAsync(() => Edit.MoveAsync(ParentHandle(moveHandle), wx - bx, wy - by));
+                    _ = RunEditAsync(() => Edit.MoveAsync(ParentHandle(moveHandle), dx, dy));
                 }
                 return true;
 
             case EditTool.Delete:
             case EditTool.ChangeLayer:
+                // 选择允许任何图元（含视口框/纸面）；执行前置守卫在工具栏确认/层下拉。
                 Canvas.Select(Canvas.HitTest(wx, wy, PickTolerancePixels / Canvas.Scale));
                 return true;
 
@@ -1815,13 +2379,15 @@ public sealed class MainWindow : Window
 
     /// <summary>
     /// T5：应用幅面——模型幅面（LayoutName=null）按 FrameBounds 锚点裁剪全模型图元；
-    /// 布局幅面经 viewportHandle 查找视口 → BuildViewport 纸面映射。刷新 Canvas/Layers/
-    /// 层下拉/状态栏计数；refit=true（用户切换）按新内容 bounds 重新 Fit，false（编辑重建）保持视图。
+    /// 布局幅面（项2 A）：纸面 + 视口内模型（纸→模型逆映射上下文与图元同源计算）。
+    /// 刷新 Canvas/Layers/层下拉/状态栏计数；refit=true（用户切换）按新内容 bounds
+    /// 重新 Fit，false（编辑重建）保持视图。
     /// </summary>
     private void ApplySheet(SheetRecord sheet, bool refit)
     {
         if (Canvas is null || Layers is null) return;
-        IReadOnlyList<RenderItem> items = ItemsForSheet(sheet);
+        IReadOnlyList<RenderItem> items = ItemsForSheet(sheet, out _layoutViewport);
+        _layoutSheetActive = sheet.LayoutName is not null; // 状态栏/守卫同源；先于 Refresh 防陈旧注记
         Canvas.Refresh(items);
         Layers.Refresh(items, _session); // T8：图层表并集（编辑清空某层后空层仍显示）
         if (LayerList is not null) LayerList.ItemsSource = Layers.Layers;
@@ -1829,9 +2395,7 @@ public sealed class MainWindow : Window
             EditLayerSelector.ItemsSource = Layers.Layers.Select(l => l.Name).ToList();
         _currentSheetId = sheet.SheetId;
         _currentSheetName = sheet.Name;
-        // 修复①：只读标志与幅面同步；切换幅面清除跨空间残留预览锚点/Move 基准
-        // （模型/纸面坐标不得混用——纸面编辑非本期语义，deferred）。
-        _layoutSheetActive = sheet.LayoutName is not null;
+        // 切换幅面清除跨空间残留预览锚点/Move 基准（纸面/模型坐标不得混用）。
         Canvas.SetPendingPoint(null);
         _moveBase = null;
         _baseStatus = $"{_title} — {items.Count} render items";
@@ -1840,13 +2404,22 @@ public sealed class MainWindow : Window
         Canvas.Invalidate();
     }
 
-    /// <summary>T5：幅面图元——模型幅面框内锚点裁剪；布局幅面 BuildViewport（视口缺失→空，诚实）。</summary>
-    private IReadOnlyList<RenderItem> ItemsForSheet(SheetRecord sheet)
+    /// <summary>
+    /// T5/项2 A：幅面图元——模型幅面框内锚点裁剪；布局幅面 ComposeLayout（纸面→
+    /// 视口内模型→框）。视口选择唯一经 EditRouting.ContextFrom（纸边界/退化 → null），
+    /// 无可用视口 → 仅纸面（诚实降级）。
+    /// </summary>
+    private IReadOnlyList<RenderItem> ItemsForSheet(SheetRecord sheet, out LayoutViewportContext? viewport)
     {
         if (sheet.LayoutName is null)
+        {
+            viewport = null;
             return RenderModelBuilder.CropToFrame(_fullModelItems, sheet.FrameBounds);
-        ACadSharp.Entities.Viewport? vp = FindViewport(_doc, sheet.TitleAttributes.GetValueOrDefault("viewportHandle"));
-        return vp is null ? Array.Empty<RenderItem>() : RenderModelBuilder.BuildViewport(_doc, vp);
+        }
+        ACadSharp.Entities.Viewport? candidate = FindViewport(_doc, sheet.TitleAttributes.GetValueOrDefault("viewportHandle"));
+        viewport = candidate is null ? null : EditRouting.ContextFrom(candidate);
+        // 上下文非空 ⇒ candidate 非空；退化/纸边界视口（上下文 null）不传视口给渲染（诚实降级）。
+        return RenderModelBuilder.ComposeLayout(_doc, sheet.LayoutName, viewport is null ? null : candidate);
     }
 
     /// <summary>T5：按句柄在纸空间布局关联块中查找视口实体。</summary>
@@ -1892,6 +2465,8 @@ public sealed class MainWindow : Window
         if (UndoButton is not null) UndoButton.IsEnabled = Edit.RecentTxIds.Count > 0;
         // T9 承接闭环：审计时间线 live-rebuild（编辑/撤销/回滚后无需重开窗口）
         Audit?.Rebuild();
+        // 天读证据：编辑改图后块定义来源哈希/证据表须重读（只读面板，不写审计）。
+        ReloadDeepRead();
     }
 
     private void SetEditError(string? message)

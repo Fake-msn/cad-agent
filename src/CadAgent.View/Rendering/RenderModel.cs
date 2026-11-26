@@ -11,6 +11,9 @@ namespace CadAgent.View.Rendering;
 /// <summary>Flat render primitive kinds produced by <see cref="RenderModelBuilder"/>.</summary>
 public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 
+/// <summary>渲染图元所属空间：布局幅面下纸面实体=PaperSpace，视口内模型=ModelSpace。</summary>
+public enum RenderSpace { ModelSpace, PaperSpace }
+
 /// <summary>
 /// One flat render primitive. Point conventions (all coordinates already transformed
 /// into drawing space by the builder):
@@ -35,6 +38,10 @@ public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 /// DashStyle；<see cref="Fill"/> 仅对 Hatch 有意义：true=实心
 /// 填充（IsSolid），false=仅描边界轮廓（图案填充的图案线生成 deferred）。
 /// 可选参置于 Handle 之后（Closed→DashPattern→Fill 顺序追加，位置构造兼容）。
+/// 空间/来源（项2 F）：<see cref="Space"/> 区分纸面/模型图元；<see cref="SourceHandle"/>
+/// 为原始实体句柄（Insert 子图元不含子索引后缀，溯源用），<see cref="BlockName"/>/
+/// <see cref="ParentInsertChain"/> 记录块展开路径，<see cref="AttributeTag"/> 标属性
+/// 值文本的 ATTRIB 标签；<see cref="Locked"/> 为将来编辑锁定位（默认 false）。
 /// </summary>
 public sealed record RenderItem(
     RenderKind Kind,
@@ -47,12 +54,19 @@ public sealed record RenderItem(
     string Handle,
     bool Closed = false,
     IReadOnlyList<double>? DashPattern = null,
-    bool Fill = false);
+    bool Fill = false,
+    bool Locked = false,
+    RenderSpace Space = RenderSpace.ModelSpace,
+    string? SourceHandle = null,
+    string? BlockName = null,
+    IReadOnlyList<string>? ParentInsertChain = null,
+    string? AttributeTag = null);
 
 /// <summary>
 /// DrawingSession -> flat render-item list (plan 4 task 2). Pure logic: no Avalonia
 /// dependency, safe to unit-test headless. Supported entities: Line, Circle, Arc,
-/// LwPolyline, Polyline2D, TextEntity, MText, Insert (block expansion), Dimension
+/// LwPolyline, Polyline2D, TextEntity, MText, Insert (block expansion + ATTRIB
+/// attributes as Text items), Dimension
 /// (anonymous-block expansion), Hatch (boundary paths + solid fill). Anything
 /// else is skipped and counted via the <c>out skippedCount</c> overload.
 /// ACadSharp 3.8.35 API verified via package XML docs + runtime probe:
@@ -133,6 +147,60 @@ public static class RenderModelBuilder
             Append(e, items, ref skipped, t, rotationDeg: 0, heightScale: s, byBlockColor: null, depth: 0);
         }
         return items;
+    }
+
+    /// <summary>
+    /// 纸面空间读图（项2 F）：布局关联块内实体（排除 Viewport——视口内容与框线分别由
+    /// <see cref="BuildViewport"/>/<see cref="BuildViewportFrame"/> 表达）以 Space=PaperSpace
+    /// 展开，复用同一 Append 管线（块展开/属性/线型口径不变）。未知布局名→空（不抛）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> BuildPaperSpace(CadDocument doc, string layoutName)
+    {
+        var layout = doc.Layouts?.FirstOrDefault(l => string.Equals(l.Name, layoutName, StringComparison.Ordinal));
+        if (layout?.AssociatedBlock is null) return Array.Empty<RenderItem>();
+        var items = new List<RenderItem>();
+        int skipped = 0;
+        var ctx = new EmitContext(RenderSpace.PaperSpace, null, null, null);
+        foreach (Entity e in layout.AssociatedBlock.Entities)
+        {
+            if (e is Viewport) continue;
+            Append(e, items, ref skipped, Affine.Identity, rotationDeg: 0, heightScale: 1,
+                byBlockColor: null, depth: 0, ctx: ctx);
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// 锁定视口框（项2 F）：视口纸面 bounds 的 4 条边线（底/右/顶/左顺序），
+    /// Space=PaperSpace、Locked=true（框线**可选中**但编辑被拒——Route Locked 守卫）、
+    /// Handle=SourceHandle=视口句柄（溯源到视口实体）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> BuildViewportFrame(Viewport vp)
+    {
+        double minX = vp.Center.X - vp.Width / 2, maxX = vp.Center.X + vp.Width / 2;
+        double minY = vp.Center.Y - vp.Height / 2, maxY = vp.Center.Y + vp.Height / 2;
+        string h = vp.Handle.ToString(CultureInfo.InvariantCulture);
+        RenderItem Seg(double x1, double y1, double x2, double y2) => new(
+            RenderKind.Line, new[] { (x1, y1), (x2, y2) }, "0", 0x808080, null, 0, 0, h,
+            Space: RenderSpace.PaperSpace, SourceHandle: h, Locked: true);
+        return new[] { Seg(minX, minY, maxX, minY), Seg(maxX, minY, maxX, maxY),
+                       Seg(maxX, maxY, minX, maxY), Seg(minX, maxY, minX, minY) };
+    }
+
+    /// <summary>
+    /// 布局合成（项2 F）：纸面图元 → 视口内模型图元（纸面坐标）→ 视口框（框最后，
+    /// 画布按序绘制→框覆盖在模型之上）。vp=null 时仅纸面（退化布局诚实降级）。
+    /// </summary>
+    public static IReadOnlyList<RenderItem> ComposeLayout(CadDocument doc, string layoutName, Viewport? vp)
+    {
+        var list = new List<RenderItem>();
+        list.AddRange(BuildPaperSpace(doc, layoutName));
+        if (vp is not null)
+        {
+            list.AddRange(BuildViewport(doc, vp));
+            list.AddRange(BuildViewportFrame(vp));
+        }
+        return list;
     }
 
     /// <summary>
@@ -251,11 +319,23 @@ public static class RenderModelBuilder
         return minX > maxX || minY > maxY ? (0, 0, 1, 1) : (minX, minY, maxX, maxY);
     }
 
+    /// <summary>
+    /// Append 来源上下文（项2 F）：空间 + 来源句柄（不含子索引后缀，溯源用）+
+    /// 块展开路径（最内层块名 / Insert 句柄链）。null=顶层实体（模型空间、无块路径）。
+    /// 属性标签不进上下文：ATTRIB 图元在 EmitAttribute 内直接携带自身上下文。
+    /// </summary>
+    private readonly record struct EmitContext(
+        RenderSpace Space, string? SourceHandle, string? BlockName,
+        IReadOnlyList<string>? InsertChain);
+
     private static void Append(
         Entity e, List<RenderItem> items, ref int skipped,
         Affine t, double rotationDeg, double heightScale, uint? byBlockColor, int depth,
-        string? handle = null)
+        string? handle = null, EmitContext? ctx = null)
     {
+        EmitContext c = ctx ?? new EmitContext(RenderSpace.ModelSpace, null, null, null);
+        // 本次调用新增图元的起点：switch 之后统一戳记（子递归已自带来源，仅补空间）。
+        int startIndex = items.Count;
         string layer = e.Layer?.Name ?? "0";
         uint color = ResolveColor(e, byBlockColor);
         // Top-level entities use their own DXF handle; insert children receive the
@@ -267,6 +347,12 @@ public static class RenderModelBuilder
 
         switch (e)
         {
+            // Ruling R8：ATTDEF 是块模板定义（不可见），实例值仅经 Insert.Attributes 渲染；
+            // 须先于 TextEntity 分支（ACadSharp AttributeBase 派生自 TextEntity）。
+            // 不计数 skipped——定义不属于渲染对象，不是"不支持的实体"。
+            case AttributeDefinition:
+                break;
+
             case Line line:
                 // Line 端点为 WCS（DXF 约定：LINE 不受 OCS 法向影响）——不接 OCS。
                 items.Add(new RenderItem(RenderKind.Line,
@@ -384,12 +470,27 @@ public static class RenderModelBuilder
                 Affine composed = t.Compose(ocs.Compose(InsertTransform(insert)));
                 double rot = rotationDeg + ToDeg(insert.Rotation);
                 double hs = heightScale * Math.Abs(insert.YScale);
+                // 来源戳记：块子图元带最内层块名 + 完整 insert 句柄链（嵌套逐层追加）。
+                string insertHandle = handle;
+                string insertHandleStr = insert.Handle.ToString(CultureInfo.InvariantCulture);
+                var chain = (c.InsertChain ?? Array.Empty<string>()).Append(insertHandleStr).ToArray();
                 int childIndex = 0;
                 foreach (Entity child in insert.Block.Entities)
                 {
                     Append(child, items, ref skipped, composed, rot, hs, color, depth + 1,
-                        handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture));
+                        handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture),
+                        new EmitContext(c.Space, child.Handle.ToString(CultureInfo.InvariantCulture),
+                            insert.Block.Name, chain));
                     childIndex++;
+                }
+                // 属性（ATTRIB）为 Insert 自身附属文本，非块内容：Handle 取 "{insert}:attr:{tag}"、
+                // SourceHandle 为 ATTRIB 句柄（编辑逆映射定位用）。
+                foreach (AttributeEntity attr in insert.Attributes)
+                {
+                    // DXF ATTRIB 的 10/11 组码是"已放置"坐标（INSERT 的 OCS 最终空间），不是块局部
+                    // 坐标——只承接父仿射 t，绝不能套 insert 自身的 composed 变换（全实例偏移上千单位的实证缺陷）。
+                    EmitAttribute(attr, items, t, rotationDeg, heightScale, color,
+                        insertHandle + ":attr:" + attr.Tag, c.Space);
                 }
                 break;
             }
@@ -401,10 +502,14 @@ public static class RenderModelBuilder
                 // 深度守卫与 Insert 对齐：病态 DXF 中块内 Dimension 可回指祖先块（自指环）
                 // →无限递归 StackOverflow；共享块 Dimension DAG 可指数展开。顶层 depth=0 不受影响。
                 if (depth >= MaxInsertDepth || dim.Block is null) { skipped++; break; }
+                var chain = (c.InsertChain ?? Array.Empty<string>())
+                    .Append(dim.Handle.ToString(CultureInfo.InvariantCulture)).ToArray();
                 int childIndex = 0;
                 foreach (Entity child in dim.Block.Entities)
                     Append(child, items, ref skipped, t, rotationDeg, heightScale, byBlockColor, depth + 1,
-                        handle + ":" + childIndex++.ToString(CultureInfo.InvariantCulture));
+                        handle + ":" + childIndex++.ToString(CultureInfo.InvariantCulture),
+                        new EmitContext(c.Space, child.Handle.ToString(CultureInfo.InvariantCulture),
+                            dim.Block.Name, chain));
                 break;
             }
 
@@ -432,6 +537,47 @@ public static class RenderModelBuilder
                 skipped++;
                 break;
         }
+
+        // 统一戳记本次新产图元：来源上下文优先，SourceHandle 缺失回落自身 Handle
+        // （顶层实体=自身句柄，溯源/编辑逆映射同口径）。已带来源（子递归/属性）的图元
+        // 其空间与归属由自身上下文负责，此处只跳过、不改写（祖先不得覆盖后代 Space）。
+        for (int i = startIndex; i < items.Count; i++)
+        {
+            RenderItem it = items[i];
+            if (it.SourceHandle is not null) continue;
+            items[i] = it with
+            {
+                Space = c.Space,
+                SourceHandle = c.SourceHandle ?? it.Handle,
+                BlockName = it.BlockName ?? c.BlockName,
+                ParentInsertChain = it.ParentInsertChain ?? c.InsertChain,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Insert 属性（ATTRIB）发射：坐标是"已放置"坐标，只接父仿射 <paramref name="t"/>；
+    /// 对齐锚点——默认（左+基线）用 InsertPoint，其余对齐（真图标题栏多为居中）用
+    /// AlignmentPoint。不改 plain TextEntity 的既有口径（恒用 InsertPoint）。
+    /// </summary>
+    private static void EmitAttribute(
+        AttributeEntity attr, List<RenderItem> items, Affine t, double rotationDeg,
+        double heightScale, uint? byBlockColor, string handle, RenderSpace space)
+    {
+        bool defaultAlignment = attr.HorizontalAlignment == TextHorizontalAlignment.Left
+            && attr.VerticalAlignment == TextVerticalAlignmentType.Baseline;
+        XYZ anchor = defaultAlignment ? attr.InsertPoint : attr.AlignmentPoint;
+        var (ocs, _) = OcsMapper(attr.Normal);
+        (double ox, double oy) = ocs.Apply(anchor.X, anchor.Y);
+        items.Add(new RenderItem(RenderKind.Text,
+            new[] { t.Apply(ox, oy) },
+            attr.Layer?.Name ?? "0", ResolveColor(attr, byBlockColor), attr.Value,
+            Math.Abs(attr.Height) * heightScale,
+            NormDeg(OcsRotation(ToDeg(attr.Rotation), ocs) + rotationDeg),
+            handle, DashPattern: ResolveDash(attr),
+            Space: space,
+            SourceHandle: attr.Handle.ToString(CultureInfo.InvariantCulture),
+            AttributeTag: attr.Tag));
     }
 
     /// <summary>

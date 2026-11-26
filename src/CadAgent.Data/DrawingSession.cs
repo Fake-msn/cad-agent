@@ -148,6 +148,8 @@ public sealed class DrawingSession : IDrawingSession
 
     /// <summary>
     /// SHA-256 over a canonical content projection of the in-memory document.
+    /// 覆盖全空间（T5）：图层 + 模型空间实体（E|）+ 各布局的纸面实体（P|）+ 块定义实体（B|）
+    /// + 插入的属性值（A|）——纸面/块/属性编辑必须可观测，否则 audit 显示假 "no change"。
     /// Excludes volatile header fields ($HANDSEED, Julian-date doubles) so the hash
     /// is stable across no-change SaveWorking/Reload cycles and reflects real
     /// content changes only. Doubles use round-trip "R" format, invariant culture.
@@ -161,32 +163,104 @@ public sealed class DrawingSession : IDrawingSession
         }
         foreach (var e in Doc.Entities.OrderBy(e => e.Handle))
         {
-            sb.Append(FormattableString.Invariant($"E|{e.Handle}|{e.GetType().Name}|{e.Layer?.Name ?? "0"}|{e.Color}"));
-            switch (e)
+            ProjectEntity(sb, "E", e);
+        }
+        if (Doc.Layouts is not null)
+        {
+            foreach (var layout in Doc.Layouts.OrderBy(l => l.Name, StringComparer.Ordinal))
             {
-                case Line line:
-                    sb.Append(FormattableString.Invariant(
-                        $"|{line.StartPoint.X:R}|{line.StartPoint.Y:R}|{line.StartPoint.Z:R}|{line.EndPoint.X:R}|{line.EndPoint.Y:R}|{line.EndPoint.Z:R}"));
-                    break;
-                case TextEntity text: // single-line TEXT only; MText : Entity (NOT TextEntity) — MText projection deferred
-                    sb.Append(FormattableString.Invariant(
-                        $"|{text.InsertPoint.X:R}|{text.InsertPoint.Y:R}|{text.InsertPoint.Z:R}|{text.Value}|{text.Height:R}"));
-                    break;
-                case UnknownEntity unknown:
-                    sb.Append(FormattableString.Invariant($"|{unknown.ObjectName}|{unknown.DxfClass?.CppClassName}"));
-                    break;
-                case ProxyEntity proxy:
-                    sb.Append(FormattableString.Invariant($"|{proxy.ObjectName}|{proxy.DxfClass?.CppClassName}"));
-                    break;
-                case Insert insert:
-                    sb.Append(FormattableString.Invariant(
-                        $"|I|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.InsertPoint.Z:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));
-                    break;
-                // Other entity types: base fields only (documented limitation; extend as handlers grow).
+                // 只投影纸面布局：Model 布局（IsPaperSpace=false）的关联块就是 *Model_Space，
+                // 与 E| 行同一集合，重复投影纯属 2× 成本且语义错误（同 SheetRegistryBuilder 口径）。
+                if (!layout.IsPaperSpace || layout.AssociatedBlock is null) continue;
+                foreach (var e in layout.AssociatedBlock.Entities.OrderBy(e => e.Handle))
+                {
+                    ProjectEntity(sb, "P|" + layout.Name, e);
+                }
             }
-            sb.Append('\n');
+        }
+        // 布局关联块（*Model_Space/*Paper_Space/各*_Space 及用户布局块）已由 E|/P| 行投影，
+        // 按 BlockRecord.Layout 排除，避免块定义投影双计；无布局的普通块才是 B| 行。
+        foreach (var block in Doc.BlockRecords
+                     .Where(b => b.Layout is null)
+                     .OrderBy(b => b.Name, StringComparer.Ordinal))
+        {
+            if (string.IsNullOrEmpty(block.Name)) continue;
+            foreach (var e in block.Entities.OrderBy(e => e.Handle))
+            {
+                ProjectEntity(sb, "B|" + block.Name, e);
+            }
         }
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+    }
+
+    private static void ProjectEntity(StringBuilder sb, string prefix, Entity e)
+    {
+        sb.Append(FormattableString.Invariant($"{prefix}|{e.Handle}|{e.GetType().Name}|{e.Layer?.Name ?? "0"}|{e.Color}"));
+        switch (e)
+        {
+            // ADEF 必须先于 TextEntity 分支：AttributeDefinition : AttributeBase : TextEntity，
+            // 否则块属性定义（其 Value 为默认值）会被泛型文本行吞掉。
+            case AttributeDefinition adef:
+                sb.Append(FormattableString.Invariant(
+                    $"|ADEF|{adef.Tag}|{adef.Value}|{adef.Height:R}|{adef.Rotation:R}|{adef.InsertPoint.X:R}|{adef.InsertPoint.Y:R}"));
+                break;
+            case Line line:
+                sb.Append(FormattableString.Invariant(
+                    $"|{line.StartPoint.X:R}|{line.StartPoint.Y:R}|{line.StartPoint.Z:R}|{line.EndPoint.X:R}|{line.EndPoint.Y:R}|{line.EndPoint.Z:R}"));
+                break;
+            case TextEntity text:
+                sb.Append(FormattableString.Invariant(
+                    $"|{text.InsertPoint.X:R}|{text.InsertPoint.Y:R}|{text.InsertPoint.Z:R}|{text.Value}|{text.Height:R}"));
+                break;
+            case MText mt:
+                sb.Append(FormattableString.Invariant(
+                    $"|{mt.InsertPoint.X:R}|{mt.InsertPoint.Y:R}|{mt.Value}|{mt.Height:R}"));
+                break;
+            case LwPolyline lw:
+                sb.Append(FormattableString.Invariant($"|{(lw.IsClosed ? 1 : 0)}"));
+                foreach (var v in lw.Vertices)
+                {
+                    sb.Append(FormattableString.Invariant($"|{v.Location.X:R},{v.Location.Y:R}"));
+                }
+                break;
+            case Polyline2D p2:
+                foreach (var v in p2.Vertices)
+                {
+                    sb.Append(FormattableString.Invariant($"|{v.Location.X:R},{v.Location.Y:R},{v.Location.Z:R}"));
+                }
+                break;
+            // ACadSharp 3.8.35: Arc : Circle —— Arc 分支必须先于 Circle，否则不可达（编译期实证）。
+            case Arc arc:
+                sb.Append(FormattableString.Invariant(
+                    $"|{arc.Center.X:R}|{arc.Center.Y:R}|{arc.Radius:R}|{arc.StartAngle:R}|{arc.EndAngle:R}"));
+                break;
+            case Circle circle:
+                sb.Append(FormattableString.Invariant($"|{circle.Center.X:R}|{circle.Center.Y:R}|{circle.Radius:R}"));
+                break;
+            // Z 保留：旧投影已含 InsertPoint.Z，去掉会丢失 Z 向位移可观测性（承重口径不倒退）。
+            case Insert insert:
+                sb.Append(FormattableString.Invariant(
+                    $"|{insert.Block?.Name}|{insert.InsertPoint.X:R}|{insert.InsertPoint.Y:R}|{insert.InsertPoint.Z:R}|{insert.XScale:R}|{insert.YScale:R}|{insert.ZScale:R}|{insert.Rotation:R}"));
+                // 属性值（图号/轴号等）是纸面可见内容，必须进哈希；层/位置/字高是可见排版，
+                // 移动 ATTRIB 不改值也必须可观测。按 Tag 排序保证确定性。
+                foreach (var attr in insert.Attributes.OrderBy(a => a.Tag, StringComparer.Ordinal))
+                {
+                    sb.Append(FormattableString.Invariant(
+                        $"|A|{attr.Tag}|{attr.Value}|{attr.Layer?.Name ?? "0"}|{attr.InsertPoint.X:R},{attr.InsertPoint.Y:R}|{attr.Height:R}"));
+                }
+                break;
+            case Hatch hatch:
+                sb.Append(FormattableString.Invariant($"|{hatch.IsSolid}|{hatch.Paths.Count}"));
+                break;
+            case UnknownEntity unknown:
+                sb.Append(FormattableString.Invariant($"|{unknown.ObjectName}|{unknown.DxfClass?.CppClassName}"));
+                break;
+            case ProxyEntity proxy:
+                sb.Append(FormattableString.Invariant($"|{proxy.ObjectName}|{proxy.DxfClass?.CppClassName}"));
+                break;
+            // Other entity types: base fields only (documented limitation; extend as handlers grow).
+        }
+        sb.Append('\n');
     }
 
     public void SaveWorking()
