@@ -129,7 +129,7 @@ public class HashRevisionCacheTests : IDisposable
     }
 
     [Fact]
-    public void FailedStep_WithoutMutation_KeepsHash_AndRevision()
+    public void FailedStep_WithoutMutation_KeepsHash_InvalidationStillBumpsRevision()
     {
         var s = NewSession();
         string before = s.ComputeHash();
@@ -146,7 +146,9 @@ public class HashRevisionCacheTests : IDisposable
         var failed = Assert.Single(audit.ReadAll(), e => e.Entry.Kind == "step-failed");
         Assert.Equal(failed.Entry.BeforeHash, failed.Entry.AfterHash);
         Assert.Equal(before, failed.Entry.BeforeHash);
-        Assert.Equal(0, s.Revision); // 仅成功步失效
+        // 合并前审查修复：异常失败路径统一失效缓存再重算（处理器可能「先变更后抛出」）。
+        // 本步未变更 → 重算仍等于 before（审计哈希不变），但失效计数 +1。
+        Assert.Equal(1, s.Revision);
     }
 
     [Fact]

@@ -250,6 +250,57 @@ public class StepEngineTests : IDisposable
         Assert.Equal("v1", step.Entry.AfterHash); // 失效先于 afterHash，缓存不吞变更
     }
 
+    /// <summary>先变更模型再抛：ImportSymbolHandler 建 BlockRecord 后 Req("x") 抛 KeyNotFound 的真实形态。</summary>
+    private sealed class MutatingThrowingHandler : IStepHandler
+    {
+        public string Kind => "mutate-throw";
+        public StepResult Apply(IDrawingSession s, JsonElement p)
+        {
+            ((HashCachingSession)s).Content = "v1";
+            throw new InvalidOperationException("变更后爆炸");
+        }
+    }
+
+    [Fact]
+    public void Run_HandlerMutatesThenThrows_StepFailedAfterHashReflectsMutation()
+    {
+        // 判别性：catch 路径若沿用缓存的 beforeHash 冒充 afterHash，
+        // 此测试得到的 AfterHash 会是 v0（失败）——修复后必须为 v1。
+        var session = new HashCachingSession(Path.Combine(_dir, "mutate-throw.dxf"));
+        var engine = new StepEngine(_audit, _snapshots,
+            new FixedIdentity(new OperatorIdentity("TEST\\drawer", Role.Draw)), new RoleChecker(),
+            new IStepHandler[] { new MutatingThrowingHandler() });
+
+        var result = engine.Run(Plan("mutate-throw"), session, "s1");
+
+        Assert.False(result.Ok);
+        Assert.Contains("变更后爆炸", result.Error);
+        var failed = Assert.Single(_audit.ReadAll(), r => r.Entry.Kind == "step-failed");
+        Assert.Equal("v0", failed.Entry.BeforeHash);
+        Assert.Equal("v1", failed.Entry.AfterHash); // 失效先于 afterHash，缓存不吞已发生的变更
+        Assert.NotEqual(failed.Entry.BeforeHash, failed.Entry.AfterHash);
+        Assert.Equal(1, session.Revision);
+        Assert.Equal(0, _session.SaveCount); // 失败事务不落盘（未受影响）
+    }
+
+    [Fact]
+    public void Run_ThrowingHandlerWithoutMutation_AfterHashEqualsBefore()
+    {
+        // 无变更的抛出：失效缓存但重新计算仍等于 before（不得凭空改变审计哈希）。
+        var session = new HashCachingSession(Path.Combine(_dir, "throw-only.dxf"));
+        var engine = new StepEngine(_audit, _snapshots,
+            new FixedIdentity(new OperatorIdentity("TEST\\drawer", Role.Draw)), new RoleChecker(),
+            new IStepHandler[] { new ThrowingHandler() });
+
+        var result = engine.Run(Plan("throw-op"), session, "s1");
+
+        Assert.False(result.Ok);
+        var failed = Assert.Single(_audit.ReadAll(), r => r.Entry.Kind == "step-failed");
+        Assert.Equal(failed.Entry.BeforeHash, failed.Entry.AfterHash);
+        Assert.Equal("v0", failed.Entry.AfterHash);
+        Assert.Equal(1, session.Revision);
+    }
+
     [Fact]
     public void Run_NonIHashRevisionFake_Unaffected()
     {

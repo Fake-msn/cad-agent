@@ -194,11 +194,20 @@ public sealed class StepEngine
                 if (result.Ok) (session as IHashRevision)?.InvalidateHash();
                 afterHash = session.ComputeHash();
             }
-            catch (Exception ex) { result = new StepResult(false, ex.Message, ""); }
+            catch (Exception ex)
+            {
+                // 处理器可能「先变更再抛出」（如 ImportSymbolHandler 建 BlockRecord 后
+                // Req("x") 抛 KeyNotFound）——失败路径同样失效哈希缓存再重算，
+                // 否则缓存的 beforeHash 会冒充 afterHash，审计丢失已发生的变更。
+                (session as IHashRevision)?.InvalidateHash();
+                afterHash = session.ComputeHash();
+                result = new StepResult(false, ex.Message, "");
+            }
 
             if (!result.Ok)
             {
-                // 仅 Ok 失效（spec §5）：失败调用方自行 Reload，此处不失效。
+                // 返回失败（非异常）不在此失效（spec §5）：失败调用方自行 Reload；
+                // 异常路径已在上方失效并重算 afterHash（可能已半改模型）。
                 Append(op, sessionId, "step-failed", result.TargetHandle,
                     JsonSerializer.Serialize(new { step.Kind, result.Error }), beforeHash, afterHash, snapshot, plan.PlanId);
                 return new TxResult(txId, false, done, result.Error);
