@@ -59,9 +59,6 @@ public sealed class CanvasViewModel
     /// <summary>缩放上下限，防止浮点退化/溢出。</summary>
     private const double MinZoom = 1e-6, MaxZoom = 1e6;
 
-    /// <summary>文本命中盒宽度估算：每字符 0.6×字高（等宽近似，无字形度量）。</summary>
-    private const double TextWidthPerHeight = 0.6;
-
     private double _baseScale = 1;
     private double _minX, _minY;
     private double _viewportW, _viewportH;
@@ -69,10 +66,20 @@ public sealed class CanvasViewModel
     private readonly HashSet<string> _highlightedHandles = new(StringComparer.Ordinal);
     private bool _showCenterlines;
 
-    public CanvasViewModel(IReadOnlyList<RenderItem> items) => Items = items;
+    public CanvasViewModel(IReadOnlyList<RenderItem> items)
+    {
+        Items = items;
+        Index = new RenderItemIndex(items);
+    }
 
     /// <summary>渲染图元（T2 RenderModelBuilder 产物，绘制坐标系）。T9 Refresh 可替换。</summary>
     public IReadOnlyList<RenderItem> Items { get; private set; }
+
+    /// <summary>
+    /// 渲染图元空间索引（项3 T1）：构造/Refresh 时重建，供视口裁剪与命中宽相位。
+    /// 与 <see cref="Items"/> 同步替换，隐藏层在查询内过滤。
+    /// </summary>
+    public RenderItemIndex Index { get; private set; }
 
     /// <summary>
     /// 编辑后重建（T9）：替换渲染图元（StepEngine 事务提交/撤回后由 UI 调
@@ -82,6 +89,7 @@ public sealed class CanvasViewModel
     public void Refresh(IReadOnlyList<RenderItem> items)
     {
         Items = items;
+        Index = new RenderItemIndex(items);
         SelectedIndex = null;
         _highlightedHandles.Clear();
         DiffOverlay = null;
@@ -330,99 +338,26 @@ public sealed class CanvasViewModel
     }
 
     /// <summary>
-    /// 世界坐标命中测试（容差=世界单位）：Line/Polyline 线段距离；Circle/Arc 边界
-    /// 径向距离（Arc 另需角度落在 CCW 扫掠范围内，端点带容差松弛）；Text 轴对齐
-    /// 包围盒（宽=字符数×字高×0.6，与 T3 画布的水平文本渲染一致，旋转暂不参与）。
-    /// 跳过隐藏图层；返回 Items 中首个命中的原始索引。
+    /// 当前视口对应的世界矩形（屏幕 0..viewport 逆变换，min/max 归一——屏幕 Y-down 转
+    /// 世界 Y-up 后上下翻转，不可直接取两角顺序）。未 Fit（viewport≤0）→ 反相空矩形
+    /// (0,0,-1,-1)，调用方按 Min&gt;Max 判空（<see cref="QueryViewport"/> 对其返回空）。
     /// </summary>
-    public int? HitTest(double worldX, double worldY, double tolerance)
+    public (double MinX, double MinY, double MaxX, double MaxY) WorldViewport()
     {
-        double tol = Math.Max(0, tolerance);
-        for (int i = 0; i < Items.Count; i++)
-        {
-            RenderItem item = Items[i];
-            if (HiddenLayers.Contains(item.Layer)) continue;
-            if (Hits(item, worldX, worldY, tol)) return i;
-        }
-        return null;
+        if (_viewportW <= 0 || _viewportH <= 0) return (0, 0, -1, -1);
+        (double x0, double y0) = ScreenToWorld(0, 0);
+        (double x1, double y1) = ScreenToWorld(_viewportW, _viewportH);
+        return (Math.Min(x0, x1), Math.Min(y0, y1), Math.Max(x0, x1), Math.Max(y0, y1));
     }
 
-    private static bool Hits(RenderItem item, double x, double y, double tol)
-    {
-        switch (item.Kind)
-        {
-            case RenderKind.Line:
-                return item.Points.Count >= 2
-                    && DistToSegment(x, y, item.Points[0], item.Points[1]) <= tol;
+    /// <summary>世界矩形内的可见（非隐藏层）图元索引，升序——委托 <see cref="Index"/>。</summary>
+    public IReadOnlyList<int> QueryViewport((double MinX, double MinY, double MaxX, double MaxY) rect) =>
+        Index.Query(rect, HiddenLayers);
 
-            case RenderKind.Circle:
-            {
-                if (item.Points.Count < 2) return false;
-                (double cx, double cy) = item.Points[0];
-                double r = Math.Abs(item.Points[1].X);
-                double d = Math.Sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
-                return Math.Abs(d - r) <= tol;
-            }
-
-            case RenderKind.Arc:
-            {
-                if (item.Points.Count < 3) return false;
-                (double cx, double cy) = item.Points[0];
-                double r = Math.Abs(item.Points[1].X);
-                double dx = x - cx, dy = y - cy;
-                double d = Math.Sqrt(dx * dx + dy * dy);
-                if (Math.Abs(d - r) > tol) return false;
-                double startDeg = item.Points[1].Y;
-                double span = NormDeg(item.Points[2].X - startDeg);
-                if (span < 1e-9) return true; // start==end 视作整圆（与画布渲染一致）
-                double angle = NormDeg(Math.Atan2(dy, dx) * 180.0 / Math.PI);
-                double rel = NormDeg(angle - startDeg);
-                double slackDeg = r > 1e-12 ? tol / r * 180.0 / Math.PI : 360;
-                return rel <= span + slackDeg || rel >= 360 - slackDeg;
-            }
-
-            case RenderKind.Polyline:
-            {
-                if (item.Points.Count == 0) return false;
-                if (item.Points.Count == 1)
-                    return Dist(x, y, item.Points[0]) <= tol;
-                for (int s = 0; s + 1 < item.Points.Count; s++)
-                    if (DistToSegment(x, y, item.Points[s], item.Points[s + 1]) <= tol)
-                        return true;
-                return false;
-            }
-
-            case RenderKind.Text:
-            {
-                if (item.Points.Count < 1) return false;
-                (double ix, double iy) = item.Points[0];
-                double w = (item.Text?.Length ?? 0) * item.TextHeight * TextWidthPerHeight;
-                double h = item.TextHeight;
-                return x >= ix - tol && x <= ix + w + tol && y >= iy - tol && y <= iy + h + tol;
-            }
-
-            default:
-                return false;
-        }
-    }
-
-    private static double Dist(double x, double y, (double X, double Y) p)
-    {
-        double dx = x - p.X, dy = y - p.Y;
-        return Math.Sqrt(dx * dx + dy * dy);
-    }
-
-    /// <summary>点到线段最短距离（投影参数夹在 [0,1]，端点外取端点距离）。</summary>
-    private static double DistToSegment(double x, double y, (double X, double Y) a, (double X, double Y) b)
-    {
-        double abx = b.X - a.X, aby = b.Y - a.Y;
-        double len2 = abx * abx + aby * aby;
-        double t = len2 <= 1e-24 ? 0 : ((x - a.X) * abx + (y - a.Y) * aby) / len2;
-        t = Math.Clamp(t, 0, 1);
-        double px = a.X + t * abx, py = a.Y + t * aby;
-        double dx = x - px, dy = y - py;
-        return Math.Sqrt(dx * dx + dy * dy);
-    }
-
-    private static double NormDeg(double deg) => ((deg % 360.0) + 360.0) % 360.0;
+    /// <summary>
+    /// 世界坐标命中测试（容差=世界单位）：委托 <see cref="RenderItemIndex.FirstHit"/>
+    /// （bbox 宽相位 + 既有精确判定数学）。跳过隐藏图层；返回 Items 中首个命中的原始索引。
+    /// </summary>
+    public int? HitTest(double worldX, double worldY, double tolerance) =>
+        Index.FirstHit(worldX, worldY, tolerance, HiddenLayers);
 }
