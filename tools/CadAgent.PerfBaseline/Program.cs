@@ -273,8 +273,10 @@ internal static class Program
         byte[] png = null!;
         m.SnapshotMs = Ms(() => png = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
         m.SnapshotKb = png.Length / 1024;
-        // 信息项：第二次快照（字体/几何一次性初始化后）——首帧是否含进程级预热。
-        m.SnapshotWarmMs = Ms(() => _ = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
+        // 信息项：重复快照（字体/几何一次性初始化后）；快照耗时方差较大，最暖一次即稳态近似。
+        double warm1 = Ms(() => _ = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
+        double warm2 = Ms(() => _ = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
+        m.SnapshotWarmMs = Math.Min(warm1, warm2);
 
         BenchFrames(m, items, bounds);
 
@@ -362,7 +364,8 @@ internal static class Program
         string status = Status(m);
         Markdown.Add($"| {m.Name} | {Num(m.LoadSourceMs)} | {Num(m.LoadWorkingMs)} | " +
                      $"{m.BuildMs:0}ms -> {m.ItemCount} items | {m.HashColdMs:0.#}ms | {m.HashRepeatMs:0.###}ms | " +
-                     $"{m.SnapshotMs:0}ms ({m.SnapshotKb}KB) | {m.RefinedFrameMs:0.#}ms (+{m.RefinedEncodeMs:0.#}ms) | " +
+                     $"{m.SnapshotMs:0}ms ({m.SnapshotKb}KB, warm {m.SnapshotWarmMs:0}ms) | " +
+                     $"{m.RefinedFrameMs:0.#}ms (+{m.RefinedEncodeMs:0.#}ms enc, warm {m.RefinedWarmMs:0.#}ms) | " +
                      $"{m.InteractiveFrameMs:0.##}ms / {m.InteractiveFrame2Ms:0.##}ms | {m.HitTotalMs:0}ms ({m.HitCount}) | " +
                      $"{m.HitPerCallMs:0.###}ms | {m.ManagedMb}MB | {status} |");
 
