@@ -175,6 +175,8 @@ public static class EditTargetResolver
     }
 
     private static bool HasValue(JsonElement p, string name) =>
-        p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);    private static bool IsTrue(JsonElement p, string name) =>
+        p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+
+    private static bool IsTrue(JsonElement p, string name) =>
         p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
 }
