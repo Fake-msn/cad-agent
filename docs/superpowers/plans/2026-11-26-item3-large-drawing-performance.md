@@ -304,3 +304,21 @@ T1..T6 区间：`3fd2747..1252b64`（13 提交）。T7 工具入 `CadAgent.sln`�
 Core 290 / Cli 371（1 skip）一次全绿；Data 681、View 626 首次各 1 例失败
 （`InsertMove_ChangesHash`、`RefreshAsync_CorruptAdjudications_WritesFailedCheckRunAudit`），
 单测隔离与整批复跑均通过 → 判为 flake，与本次改动（工具 + View `InternalsVisibleTo`）无关联。
+留证范围订正：整批首跑与 rerun 日志已留（`t7r1-*.log`）；**隔离单测复跑未单独留日志**（仅记录结果），
+flake 判据以整批 rerun 日志为准。冒烟 `--synth 20k` 的模拟重建实际样本为 52.7/64.6/53.1ms
+（中位 53.1ms；此前「53–62ms」为概略值，已改为实测样本）。
+
+### Final fix wave（2026-11-27，整分支终审）
+
+| 修复 | 提交 |
+|---|---|
+| sidecar 尽力写（Save→bool，只读项目可打开）+ LoadAsync 后台 Build/Sheets + 幂等清理 | `f2c36f0 fix(data,view): sidecar 尽力写与后台 Build（终审修复）` |
+| 模拟重建措辞（spec §8/§12）+ 工具 `index build` 单列 | `d941c54 fix(tools,docs): 模拟重建措辞与索引计时` |
+| 报告/plan 证据订正（smoke 样本、flake 日志留存） | `chore(docs): 终审证据订正与残留注记` |
+
+- 终审复测（`after-real.md`/`after-synth.md`，含 `index build` 列）：真实图 Build 240/1126ms、
+  索引 21/12ms、模拟重建 78.2/108ms；synth 200k Build 216ms、索引 418ms、模拟重建 207.1ms
+  （复测在验收运行波动内，判据仍以上表为准）。
+- 门禁 `dotnet test CadAgent.sln`（日志 `outputs/perf-baseline/final-gate-sln.log`）：
+  Core 290 / Data 683 / View 631 / Cli 371（1 skip）/ Llm 33 / Report 31 / TArchBridge 76 /
+  Zwcad 16 / Acad 180（1 skip）→ **2311 通过 / 2 跳过 / 0 失败**，单次全绿无 flake。
