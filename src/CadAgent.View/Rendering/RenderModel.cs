@@ -422,14 +422,14 @@ public static class RenderModelBuilder
                             insert.Block.Name, chain, null));
                     childIndex++;
                 }
-                // 属性（ATTRIB）为 Insert 自身附属文本，非块内容： AttributeEntity : TextEntity，
-                // 经同一 Append 渲染 Value/InsertPoint/Height/Rotation；Handle 取 "{insert}:attr:{tag}"、
+                // 属性（ATTRIB）为 Insert 自身附属文本，非块内容：Handle 取 "{insert}:attr:{tag}"、
                 // SourceHandle 为 ATTRIB 句柄（编辑逆映射定位用）。
                 foreach (AttributeEntity attr in insert.Attributes)
                 {
-                    Append(attr, items, ref skipped, composed, rot, hs, color, depth + 1,
-                        insertHandle + ":attr:" + attr.Tag,
-                        new EmitContext(c.Space, attr.Handle.ToString(CultureInfo.InvariantCulture), null, null, attr.Tag));
+                    // DXF ATTRIB 的 10/11 组码是"已放置"坐标（INSERT 的 OCS 最终空间），不是块局部
+                    // 坐标——只承接父仿射 t，绝不能套 insert 自身的 composed 变换（全实例偏移上千单位的实证缺陷）。
+                    EmitAttribute(attr, items, t, rotationDeg, heightScale, color,
+                        insertHandle + ":attr:" + attr.Tag, c.Space);
                 }
                 break;
             }
@@ -478,12 +478,12 @@ public static class RenderModelBuilder
         }
 
         // 统一戳记本次新产图元：来源上下文优先，SourceHandle 缺失回落自身 Handle
-        // （顶层实体=自身句柄，溯源/编辑逆映射同口径）。子递归已自带来源则不覆盖（仅补空间），
-        // 保证最内层块名/句柄链不被外层上下文改写。
+        // （顶层实体=自身句柄，溯源/编辑逆映射同口径）。已带来源（子递归/属性）的图元
+        // 其空间与归属由自身上下文负责，此处只跳过、不改写（祖先不得覆盖后代 Space）。
         for (int i = startIndex; i < items.Count; i++)
         {
             RenderItem it = items[i];
-            if (it.SourceHandle is not null) { items[i] = it with { Space = c.Space }; continue; }
+            if (it.SourceHandle is not null) continue;
             items[i] = it with
             {
                 Space = c.Space,
@@ -493,6 +493,31 @@ public static class RenderModelBuilder
                 AttributeTag = it.AttributeTag ?? c.AttributeTag,
             };
         }
+    }
+
+    /// <summary>
+    /// Insert 属性（ATTRIB）发射：坐标是"已放置"坐标，只接父仿射 <paramref name="t"/>；
+    /// 对齐锚点——默认（左+基线）用 InsertPoint，其余对齐（真图标题栏多为居中）用
+    /// AlignmentPoint。不改 plain TextEntity 的既有口径（恒用 InsertPoint）。
+    /// </summary>
+    private static void EmitAttribute(
+        AttributeEntity attr, List<RenderItem> items, Affine t, double rotationDeg,
+        double heightScale, uint? byBlockColor, string handle, RenderSpace space)
+    {
+        bool defaultAlignment = attr.HorizontalAlignment == TextHorizontalAlignment.Left
+            && attr.VerticalAlignment == TextVerticalAlignmentType.Baseline;
+        XYZ anchor = defaultAlignment ? attr.InsertPoint : attr.AlignmentPoint;
+        var (ocs, _) = OcsMapper(attr.Normal);
+        (double ox, double oy) = ocs.Apply(anchor.X, anchor.Y);
+        items.Add(new RenderItem(RenderKind.Text,
+            new[] { t.Apply(ox, oy) },
+            attr.Layer?.Name ?? "0", ResolveColor(attr, byBlockColor), attr.Value,
+            Math.Abs(attr.Height) * heightScale,
+            NormDeg(OcsRotation(ToDeg(attr.Rotation), ocs) + rotationDeg),
+            handle, DashPattern: ResolveDash(attr),
+            Space: space,
+            SourceHandle: attr.Handle.ToString(CultureInfo.InvariantCulture),
+            AttributeTag: attr.Tag));
     }
 
     /// <summary>

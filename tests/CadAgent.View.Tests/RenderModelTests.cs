@@ -1237,6 +1237,71 @@ public class RenderModelTests
     }
 
     [Fact]
+    public void Build_InsertAttribute_UsesPlacedCoordinates_NotBlockLocal()
+    {
+        // DXF ATTRIB 的 10/11 组码是"已放置"坐标（INSERT 的 OCS 最终空间），不是块局部坐标：
+        // 顶层 Insert 的仿射绝不能再施加一次（旧实现全实例偏移数百至数千单位的实证缺陷）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("B");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block)
+            {
+                InsertPoint = new XYZ(100, 200, 0), Rotation = Math.PI / 2,
+                XScale = 1, YScale = 1
+            };
+            var attr = new AttributeEntity { Tag = "T", Value = "V" };
+            attr.InsertPoint = new XYZ(150, 250, 0);
+            attr.AlignmentPoint = new XYZ(150, 250, 0);
+            ins.Attributes.Add(attr);
+            doc.Entities.Add(ins);
+            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(0, 0, 0), Value = "锚点", Height = 1 });
+        });
+        try
+        {
+            var items = RenderModelBuilder.Build(DrawingSession.Load(path));
+            var attrItem = Assert.Single(items, i => i.AttributeTag == "T");
+            Assert.Equal(150, attrItem.Points[0].X, 6);
+            Assert.Equal(250, attrItem.Points[0].Y, 6);
+            Assert.NotNull(attrItem.SourceHandle);
+            Assert.EndsWith(":attr:T", attrItem.Handle);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Build_AttributeNonDefaultAlignment_UsesAlignmentPoint()
+    {
+        // 非默认对齐（真图标题栏多为居中）的语义锚点是 AlignmentPoint（组码 11），
+        // 而非组码 10 的 InsertPoint。plain TextEntity 口径不变（仍用 InsertPoint）。
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("B2");
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block) { InsertPoint = new XYZ(0, 0, 0) };
+            var attr = new AttributeEntity
+            {
+                Tag = "C", Value = "居中",
+                HorizontalAlignment = TextHorizontalAlignment.Center,
+                VerticalAlignment = TextVerticalAlignmentType.Middle
+            };
+            attr.InsertPoint = new XYZ(0, 0, 0);
+            attr.AlignmentPoint = new XYZ(5, 5, 0);
+            ins.Attributes.Add(attr);
+            doc.Entities.Add(ins);
+        });
+        try
+        {
+            var items = RenderModelBuilder.Build(DrawingSession.Load(path));
+            var attrItem = Assert.Single(items, i => i.AttributeTag == "C");
+            Assert.Equal(5, attrItem.Points[0].X, 6);
+            Assert.Equal(5, attrItem.Points[0].Y, 6);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void Build_InsertChildren_StampedWithBlockNameAndInsertChain()
     {
         // 块子图元来源戳记：BlockName=最内层块名，ParentInsertChain=Insert 句柄链（外→内），
