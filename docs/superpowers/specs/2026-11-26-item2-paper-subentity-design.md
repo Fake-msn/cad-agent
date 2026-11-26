@@ -116,9 +116,10 @@ EditTarget? Resolve(DrawingSession s, JsonElement p);
 - 删除 `_layoutSheetActive` 全幅面只读硬闸；每幅面持 `LayoutViewportContext`。
 - 纯函数（可单测）：
 ```csharp
-record EditRoute(RenderSpace Space, bool InViewport, bool CanMapModel,
-                 bool IsBlockChild, bool Locked);
+enum EditSpaceIntent { Model, Paper, Locked, BlockChild, Unavailable }
+record EditRoute(EditSpaceIntent Intent, bool CanMapModel, string? Reason);
 EditRoute Route(LayoutViewportContext? vp, RenderItem? hit, (double X,double Y) paperPoint);
+// BlockChild（模型空间子图元）保留 CanMapModel；Paper 子图元附分类 Reason；Unavailable 不产出。
 ```
 按序判定：Locked→只读；`BlockName!=null`→块子图元（需子图元模式）；ModelSpace→模型（`CanMapModel`）；PaperSpace→纸面；未命中→点 `PaperRect` 内=模型，否则纸面。
 无有效视口：纸面可编辑，模型编辑拒绝。
@@ -135,7 +136,7 @@ EditRoute Route(LayoutViewportContext? vp, RenderItem? hit, (double X,double Y) 
 
 - 预览锚点统一存纸坐标，提交时按路由一次性换算；状态栏显示目标空间（模型/纸面/块定义 <名>）。
 - 两击跨空间 → 拒绝（不得混空间成线）。
-- 状态栏「（只读）」退役 → 「（纸面/模型双空间）」；`LayoutReadOnlyMessage` 常量移除（注释留痕）。
+- 状态栏「（只读）」退役 → Plan-1 过渡文案「（纸面视图：视口内可编辑模型）」（B 完成后改「（纸面/模型双空间）」）；`LayoutReadOnlyMessage` 常量移除（注释留痕）。
 
 ### 4.3 选中与子图元模式
 - 新增 `SelectedSource {Handle=SourceHandle ?? Handle, Owner, BlockName?, AttributeTag?, Locked}`（VM 层可测）。
