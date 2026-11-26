@@ -53,8 +53,8 @@ public sealed record SelectedSource(
 /// </summary>
 public sealed class CanvasViewModel
 {
-    /// <summary>Fit 留白系数（brief：0.9）。</summary>
-    private const double FitMargin = 0.9;
+    /// <summary>Fit 留白系数（brief：0.9）；快照投影（CanvasProjection.FitView）共用同一来源。</summary>
+    internal const double FitMargin = 0.9;
 
     /// <summary>缩放上下限，防止浮点退化/溢出。</summary>
     private const double MinZoom = 1e-6, MaxZoom = 1e6;

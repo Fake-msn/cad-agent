@@ -31,6 +31,27 @@ public sealed record CanvasProjection(
             vm.OffsetX, vm.OffsetY, vm.ViewportWidth, vm.ViewportHeight,
             extraOffsetX, extraOffsetY);
 
+    /// <summary>
+    /// fit 视图投影（项3 T4 快照）：与 <see cref="CanvasViewModel.Fit"/> 同数学
+    /// （留白系数、居中、Zoom=1/Pan=0），但不构造视图模型/索引（大图快照省 O(n) 索引）。
+    /// 非正视口 → 缩放 1、偏移 0（同 Fit 退化口径）。
+    /// </summary>
+    public static CanvasProjection FitView(
+        (double MinX, double MinY, double MaxX, double MaxY) bounds, double viewportW, double viewportH)
+    {
+        double width = bounds.MaxX - bounds.MinX;
+        double height = bounds.MaxY - bounds.MinY;
+        if (viewportW <= 0 || viewportH <= 0)
+            return new(bounds.MinX, bounds.MinY, 1, 0, 0, 0, 0, viewportW, viewportH);
+
+        double sx = width > 1e-12 ? viewportW / width : double.PositiveInfinity;
+        double sy = height > 1e-12 ? viewportH / height : double.PositiveInfinity;
+        double s = Math.Min(sx, sy);
+        double scale = double.IsFinite(s) ? s * CanvasViewModel.FitMargin : 1;
+        return new(bounds.MinX, bounds.MinY, scale, 0, 0,
+            (viewportW - width * scale) / 2, (viewportH - height * scale) / 2, viewportW, viewportH);
+    }
+
     /// <summary>世界 → 屏幕（Y 翻转 + 额外偏移）。</summary>
     public (double X, double Y) WorldToScreen(double x, double y) =>
         ((x - MinX) * Scale + PanX + OffsetX + ExtraOffsetX,
