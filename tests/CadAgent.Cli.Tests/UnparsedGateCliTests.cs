@@ -529,6 +529,32 @@ public class UnparsedGateCliTests : IDisposable
     }
 
     [Fact]
+    public void Intake_GreenSecondRun_TrustedEmptyCensus_NoSourceRereadNoSidecarRewrite()
+    {
+        // 项3 T5：首载落「已验证空」sidecar（VerifiedEmpty + 源 size/mtime/hash）；二次 intake
+        // 信任 Empty → 不重读源 DWG（R9 语义扩展），且不重写 sidecar（信任命中免写）。
+        // 可观测性：sidecar mtime 回溯 1h——若退回 R9（源重读后 Save）会把 mtime 刷新为当前。
+        string dwg = CreateProjectDwg("green-trust.dwg");
+        var (firstCode, firstOut, _) = Run("intake", dwg);
+        Assert.Equal(0, firstCode); // 合成源无 TCH → Green，working 已物化
+        string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+        Assert.True(File.Exists(sidecar));
+        Assert.Equal(0, UnparsedCensusStore.LoadTrusted(_project, dwg, out bool verifiedEmpty).TotalCount);
+        Assert.True(verifiedEmpty);
+        DateTime stamp = DateTime.UtcNow.AddHours(-1);
+        File.SetLastWriteTimeUtc(sidecar, stamp);
+        byte[] before = File.ReadAllBytes(sidecar);
+
+        var (secondCode, secondOut, secondErr) = Run("intake", dwg);
+
+        Assert.Equal(0, secondCode);
+        Assert.Equal("", secondErr);
+        Assert.Equal(firstOut, secondOut); // Green 输出逐字一致
+        Assert.Equal(before, File.ReadAllBytes(sidecar));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(sidecar)); // 信任空 → 未重写
+    }
+
+    [Fact]
     public void Rollback_ValidSidecarCensus_DoesNotRereadSource()
     {
         // R10 Minor#2：rollback 裸 Load → LoadWithCensus——sidecar 有效（路径+源哈希匹配）

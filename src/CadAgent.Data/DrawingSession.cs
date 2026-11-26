@@ -77,8 +77,11 @@ public sealed class DrawingSession : IDrawingSession
     /// T3：persisted 对 .dxf 源同样生效（sidecar 注入/恢复 census；null→Empty，无 census 行为逐字不变）。
     /// R11：.dxf 源经 LoadDxf 通知通道重建 census（用户 DXF 含 TCH 防假 Green）；通知 census 非空
     /// 优先于 persisted，无通知（plain/working DXF）回退 persisted——sidecar/LoadWithCensus 自然生效。
+    /// 项3 §5.1（R9 语义扩展）：<paramref name="trustEmptySource"/>=true 表示调用方已用 sidecar v2
+    /// 验证过「源指纹未变且 census 为空」（UnparsedCensusStore.LoadTrusted）——working 分支直接信任
+    /// Empty、不重读源 DWG（源缺失亦放行）；false/缺省 → 既有 R9 fail-closed 重读源。
     /// </summary>
-    public static DrawingSession Load(string path, UnparsedCensus? persisted = null)
+    public static DrawingSession Load(string path, UnparsedCensus? persisted = null, bool trustEmptySource = false)
     {
         string ext = Path.GetExtension(path).ToLowerInvariant();
         if (ext == ".dwg")
@@ -93,6 +96,10 @@ public sealed class DrawingSession : IDrawingSession
                 var (workingDoc, _) = LoadDxf(workingPath);
                 if (persisted is { TotalCount: > 0 })
                     return new DrawingSession(workingPath, workingDoc, persisted);
+                // 项3 §5.1：sidecar v2 已验证空 census（源哈希/size/mtime 全匹配）→ 信任 Empty，
+                // 不重读源 DWG（二次打开 Green 图免 6–12s 源解析；源缺失也合法——指纹已核验过）。
+                if (trustEmptySource)
+                    return new DrawingSession(workingPath, workingDoc, UnparsedCensus.Empty);
                 // R9：persisted Empty/缺（切片前物化的陈旧 working + 新项目无 sidecar）——
                 // 此前直接 Empty 放行 = 假 Green 旁路（intake exit 0 + run tx-commit）。
                 if (!File.Exists(path))

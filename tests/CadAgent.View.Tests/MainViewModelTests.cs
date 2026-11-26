@@ -62,8 +62,10 @@ public class MainViewModelTests : IDisposable
     }
 
     [Fact]
-    public void Load_NoSidecar_CensusEmpty_Legacy()
+    public void Load_NoSidecar_CensusEmpty_WritesVerifiedEmptySidecar()
     {
+        // 项3 T5（行为变更披露）：census 空 + 源存在 → 现在总是回写 sidecar（VerifiedEmpty=true，
+        // 含源 size/mtime/hash）；此前空 census 不回写。二次打开同图免重读源 DWG（R9 语义扩展）。
         string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-mainvm-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(projectDir);
         try
@@ -71,7 +73,9 @@ public class MainViewModelTests : IDisposable
             var vm = new ViewModels.MainViewModel(_path, projectDir);
             Assert.Null(vm.ErrorMessage);
             Assert.Equal(0, vm.Session.Unparsed.TotalCount); // 无 census 行为逐字保持
-            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "unparsed.json"))); // 空 census 不回写
+            Assert.True(File.Exists(Path.Combine(projectDir, ".cadagent", "unparsed.json")));
+            Assert.Equal(0, UnparsedCensusStore.LoadTrusted(projectDir, _path, out bool verifiedEmpty).TotalCount);
+            Assert.True(verifiedEmpty); // 已验证空（信任命中）
         }
         finally
         {

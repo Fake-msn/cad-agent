@@ -133,6 +133,9 @@ public sealed class DrawingCanvas : Control
     /// <summary>状态栏注记（「概览」/「高亮为包围盒（图元过密）」）；MainWindow 读取（Task 5 接线）。</summary>
     internal string? LastRenderNote { get; private set; }
 
+    /// <summary>测试 seam：直接置注记（MainWindow 状态栏接线 headless 验证，不依赖真实渲染/交互）。</summary>
+    internal void SetLastRenderNoteForTests(string? note) => LastRenderNote = note;
+
     /// <summary>测试 seam：直绘对照（关缓存），用于缓存 blit 与直绘的像素等价断言。</summary>
     internal bool DisableCacheForTests { get; set; }
 

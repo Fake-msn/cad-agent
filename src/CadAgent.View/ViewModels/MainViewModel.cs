@@ -5,6 +5,7 @@ namespace CadAgent.View.ViewModels;
 /// <summary>
 /// 主视图模型（计划4 T1）：纯 C#，无 Avalonia 依赖，可单测。
 /// 构造时加载 DrawingSession；失败→ErrorMessage（Session 不可用，UI 层先行判断）。
+/// 项3 T5：启动走 <see cref="LoadAsync"/>（后台 Load+Build+Sheets，UI 不阻塞）；同步构造保留。
 /// </summary>
 public sealed class MainViewModel
 {
@@ -18,11 +19,12 @@ public sealed class MainViewModel
         try
         {
             // census sidecar 接线（防假 Green T3，等价 CLI LoadWithCensus）：working DXF 丢失
-            // TCH 对象后二次加载仍恢复 census（显示不完整警示依据）；首载 DWG 通知 census
-            // 非空→回写 sidecar（原子写）。单文件多源互斥限制见 UnparsedCensusStore 注释。
-            var persisted = UnparsedCensusStore.Load(projectDir, drawingPath);
-            _session = DrawingSession.Load(drawingPath, persisted);
-            if (_session.Unparsed.TotalCount > 0)
+            // TCH 对象后二次加载仍恢复 census（显示不完整警示依据）；未信任且源在→回写 sidecar
+            // （含已验证空 census——二次打开同图免重读源 DWG，项3 §5.1 R9 语义扩展）。
+            // 单文件多源互斥限制见 UnparsedCensusStore 注释。
+            var persisted = UnparsedCensusStore.LoadTrusted(projectDir, drawingPath, out bool verifiedEmpty);
+            _session = DrawingSession.Load(drawingPath, persisted, verifiedEmpty);
+            if (!verifiedEmpty && File.Exists(drawingPath))
                 UnparsedCensusStore.Save(projectDir, drawingPath, _session.Unparsed);
         }
         catch (Exception ex)
@@ -32,6 +34,16 @@ public sealed class MainViewModel
             ErrorMessage = ex.Message;
         }
     }
+
+    /// <summary>
+    /// 异步加载（项3 T5）：Load（DWG 物化/working 读取/census）在后台线程完成，UI 线程不阻塞
+    /// （大图 6–12s）；渲染模型/幅面登记簿仍由 MainWindow 在 UI 线程构建。
+    /// 失败语义不变：构造内既有 catch 把异常落 ErrorMessage，本方法不抛（调用方仍按 vm.ErrorMessage 分支）。
+    /// 同步构造保留（既有测试/CLI 零改动）。
+    /// </summary>
+    public static Task<MainViewModel> LoadAsync(string drawingPath, string projectDir,
+        IReadOnlyList<string>? skillDirs = null) =>
+        Task.Run(() => new MainViewModel(drawingPath, projectDir, skillDirs));
 
     /// <summary>窗口标题：图纸文件名。</summary>
     public string Title { get; }

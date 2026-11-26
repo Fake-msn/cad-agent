@@ -1719,6 +1719,8 @@ public sealed class MainWindow : Window
             if (_fillIntentNote.Length > 0) status += $" | {_fillIntentNote}";
             // 天读证据：行点击定位失败提示（下一次成功定位/选中接管时清除）。
             if (_deepReadLocateNote.Length > 0) status += $" | {_deepReadLocateNote}";
+            // 项3 T5：画布状态注记（「概览」/「高亮为包围盒（图元过密）」）——LOD 降级诚实披露。
+            if (_canvasControl?.LastRenderNote is { Length: > 0 } renderNote) status += $" | {renderNote}";
             Status.Text = status;
         }
         if (LayerList is not null)
