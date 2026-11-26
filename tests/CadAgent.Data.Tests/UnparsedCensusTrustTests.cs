@@ -222,4 +222,100 @@ public class UnparsedCensusTrustTests
             Directory.Delete(dir, true);
         }
     }
+
+    // ---- 合并前审查：损坏/畸形 v2 载荷一律 fail-closed ----
+
+    /// <summary>按当前源指纹写一份可控 sidecar（Classes 原样注入 JSON）。</summary>
+    private static void WriteSidecar(string dir, string src, string classesJson, bool verifiedEmpty = false)
+    {
+        string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(src)));
+        var fi = new FileInfo(src);
+        string sidecar = Path.Combine(dir, ".cadagent", "unparsed.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(sidecar)!);
+        File.WriteAllText(sidecar,
+            $"{{\"SourcePath\":{JsonSerializer.Serialize(Path.GetFullPath(src))},\"SourceHash\":\"{hash}\"," +
+            $"\"Classes\":{classesJson},\"SourceSize\":{fi.Length}," +
+            $"\"SourceMtimeUtc\":{JsonSerializer.Serialize(fi.LastWriteTimeUtc)}," +
+            $"\"VerifiedEmpty\":{(verifiedEmpty ? "true" : "false")}}}");
+    }
+
+    [Fact]
+    public void LoadTrusted_CorruptJson_FailClosed()
+    {
+        string dir = NewProjectDir();
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            string sidecar = Path.Combine(dir, ".cadagent", "unparsed.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(sidecar)!);
+            File.WriteAllText(sidecar, "{\"SourcePath\":");
+
+            Assert.Equal(0, UnparsedCensusStore.LoadTrusted(dir, src, out bool trusted).TotalCount);
+            Assert.False(trusted);
+            Assert.Equal(0, UnparsedCensusStore.Load(dir, src).TotalCount);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void LoadTrusted_NullClasses_FailClosed()
+    {
+        string dir = NewProjectDir();
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            WriteSidecar(dir, src, "null", verifiedEmpty: true); // 指纹全匹配，仅 Classes 缺失
+
+            Assert.Equal(0, UnparsedCensusStore.LoadTrusted(dir, src, out bool trusted).TotalCount);
+            Assert.False(trusted);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void LoadTrusted_NegativeCount_FailClosed()
+    {
+        string dir = NewProjectDir();
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            WriteSidecar(dir, src, "[{\"CppClassName\":\"TCH_WALL\",\"Count\":-1}]");
+
+            Assert.Equal(0, UnparsedCensusStore.LoadTrusted(dir, src, out bool trusted).TotalCount);
+            Assert.False(trusted);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void LoadTrusted_VerifiedEmptyWithNonEmptyClasses_NotTrusted()
+    {
+        string dir = NewProjectDir();
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            WriteSidecar(dir, src, "[{\"CppClassName\":\"TCH_WALL\",\"Count\":2}]", verifiedEmpty: true);
+
+            var census = UnparsedCensusStore.LoadTrusted(dir, src, out bool trusted);
+            Assert.Equal(2, census.TotalCount); // 非空 census 仍可读出（Load 语义）
+            Assert.False(trusted);              // 但 VerifiedEmpty 标志不得豁免非空载荷
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
 }

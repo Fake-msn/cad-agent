@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using ACadSharp;
 using ACadSharp.Entities;
@@ -32,27 +33,30 @@ public class VisionScanModeTests : IDisposable
     {
         Directory.CreateDirectory(_project);
         // 单幅面视觉夹具：图框 (0,0)-(1000,700) + 图号属性 + 幅面名文字 + 设备 Insert（A=深照型灯）。
-        _drawing = DxfFixture.CreateTempDxf(doc =>
-        {
-            var frame = new BlockRecord("院标准图框_A0");
-            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
-            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
-            frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
-            frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
-            doc.BlockRecords.Add(frame);
-            var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
-            frameIns.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
-            doc.Entities.Add(frameIns);
-            doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 30, Layer = new Layer("图框") });
-            var e = new BlockRecord("E");
-            e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
-            doc.BlockRecords.Add(e);
-            var layer = new Layer("EQUIP-照明");
-            doc.Layers.Add(layer);
-            var ins = new Insert(e) { InsertPoint = new XYZ(100, 100, 0), Layer = layer };
-            ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
-            doc.Entities.Add(ins);
-        });
+        _drawing = DxfFixture.CreateTempDxf(PopulateSingleSheet);
+    }
+
+    /// <summary>图框/图名/设备夹具（DXF 与 DWG 共用；DWG 用于「已验证空免重读源」路径）。</summary>
+    private static void PopulateSingleSheet(CadDocument doc)
+    {
+        var frame = new BlockRecord("院标准图框_A0");
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1000, 0, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 0, 0), EndPoint = new XYZ(1000, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(1000, 700, 0), EndPoint = new XYZ(0, 700, 0) });
+        frame.Entities.Add(new Line { StartPoint = new XYZ(0, 700, 0), EndPoint = new XYZ(0, 0, 0) });
+        doc.BlockRecords.Add(frame);
+        var frameIns = new Insert(frame) { InsertPoint = new XYZ(0, 0, 0) };
+        frameIns.Attributes.Add(new AttributeEntity { Tag = "图号", Value = "Z-E01" });
+        doc.Entities.Add(frameIns);
+        doc.Entities.Add(new TextEntity { InsertPoint = new XYZ(500, 650, 0), Value = "一层电力平面图", Height = 30, Layer = new Layer("图框") });
+        var e = new BlockRecord("E");
+        e.Entities.Add(new Circle { Center = new XYZ(0, 0, 0), Radius = 50 });
+        doc.BlockRecords.Add(e);
+        var layer = new Layer("EQUIP-照明");
+        doc.Layers.Add(layer);
+        var ins = new Insert(e) { InsertPoint = new XYZ(100, 100, 0), Layer = layer };
+        ins.Attributes.Add(new AttributeEntity { Tag = "A", Value = "深照型灯" });
+        doc.Entities.Add(ins);
     }
 
     public void Dispose()
@@ -74,6 +78,16 @@ public class VisionScanModeTests : IDisposable
     {
         var outW = new StringWriter(); var errW = new StringWriter();
         var args = new List<string> { "--vision-scan", "--drawing", _drawing, "--project", _project };
+        args.AddRange(extraArgs);
+        int code = VisionScanMode.Run(args.ToArray(), outW, errW, client, FakeProfile());
+        return (code, outW.ToString(), errW.ToString());
+    }
+
+    /// <summary>指定图纸路径的运行（DWG 夹具用）。</summary>
+    private (int code, string stdout, string stderr) RunFor(string drawing, ILlmClient client, params string[] extraArgs)
+    {
+        var outW = new StringWriter(); var errW = new StringWriter();
+        var args = new List<string> { "--vision-scan", "--drawing", drawing, "--project", _project };
         args.AddRange(extraArgs);
         int code = VisionScanMode.Run(args.ToArray(), outW, errW, client, FakeProfile());
         return (code, outW.ToString(), errW.ToString());
@@ -250,6 +264,81 @@ public class VisionScanModeTests : IDisposable
         int code = VisionScanMode.Run(new[] { "--vision-scan" }, outW, errW);
         Assert.Equal(1, code);
         Assert.Contains("--drawing", errW.ToString());
+    }
+
+    // ===== 项3 §5.1 / 合并前审查：已验证空 census 的二次打开与只读 sidecar =====
+
+    [AvaloniaFact]
+    public void VisionScan_SecondOpen_VerifiedEmpty_Green_DoesNotRewriteSourceOrSidecar()
+    {
+        // DWG 首载物化 working + 空 census → 侧车 VerifiedEmpty=true；二次打开经
+        // LoadTrusted 信任 Empty（不重读源 DWG），CLI 同规则：已信任空 → 不回写 sidecar。
+        string dwg = DxfFixture.CreateTempDwg(PopulateSingleSheet);
+        try
+        {
+            string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+            var (code1, stdout1, _) = RunFor(dwg, new FakeVisionClient(MatchingClaims), "--confirm-egress");
+            Assert.Equal(0, code1);
+            Assert.True(File.Exists(sidecar), "首载须写 census sidecar（CLI LoadWithCensus 同规则）");
+            using (var d = JsonDocument.Parse(File.ReadAllText(sidecar)))
+            {
+                Assert.True(d.RootElement.GetProperty("VerifiedEmpty").GetBoolean());
+                Assert.Equal(0, d.RootElement.GetProperty("Classes").GetArrayLength());
+            }
+            byte[] sidecarBefore = File.ReadAllBytes(sidecar);
+            DateTime sidecarMtime = File.GetLastWriteTimeUtc(sidecar);
+            DateTime sourceMtime = File.GetLastWriteTimeUtc(dwg);
+            string sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(dwg)));
+
+            var (code2, stdout2, _) = RunFor(dwg, new FakeVisionClient(MatchingClaims), "--confirm-egress");
+
+            Assert.Equal(0, code2);
+            // 源文件不被扫描改写（mtime/内容哈希不变）。
+            Assert.Equal(sourceMtime, File.GetLastWriteTimeUtc(dwg));
+            Assert.Equal(sourceHash, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(dwg))));
+            // 已信任空 → 不回写：sidecar 字节与 mtime 均不变（若信任丢失则会被重写）。
+            Assert.Equal(sidecarBefore, File.ReadAllBytes(sidecar));
+            Assert.Equal(sidecarMtime, File.GetLastWriteTimeUtc(sidecar));
+            using var d2 = JsonDocument.Parse(stdout2);
+            Assert.True(d2.RootElement.GetProperty("tiles").GetInt32() >= 1);
+        }
+        finally { File.Delete(dwg); }
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_UnwritableSidecar_StillScans()
+    {
+        // .cadagent/unparsed.json 被同名目录占位 → Save 尽力写失败（IOException 被吞），
+        // 扫描不得因此失败（只读项目可开）。
+        string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+        Directory.CreateDirectory(sidecar);
+        var (code, stdout, _) = RunWith(new FakeVisionClient(MatchingClaims), "--confirm-egress");
+        Assert.Equal(0, code);
+        Assert.True(Directory.Exists(sidecar));
+        using var doc = JsonDocument.Parse(stdout);
+        Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+    }
+
+    [AvaloniaFact]
+    public void VisionScan_CensusFingerprintChanged_RewritesSidecar_MatchingCliRule()
+    {
+        // CLI 规则：未信任（mtime 变→指纹不符）+ 源在 → 总是回写。若 View 侧误把
+        // 旧 sidecar 当已信任 Empty，则不会重写（字节不变）——本测试可判别。
+        string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+        var (code1, _, _) = RunWith(new FakeVisionClient(MatchingClaims), "--confirm-egress");
+        Assert.Equal(0, code1);
+        byte[] before = File.ReadAllBytes(sidecar);
+
+        DateTime changed = File.GetLastWriteTimeUtc(_drawing).AddHours(1);
+        File.SetLastWriteTimeUtc(_drawing, changed);
+
+        var (code2, _, _) = RunWith(new FakeVisionClient(MatchingClaims), "--confirm-egress");
+        Assert.Equal(0, code2);
+        byte[] after = File.ReadAllBytes(sidecar);
+        Assert.NotEqual(before, after); // 未信任 → 回写新指纹
+        using var doc = JsonDocument.Parse(File.ReadAllText(sidecar));
+        Assert.Equal(changed, doc.RootElement.GetProperty("SourceMtimeUtc").GetDateTime().ToUniversalTime());
+        Assert.True(doc.RootElement.GetProperty("VerifiedEmpty").GetBoolean());
     }
 
     // ===== T4：--max-tiles 瓦片预算（真实云端成本控制；截断必须披露，不静默）=====

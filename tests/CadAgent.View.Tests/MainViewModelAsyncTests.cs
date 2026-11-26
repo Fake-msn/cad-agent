@@ -59,14 +59,31 @@ public class MainViewModelAsyncTests : IDisposable
     }
 
     [Fact]
-    public async Task LoadAsync_HeavyBuildRanOffCallingThread()
+    public void LoadAsync_HeavyBuild_RunsOffDedicatedCallingThread()
     {
-        int callerThread = Environment.CurrentManagedThreadId;
-        var vm = await MainViewModel.LoadAsync(_path, _projectDir);
-        Assert.Null(vm.ErrorMessage);
-        // BuildThreadId 由构造（Task.Run 内）捕获：重活必须不在调用/UI 线程执行。
-        // 线程 id 理论上可复用，故并列断言 Items 已就绪（结构证据）。
+        // 调用线程用独立前台线程（非线程池）→ LoadAsync 的 Task.Run 必落线程池，
+        // 消除「xUnit 本身在线程池上，ThreadId 可能复用」的时序歧义。
+        int callerThread = 0;
+        MainViewModel? vm = null;
+        Exception? failure = null;
+        var caller = new Thread(() =>
+        {
+            try
+            {
+                callerThread = Environment.CurrentManagedThreadId;
+                vm = MainViewModel.LoadAsync(_path, _projectDir).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) { failure = ex; }
+        });
+        caller.Start();
+        caller.Join();
+
+        Assert.Null(failure);
+        Assert.NotNull(vm);
+        Assert.Null(vm!.ErrorMessage);
+        Assert.True(vm.BuildThreadId > 0);
         Assert.NotEqual(callerThread, vm.BuildThreadId);
+        Assert.True(vm.BuildCompleted);
         Assert.NotEmpty(vm.Items);
     }
 

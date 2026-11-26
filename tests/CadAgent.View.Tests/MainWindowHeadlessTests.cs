@@ -42,21 +42,25 @@ public class MainWindowHeadlessTests
         doc.Entities.Add(new Line { StartPoint = new XYZ(0, 20, 0), EndPoint = new XYZ(10, 20, 0), Layer = beta });
     });
 
-    private static (MainWindow Window, MainViewModel Vm, string Path) ShowWindow()
+    private static (MainWindow Window, MainViewModel Vm, string Path, string ProjectDir) ShowWindow()
     {
         string path = TwoLayerDxf();
-        var vm = new MainViewModel(path, Path.GetTempPath());
+        // 合并前审查：项目目录按测试隔离（sidecar 落 <project>/.cadagent，不共享 %TEMP%）。
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-mw-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(projectDir);
+        var vm = new MainViewModel(path, projectDir);
         Assert.Null(vm.ErrorMessage);
         var window = new MainWindow(vm);
         window.Show();
         Dispatcher.UIThread.RunJobs();
-        return (window, vm, path);
+        return (window, vm, path, projectDir);
     }
 
-    private static void Cleanup(MainWindow window, string path)
+    private static void Cleanup(MainWindow window, string path, string projectDir)
     {
         window.Close();
         File.Delete(path);
+        if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
     }
 
     [AvaloniaFact]
@@ -65,7 +69,9 @@ public class MainWindowHeadlessTests
         // 终审 Important 2：MainWindow 直接消费 MainViewModel 预构建的 Items/Sheets
         // （同一实例引用）——证明加载期 Build 未在 UI 线程重复执行。
         string path = TwoLayerDxf();
-        var vm = new MainViewModel(path, Path.GetTempPath());
+        string projectDir = Path.Combine(Path.GetTempPath(), "cadagent-mw-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(projectDir);
+        var vm = new MainViewModel(path, projectDir);
         Assert.Null(vm.ErrorMessage);
         var window = new MainWindow(vm);
         try
@@ -74,12 +80,12 @@ public class MainWindowHeadlessTests
             Assert.Same(vm.Sheets, window.SheetsForTests);
             Assert.NotEmpty(window.FullModelItemsForTests);
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     [AvaloniaFact]
     public void LayerPanel_BuildsOrderedEntries_WithCheckboxesAndCounts()
-    {        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+    {        (MainWindow window, MainViewModel vm, string path, string projectDir) = ShowWindow();
         try
         {
             Assert.NotNull(window.Layers);
@@ -95,13 +101,13 @@ public class MainWindowHeadlessTests
             Assert.All(checks, c => Assert.True(c.IsChecked));
             Assert.Contains("render items", window.Status!.Text);
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     [AvaloniaFact]
     public void LayerPanel_CheckboxClick_TogglesLayerOutOfVisibleItems()
     {
-        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        (MainWindow window, MainViewModel vm, string path, string projectDir) = ShowWindow();
         try
         {
             CheckBox first = window.GetVisualDescendants().OfType<CheckBox>().ElementAt(1); // ALPHA（T8：索引 0 为空层 "0"）
@@ -119,13 +125,13 @@ public class MainWindowHeadlessTests
             Assert.True(first.IsChecked);
             Assert.Equal(3, window.Canvas.VisibleItems.Count());
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     [AvaloniaFact]
     public void LayerPanel_DoubleClick_IsolatesSelectedLayer()
     {
-        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        (MainWindow window, MainViewModel vm, string path, string projectDir) = ShowWindow();
         try
         {
             // Real double-click on the BETA row (right side, away from the checkbox):
@@ -143,7 +149,7 @@ public class MainWindowHeadlessTests
             Assert.True(window.Layers.Layers.Single(l => l.Name == "BETA").IsVisible);
             Assert.All(window.Canvas!.VisibleItems, i => Assert.Equal("BETA", i.Layer));
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     [AvaloniaFact]
@@ -151,7 +157,7 @@ public class MainWindowHeadlessTests
     {
         // T10 真机验证发现：双击图层名（旧结构在 CheckBox 内容区）被 Toggle 消费
         // （两次翻转抵消）且 DoubleTapped 不冒泡 → 隔离失效。名字区双击必须隔离。
-        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        (MainWindow window, MainViewModel vm, string path, string projectDir) = ShowWindow();
         try
         {
             var row = (Control)window.LayerList!.ContainerFromIndex(2)!; // T8：BETA 行索引 2（0 为空层 "0"）
@@ -165,13 +171,13 @@ public class MainWindowHeadlessTests
             Assert.True(window.Layers.Layers.Single(l => l.Name == "BETA").IsVisible);
             Assert.All(window.Canvas!.VisibleItems, i => Assert.Equal("BETA", i.Layer));
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     [AvaloniaFact]
     public void LayerPanel_ShowAllButton_RestoresAllLayers()
     {
-        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        (MainWindow window, MainViewModel vm, string path, string projectDir) = ShowWindow();
         try
         {
             window.Layers!.Isolate("BETA");
@@ -185,13 +191,13 @@ public class MainWindowHeadlessTests
             Assert.All(window.Layers.Layers, l => Assert.True(l.IsVisible));
             Assert.Equal(3, window.Canvas.VisibleItems.Count());
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     [AvaloniaFact]
     public void CanvasSelection_UpdatesStatusBar_WithHandleKindLayer()
     {
-        (MainWindow window, MainViewModel vm, string path) = ShowWindow();
+        (MainWindow window, MainViewModel vm, string path, string projectDir) = ShowWindow();
         try
         {
             DrawingCanvas canvas = window.GetVisualDescendants().OfType<DrawingCanvas>().Single();
@@ -215,7 +221,7 @@ public class MainWindowHeadlessTests
             Assert.Null(window.Canvas.SelectedHandle);
             Assert.DoesNotContain("Selected", window.Status.Text);
         }
-        finally { Cleanup(window, path); }
+        finally { Cleanup(window, path, projectDir); }
     }
 
     // ---- 视图闭环 T5：审计 live-rebuild + _diffBusy 硬闸 ----

@@ -81,6 +81,48 @@ public class CanvasProjectionTests
     }
 
     [Fact]
+    public void FitView_MatchesViewModelFit_SameBoundsAndViewport()
+    {
+        // 交叉断言：FitView（快照投影）与 CanvasViewModel.Fit 同数学 → 同 scale/offset，
+        // 且任意世界点 WorldToScreen 完全一致（同 bounds/同视口）。
+        var items = new[] { Line(0, 0, 100, 50), Line(20, 10, 80, 40) };
+        (double minX, double minY, double maxX, double maxY) = RenderModelBuilder.Bounds(items);
+        var vm = new CanvasViewModel(items);
+        vm.Fit((minX, minY, maxX, maxY), 800, 600);
+        CanvasProjection fit = CanvasProjection.FitView((minX, minY, maxX, maxY), 800, 600);
+        CanvasProjection from = CanvasProjection.From(vm);
+
+        Assert.Equal(vm.Scale, fit.Scale, 12);
+        Assert.Equal(from.OffsetX, fit.OffsetX, 12);
+        Assert.Equal(from.OffsetY, fit.OffsetY, 12);
+        Assert.Equal(from.PanX, fit.PanX, 12);
+        Assert.Equal(from.PanY, fit.PanY, 12);
+        foreach ((double x, double y) in new[] { (0.0, 0.0), (100.0, 50.0), (40.5, 12.25), (-7.0, 88.0) })
+        {
+            (double vx, double vy) = vm.WorldToScreen(x, y);
+            (double fx, double fy) = fit.WorldToScreen(x, y);
+            Assert.Equal(vx, fx, 9);
+            Assert.Equal(vy, fy, 9);
+        }
+    }
+
+    [Fact]
+    public void FitView_NonPositiveViewport_DegeneratesLikeViewModelFit()
+    {
+        var items = new[] { Line(0, 0, 100, 50) };
+        var vm = new CanvasViewModel(items);
+        (double minX, double minY, double maxX, double maxY) = RenderModelBuilder.Bounds(items);
+        vm.Fit((minX, minY, maxX, maxY), 0, 0);
+        CanvasProjection fit = CanvasProjection.FitView((minX, minY, maxX, maxY), 0, 0);
+        Assert.Equal(1, fit.Scale);
+        Assert.Equal(0, fit.OffsetX);
+        Assert.Equal(0, fit.OffsetY);
+        Assert.Equal(vm.Scale, fit.Scale, 12);
+        Assert.Equal(vm.WorldToScreen(10, 10).X, fit.WorldToScreen(10, 10).X, 9);
+        Assert.Equal(vm.WorldToScreen(10, 10).Y, fit.WorldToScreen(10, 10).Y, 9);
+    }
+
+    [Fact]
     public void WorldViewport_Normalized_MatchesViewModel()
     {
         CanvasViewModel vm = Fitted();

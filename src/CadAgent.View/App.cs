@@ -55,15 +55,17 @@ public sealed class App : Application
         };
         desktop.MainWindow = placeholder;
         // 占位窗被用户关闭或应用已在退出 → 放弃替换（不得再显示窗口）。
-        bool abandoned = false;
-        desktop.ShutdownRequested += (_, _) => abandoned = true;
-        placeholder.Closed += (_, _) => abandoned = true;
+        // 纯决策抽取为 ShouldReplaceWindow（可单测）；IsVisible 为框架态兜底。
+        bool placeholderClosed = false;
+        bool shutdownRequested = false;
+        desktop.ShutdownRequested += (_, _) => shutdownRequested = true;
+        placeholder.Closed += (_, _) => placeholderClosed = true;
         try
         {
             MainViewModel vm = await MainViewModel.LoadAsync(_drawingPath, _projectDir, _skillDirs);
             Dispatcher.UIThread.Post(() =>
             {
-                if (abandoned || placeholder.IsVisible == false) return;
+                if (!ShouldReplaceWindow(placeholderClosed, shutdownRequested) || placeholder.IsVisible == false) return;
                 try
                 {
                     var window = new MainWindow(vm);
@@ -82,21 +84,28 @@ public sealed class App : Application
         {
             Dispatcher.UIThread.Post(() =>
             {
-                if (abandoned || placeholder.IsVisible == false) return;
+                if (!ShouldReplaceWindow(placeholderClosed, shutdownRequested) || placeholder.IsVisible == false) return;
                 ShowError(desktop, placeholder, ex.Message);
             });
         }
     }
 
+    /// <summary>
+    /// 加载完成后的替换决策（纯函数，可单测）：占位窗已关闭或应用已在退出 → 放弃替换。
+    /// </summary>
+    internal static bool ShouldReplaceWindow(bool placeholderClosed, bool shutdownRequested) =>
+        !placeholderClosed && !shutdownRequested;
+
     private static void ShowError(IClassicDesktopStyleApplicationLifetime desktop, Window placeholder, string message)
     {
-        Window error = ErrorWindow(message);
+        Window error = CreateErrorWindow(message);
         desktop.MainWindow = error;
         error.Show();
         placeholder.Close();
     }
 
-    private static Window ErrorWindow(string message) => new()
+    /// <summary>错误窗口工厂（纯装配，可单测）：标题固定 + 红字自动换行的消息文本。</summary>
+    internal static Window CreateErrorWindow(string message) => new()
     {
         Title = "CadAgent — 加载失败",
         Width = 520,

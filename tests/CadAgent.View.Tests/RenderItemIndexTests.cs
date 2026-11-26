@@ -298,6 +298,98 @@ public class RenderItemIndexTests
     }
 
     [Fact]
+    public void FirstHit_PropertyCorpus_MatchesLinearReference()
+    {
+        // 属性式对拍（合并前审查）：混合随机格网 × 种子，含 NaN/∞ 顶点、退化/空点、
+        // 跨幅溢出项、文本边距与小容差；每个探针断言索引结果 == 线性参考（或同为 null）。
+        double[] tolerances = { 0, 0.5, 3.0 };
+        for (int seed = 1; seed <= 5; seed++)
+        {
+            var rnd = new Random(seed * 7919);
+            IReadOnlyList<RenderItem> items = RandomGridFixture(rnd, 120);
+            var index = new RenderItemIndex(items);
+            int hits = 0;
+
+            // 探针：均匀撒点 + 贴近随机图元（提高真实命中率）。
+            var probes = new List<(double X, double Y)>();
+            for (int p = 0; p < 40; p++)
+                probes.Add((NextRange(rnd, -70, 70), NextRange(rnd, -70, 70)));
+            for (int p = 0; p < 20; p++)
+                probes.Add(PointNear(items[rnd.Next(items.Count)], rnd));
+
+            foreach ((double x, double y) in probes)
+                foreach (double tol in tolerances)
+                {
+                    int? expected = LinearFirstHit(items, x, y, tol, hidden: null);
+                    int? actual = index.FirstHit(x, y, tol);
+                    Assert.True(expected == actual,
+                        $"seed={seed} mismatch at ({x:R},{y:R}) tol={tol}: expected={expected} actual={actual}");
+                    if (expected is not null) hits++;
+                }
+            Assert.True(hits > 0, $"seed={seed} 探针须有真实命中（否则等价只是都 miss）");
+        }
+    }
+
+    /// <summary>
+    /// 属性语料：随机混合 6 类图元，并钉入 NaN/∞ 顶点、空点、零半径、退化文本、
+    /// 跨幅长线（溢出表）与文本盒；坐标范围 [-60,60] 以便探针覆盖。
+    /// </summary>
+    private static IReadOnlyList<RenderItem> RandomGridFixture(Random rnd, int count)
+    {
+        var items = new List<RenderItem>(count + 12)
+        {
+            Line(0, 0, double.NaN, 0),                                     // 非有限端点
+            Polyline("0", "p0", (double.PositiveInfinity, 5), (10, 5)),   // 部分有限
+            Polyline("0", "p1", (double.NegativeInfinity, 0), (double.PositiveInfinity, 0)),
+            Polyline("0", "p2"),                                           // 空点
+            Polyline("0", "p3", (3, 4)),                                   // 单点
+            Circle(2, 2, 0),                                               // 零半径
+            new RenderItem(RenderKind.Circle, Array.Empty<(double, double)>(), "0", 0xFFFFFF, null, 0, 0, "p4"),
+            Line(0, 0, 0, 0),                                              // 退化线段
+            Line(-1000, 0, 1000, 0),                                       // 跨幅溢出候选
+            TextItem("", 5, 5, 2),                                         // 空文本
+            TextItem("WIDE", 40, 40, 3),
+            Hatch(new[] { -50.0, 50, 50, -50 }, new[] { -50.0, -50, 50, 50 }),
+        };
+        for (int i = 0; i < count; i++)
+        {
+            double x = NextRange(rnd, -60, 60), y = NextRange(rnd, -60, 60);
+            string layer = "L" + (i % 4);
+            string handle = "h" + i;
+            switch (i % 6)
+            {
+                case 0:
+                    items.Add(Line(x, y, x + NextRange(rnd, -20, 20), y + NextRange(rnd, -20, 20), layer, handle));
+                    break;
+                case 1:
+                    items.Add(Circle(x, y, NextRange(rnd, 0, 25), layer, handle));
+                    break;
+                case 2:
+                {
+                    double start = NextRange(rnd, 0, 360);
+                    items.Add(Arc(x, y, NextRange(rnd, 0.1, 25), start, start + NextRange(rnd, 0, 359), layer, handle));
+                    break;
+                }
+                case 3:
+                {
+                    int n = rnd.Next(0, 6);
+                    var pts = new (double X, double Y)[n];
+                    for (int k = 0; k < n; k++) pts[k] = (x + NextRange(rnd, -15, 15), y + NextRange(rnd, -15, 15));
+                    items.Add(new RenderItem(RenderKind.Polyline, pts, layer, 0xFFFFFF, null, 0, 0, handle));
+                    break;
+                }
+                case 4:
+                    items.Add(TextItem(new string('T', rnd.Next(1, 10)), x, y, NextRange(rnd, 0.5, 6), layer, handle));
+                    break;
+                default:
+                    items.Add(Hatch(new[] { x, x + 10, x + 10, x }, new[] { y, y, y + 8, y + 8 }, layer, handle));
+                    break;
+            }
+        }
+        return items;
+    }
+
+    [Fact]
     public void FirstHit_FindsItemRegisteredOnlyInOverflow()
     {
         // 单项覆盖格数 > 2 → 只进溢出表、不登记任何格子；命中必须仍能找到它。
