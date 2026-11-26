@@ -5,3 +5,5 @@ obj/
 .cadagent/
 TestResults/
 standards-src/
+# 本地运行产物（性能工具 markdown/日志/标本副本等；数字转写进 spec，不入库）
+outputs/

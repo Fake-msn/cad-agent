@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using ACadSharp;
@@ -24,9 +25,10 @@ namespace CadAgent.PerfBaseline;
 /// 模式：<c>--synth 20k|80k|200k</c>（合成线 + 20% 文字，物化临时 DXF 后经 DrawingSession.Load）
 /// 与 <c>--drawing &lt;path&gt;</c>（真实图，源首次载入走 %TEMP% 副本，标本目录零写入）。
 /// 未给模式时依次跑 20k/80k/200k。指标：load（源首载/working 二载）、build、hash 冷/重复、
-/// snapshot PNG、交互帧（同一 DrawingCanvas 首帧建缓存 → PanBy(32,0) 再渲染=blit 路径）、
-/// Refined 首帧、hit×2000、托管内存。阈值只标注 PASS/TARGET，不 hard fail。
-/// 控制台输出强制 ASCII（Windows GBK 终端安全）；markdown 以 UTF-8 写出。
+/// snapshot PNG、交互帧（同一 DrawingCanvas 首帧建缓存 → PanBy(32,0) 再渲染=blit 路径，3 次取中位）、
+/// 交互档失效重建（暖缓存后强制 Interactive + 缩放失效 → 一次全量重绘，3 次取中位，spec §8 <50ms）、
+/// Refined 冷首帧、hit×2000（3 次取中位）、托管内存。阈值只标注 PASS/TARGET，不 hard fail。
+/// 控制台输出强制 ASCII（Windows GBK 终端安全）；markdown 以 UTF-8 写出（表格行连续，明细在表后）。
 /// </summary>
 internal static class Program
 {
@@ -36,35 +38,43 @@ internal static class Program
     private const double SnapshotTargetMs = 150;
     private const int FrameWidth = 1600;
     private const int FrameHeight = 1000;
+    private const int FrameSamples = 3;
+    private const int HitIterations = 2000;
 
-    private static readonly List<string> Markdown = new();
+    private const string Usage =
+        "usage: CadAgent.PerfBaseline [--out <file.md>] [--synth 20k|80k|200k] " +
+        "[--drawing <path>]... (no mode = synth 20k/80k/200k)";
+
+    private static readonly List<string> Preamble = new();
+    private static readonly List<string> Rows = new();
+    private static readonly List<string> Details = new();
 
     private static int Main(string[] args)
     {
-        string? outPath = ArgValue(args, "--out");
-        IReadOnlyList<string> drawings = ArgValues(args, "--drawing");
-        string? synth = ArgValue(args, "--synth");
-
-        Console.OutputEncoding = Encoding.UTF8;
-        EnsureAvalonia();
-
-        Markdown.Add("# CadAgent 大图性能基线（项3 T7 工具）");
-        Markdown.Add("");
-        Markdown.Add($"> 运行：{DateTime.Now:yyyy-MM-dd HH:mm:ss} · {RuntimeInformation.FrameworkDescription}" +
-                     $" · {RuntimeInformation.OSDescription} · CPU={Environment.ProcessorCount} · headless Skia（软件渲染）");
-        Markdown.Add($"> 阈值（不 hard fail）：交互帧 <{InteractiveTargetMs:0}ms、命中 <{HitTargetMs:0}ms/次、" +
-                     $"Refined 帧/快照 <{RefinedTargetMs:0}ms；合成仅 200k 计入交互/命中目标（spec §7）。");
-        Markdown.Add($"> 帧：{FrameWidth}×{FrameHeight} headless 窗口内同一 DrawingCanvas；Refined=真冷首帧（Refined 全量+缓存位图重建，不含 PNG 编码），" +
-                     "交互=PanBy(32,0) 后 blit 复用缓存（128px 外扩内不重绘）。");
-        Markdown.Add("> 快照=RenderPng（渲染 + PNG 编码；编码量级见同行 refined 的 +encode 列）。" +
-                     "load src=源 DWG 首载（%TEMP% 同字节副本，OS 文件缓存已暖，非磁盘冷载）；load working=二开（working+侧车）。");
-        Markdown.Add("");
-        Markdown.Add("| case | load src | load working | build | hash cold | hash repeat | snapshot | refined frame(+encode) " +
-                     "| interactive frame | hit x2000 | per hit | managed | status |");
-        Markdown.Add("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-
         try
         {
+            Console.OutputEncoding = Encoding.UTF8;
+
+            if (!TryParseArgs(args, out string? outPath, out IReadOnlyList<string> drawings,
+                    out string? synth, out string? argError))
+            {
+                Console.Error.WriteLine("error: " + argError);
+                Console.Error.WriteLine(Usage);
+                return 2;
+            }
+
+            // --out 目标在校验阶段即确定（目录/非法路径提前失败，不白跑长时间基准）。
+            string? outFull = null;
+            if (outPath is not null)
+            {
+                outFull = Path.GetFullPath(outPath);
+                if (Directory.Exists(outFull))
+                    throw new IOException("--out points to a directory: " + outFull);
+            }
+
+            EnsureAvalonia();
+            WritePreamble();
+
             if (drawings.Count > 0)
             {
                 // 多张真实图逐张独立基准（各自 %TEMP% 副本/侧车，互不影响）。
@@ -80,22 +90,22 @@ internal static class Program
                 RunSynth(80000);
                 RunSynth(200000);
             }
+
+            string markdown = Compose();
+            if (outFull is not null)
+            {
+                string? dir = Path.GetDirectoryName(outFull);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(outFull, markdown, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                Console.WriteLine("markdown: " + Ascii(outFull));
+            }
+            return 0;
         }
         catch (Exception ex)
         {
             Console.WriteLine("FAILED: " + Ascii(ex.GetType().Name + ": " + ex.Message));
             return 1;
         }
-
-        if (outPath is not null)
-        {
-            string full = Path.GetFullPath(outPath);
-            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            File.WriteAllText(full, string.Join(Environment.NewLine, Markdown) + Environment.NewLine,
-                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            Console.WriteLine("markdown: " + full);
-        }
-        return 0;
     }
 
     // ---- 模式 ----
@@ -170,7 +180,7 @@ internal static class Program
                 doc.Entities.Add(new Line
                 {
                     StartPoint = (XYZ)new XY(x, y),
-                    EndPoint = (XYZ)new XY(x + rnd.NextDouble() * 40, y + rnd.NextDouble() * 40),
+                    EndPoint = (XYZ)(new XY(x + rnd.NextDouble() * 40, y + rnd.NextDouble() * 40)),
                 });
             }
         }
@@ -273,7 +283,7 @@ internal static class Program
         byte[] png = null!;
         m.SnapshotMs = Ms(() => png = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
         m.SnapshotKb = png.Length / 1024;
-        // 信息项：重复快照（字体/几何一次性初始化后）；快照耗时方差较大，最暖一次即稳态近似。
+        // 信息项：重复快照（字体/几何一次性初始化后）；快照耗时方差较大，取 2 次最小值。
         double warm1 = Ms(() => _ = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
         double warm2 = Ms(() => _ = provider.RenderPng(sheetId, bounds, FrameWidth, FrameHeight));
         m.SnapshotWarmMs = Math.Min(warm1, warm2);
@@ -283,17 +293,27 @@ internal static class Program
         var vm = new CanvasViewModel(items);
         vm.Fit(bounds, FrameWidth, FrameHeight);
         var rnd = new Random(1);
+        var hitTotals = new List<double>(FrameSamples);
         int hits = 0;
-        Stopwatch sw = Stopwatch.StartNew();
-        for (int i = 0; i < 2000; i++)
+        for (int iter = 0; iter < FrameSamples; iter++)
         {
-            double px = bounds.MinX + rnd.NextDouble() * (bounds.MaxX - bounds.MinX);
-            double py = bounds.MinY + rnd.NextDouble() * (bounds.MaxY - bounds.MinY);
-            if (vm.HitTest(px, py, 5 / vm.Scale) is not null) hits++;
+            int iterHits = 0;
+            Stopwatch sw = Stopwatch.StartNew();
+            for (int i = 0; i < HitIterations; i++)
+            {
+                double px = bounds.MinX + rnd.NextDouble() * (bounds.MaxX - bounds.MinX);
+                double py = bounds.MinY + rnd.NextDouble() * (bounds.MaxY - bounds.MinY);
+                if (vm.HitTest(px, py, 5 / vm.Scale) is not null) iterHits++;
+            }
+            sw.Stop();
+            hitTotals.Add(sw.Elapsed.TotalMilliseconds);
+            hits = iterHits; // 同一 rnd 流跨轮继续，命中数为参考（非断言）
         }
-        sw.Stop();
-        m.HitTotalMs = sw.Elapsed.TotalMilliseconds;
-        m.HitPerCallMs = m.HitTotalMs / 2000.0;
+        m.HitSamples = hitTotals;
+        m.HitMedianTotalMs = Median(hitTotals);
+        m.HitMedianPerCallMs = m.HitMedianTotalMs / HitIterations;
+        m.HitMinTotalMs = hitTotals.Min();
+        m.HitMaxTotalMs = hitTotals.Max();
         m.HitCount = hits;
 
         m.ManagedMb = GC.GetTotalMemory(forceFullCollection: true) / (1024 * 1024);
@@ -305,9 +325,12 @@ internal static class Program
     /// 帧计时（同一 DrawingCanvas 置于 headless 窗口内，保证位图缓存路径生效）。
     /// headless 适配：Show/布局泵会先消耗一帧（缓存已烘焙），故画布在宿主窗口已显示后才挂入，
     /// 手动 Measure/Arrange 而不泵消息——计时首帧即「真冷 Refined 全量绘制 + 缓存位图重建」
-    /// （冷文字缓存 + RTB 分配，与生产首帧同路径）；随后 PanBy(32,0) 两次再渲染 = 平移 blit
-    /// （真实交互路径，128px 外扩内不重绘）。帧计时不含 PNG 编码；refined 另列编码耗时
-    /// （旧基线 frame 含编码）。
+    /// （冷文字缓存 + RTB 分配，与生产首帧同路径）；随后 PanBy(32,0) 三次再渲染 = 平移 blit
+    /// （真实交互路径，128px 外扩内不重绘；3 次取中位，单次方差见明细）。
+    /// 末段为「交互档失效重建」（spec §8）：暖缓存已存在时强制 Interactive + 缩放令结构失效，
+    /// 下一次渲染走 RebuildCache（全量交互档栅格化 + blit）——与上一行 Refined 暖重建同口径，
+    /// 仅质量档不同；BaseRenderCount 增量可证明确为重建而非 blit。
+    /// 帧计时不含 PNG 编码；refined 另列编码耗时（旧基线 frame 含编码）。
     /// </summary>
     private static void BenchFrames(Metrics m, IReadOnlyList<RenderItem> items,
         (double MinX, double MinY, double MaxX, double MaxY) bounds)
@@ -331,23 +354,54 @@ internal static class Program
         {
             using var rtb = new RenderTargetBitmap(new PixelSize(FrameWidth, FrameHeight));
             m.RefinedFrameMs = Ms(() => rtb.Render(canvas));
+            // 编码紧随其渲染的同一帧（与旧基线 frame 含编码同口径对比；不受后续平移影响）。
             m.RefinedEncodeMs = Ms(() =>
             {
                 using var stream = new MemoryStream();
                 rtb.Save(stream);
             });
 
-            vm.PanBy(32, 0);
-            Dispatcher.UIThread.RunJobs();
-            m.InteractiveFrameMs = Ms(() => rtb.Render(canvas));
-            vm.PanBy(32, 0);
-            Dispatcher.UIThread.RunJobs();
-            m.InteractiveFrame2Ms = Ms(() => rtb.Render(canvas));
+            int baseBefore = canvas.BaseRenderCount;
+            var panSamples = new List<double>(FrameSamples);
+            for (int i = 0; i < FrameSamples; i++)
+            {
+                vm.PanBy(32, 0);
+                Dispatcher.UIThread.RunJobs();
+                panSamples.Add(Ms(() => rtb.Render(canvas)));
+            }
+            m.InteractiveFrameSamples = panSamples;
+            m.InteractiveFrameMs = Median(panSamples);
+            m.InteractiveFrameMinMs = panSamples.Min();
+            m.InteractiveFrameMaxMs = panSamples.Max();
+            // 平移未越出 128px 外扩 → 不应触发基元重建（样本有效性证据）。
+            m.InteractiveBlitNoRebuild = canvas.BaseRenderCount == baseBefore;
 
             // 信息项：稳态精绘重建（JIT/Skia 已暖）——对照冷首帧，判断冷帧成本是否含一次性预热。
             vm.ZoomAt(1.0001, FrameWidth / 2.0, FrameHeight / 2.0);
             Dispatcher.UIThread.RunJobs();
             m.RefinedWarmMs = Ms(() => rtb.Render(canvas));
+
+            // 交互档失效重建：暖缓存已存在；强制 Interactive 并以同幅缩放令缓存结构失效，
+            // 每次样本 = 一次完整渲染（RebuildCache[Interactive] + blit）。
+            canvas.SetQualityForTests(RenderQuality.Interactive);
+            var rebuildSamples = new List<double>(FrameSamples);
+            int rebuilds = 0;
+            int baseCountBefore = canvas.BaseRenderCount;
+            for (int i = 0; i < FrameSamples; i++)
+            {
+                vm.ZoomAt(1.0001, FrameWidth / 2.0, FrameHeight / 2.0);
+                int before = canvas.BaseRenderCount;
+                rebuildSamples.Add(Ms(() => rtb.Render(canvas)));
+                if (canvas.BaseRenderCount > before) rebuilds++;
+            }
+            m.InteractiveRebuildSamples = rebuildSamples;
+            m.InteractiveRebuildMs = rebuildSamples[0];
+            m.InteractiveRebuildMedianMs = Median(rebuildSamples);
+            m.InteractiveRebuildMinMs = rebuildSamples.Min();
+            m.InteractiveRebuildRebuilt = rebuilds == FrameSamples
+                && canvas.BaseRenderCount - baseCountBefore >= FrameSamples;
+            m.InteractiveRebuildQuality = canvas.Quality;
+            canvas.SetQualityForTests(RenderQuality.Refined); // 复原（不影响后续用例）
         }
         finally
         {
@@ -358,40 +412,80 @@ internal static class Program
 
     // ---- 输出 ----
 
+    private static void WritePreamble()
+    {
+        Preamble.Add("# CadAgent 大图性能基线（项3 T7 工具）");
+        Preamble.Add("");
+        Preamble.Add($"> 运行：{DateTime.Now:yyyy-MM-dd HH:mm:ss} · {RuntimeInformation.FrameworkDescription}" +
+                     $" · {RuntimeInformation.OSDescription} · CPU={Environment.ProcessorCount} · headless Skia（软件渲染）");
+        Preamble.Add($"> 阈值（不 hard fail）：交互帧与交互档失效重建 <{InteractiveTargetMs:0}ms、命中 <{HitTargetMs:0}ms/次、" +
+                     $"Refined 帧/快照 <{RefinedTargetMs:0}ms；合成仅 200k 计入交互/命中目标（spec §7）。");
+        Preamble.Add($"> 帧：{FrameWidth}×{FrameHeight} headless 窗口内同一 DrawingCanvas；Refined=真冷首帧（Refined 全量+缓存位图重建，不含 PNG 编码），" +
+                     $"平移交互=PanBy(32,0) 后 blit 复用缓存（{FrameSamples} 次取中位）。");
+        Preamble.Add("> 交互档失效重建=暖缓存后切 Interactive + 缩放失效 → 一次全量重建+blit（spec §8「越界/失效重建（交互档 <50ms）」，" +
+                     $"{FrameSamples} 次取中位）；命中同为 {FrameSamples} 次×{HitIterations} 取中位。");
+        Preamble.Add("> 快照=RenderPng（渲染 + PNG 编码；编码量级见同行 refined 的 +enc 列）；snapshot warm 为重复 2 次取最小值。" +
+                     "load src=源 DWG 首载（%TEMP% 同字节副本，OS 文件缓存已暖，非磁盘冷载）；load working=二开（working+侧车）。");
+        Preamble.Add("");
+        Preamble.Add("| case | load src | load working | build | hash cold | hash repeat | snapshot | refined frame (+enc) " +
+                     "| pan frame med (min-max, n=" + FrameSamples + ") | interactive rebuild med (first/min) " +
+                     "| hit x" + HitIterations + " med (count) | per hit | managed | status |");
+        Preamble.Add("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    }
+
+    private static string Compose()
+    {
+        var sb = new StringBuilder();
+        foreach (string line in Preamble) sb.AppendLine(line);
+        // 指标表：全部行连续（明细在其后，避免表格被明细打断）。
+        foreach (string row in Rows) sb.AppendLine(row);
+        sb.AppendLine();
+        foreach (string line in Details) sb.AppendLine(line);
+        return sb.ToString();
+    }
+
     private static void Emit(Metrics m, bool requireTargets)
     {
         m.Targets = requireTargets;
         string status = Status(m);
-        Markdown.Add($"| {m.Name} | {Num(m.LoadSourceMs)} | {Num(m.LoadWorkingMs)} | " +
-                     $"{m.BuildMs:0}ms -> {m.ItemCount} items | {m.HashColdMs:0.#}ms | {m.HashRepeatMs:0.###}ms | " +
-                     $"{m.SnapshotMs:0}ms ({m.SnapshotKb}KB, warm {m.SnapshotWarmMs:0}ms) | " +
-                     $"{m.RefinedFrameMs:0.#}ms (+{m.RefinedEncodeMs:0.#}ms enc, warm {m.RefinedWarmMs:0.#}ms) | " +
-                     $"{m.InteractiveFrameMs:0.##}ms / {m.InteractiveFrame2Ms:0.##}ms | {m.HitTotalMs:0}ms ({m.HitCount}) | " +
-                     $"{m.HitPerCallMs:0.###}ms | {m.ManagedMb}MB | {status} |");
+        Rows.Add($"| {m.Name} | {Num(m.LoadSourceMs)} | {Num(m.LoadWorkingMs)} | " +
+                 $"{m.BuildMs:0}ms -> {m.ItemCount} items | {m.HashColdMs:0.#}ms | {m.HashRepeatMs:0.###}ms | " +
+                 $"{m.SnapshotMs:0}ms ({m.SnapshotKb}KB, warm min2 {m.SnapshotWarmMs:0}ms) | " +
+                 $"{m.RefinedFrameMs:0.#}ms (+{m.RefinedEncodeMs:0.#}ms enc, warm {m.RefinedWarmMs:0.#}ms) | " +
+                 $"{m.InteractiveFrameMs:0.##}ms ({m.InteractiveFrameMinMs:0.##}-{m.InteractiveFrameMaxMs:0.##}) | " +
+                 $"{m.InteractiveRebuildMedianMs:0.#}ms ({m.InteractiveRebuildMs:0.#}/{m.InteractiveRebuildMinMs:0.#}) | " +
+                 $"{m.HitMedianTotalMs:0}ms ({m.HitCount}) | " +
+                 $"{m.HitMedianPerCallMs:0.###}ms | {m.ManagedMb}MB | {status} |");
 
-        Markdown.Add("");
-        Markdown.Add($"- {m.Name}: entities={m.TopEntities} items={m.ItemCount} text={m.TextItems} " +
-                     $"hatchPts={m.HatchPoints} census={m.CensusState} unparsed={m.UnparsedCount} " +
-                     $"hashEqual={m.HashEqual}");
+        // 明细：表后输出（每案一段，前置空行，列表不与表格相邻）。
+        Details.Add("");
+        Details.Add($"- {m.Name}: entities={m.TopEntities} items={m.ItemCount} text={m.TextItems} " +
+                    $"hatchPts={m.HatchPoints} census={m.CensusState} unparsed={m.UnparsedCount} " +
+                    $"hashEqual={m.HashEqual}");
         if (m.Kind == "drawing")
         {
-            Markdown.Add($"- {m.Name}: sourceUntouched={m.SourceUntouched} noSourceReread={m.NoSourceReread} " +
-                         $"loadNoSource={Num(m.LoadNoSourceMs)} size={m.SourceBytes / (1024 * 1024)}MB");
+            Details.Add($"- {m.Name}: sourceUntouched={m.SourceUntouched} noSourceReread={m.NoSourceReread} " +
+                        $"loadNoSource={Num(m.LoadNoSourceMs)} size={m.SourceBytes / (1024 * 1024)}MB");
         }
         else
         {
-            Markdown.Add($"- {m.Name}: dxfWrite={m.WriteMs:0}ms size={m.SourceBytes / 1024}KB");
+            Details.Add($"- {m.Name}: dxfWrite={m.WriteMs:0}ms size={m.SourceBytes / 1024}KB");
         }
-        Markdown.Add($"- {m.Name}: hashRevision={m.HashRevision} hashInvalidate={Num(m.HashInvalidateMs)} " +
-                     $"refinedWarm={m.RefinedWarmMs:0.#}ms snapshotWarm={m.SnapshotWarmMs:0}ms");
-        Markdown.Add("");
+        Details.Add($"- {m.Name}: hashRevision={m.HashRevision} hashInvalidate={Num(m.HashInvalidateMs)} " +
+                    $"refinedWarm={m.RefinedWarmMs:0.#}ms snapshotWarm(min2)={m.SnapshotWarmMs:0}ms");
+        Details.Add($"- {m.Name}: panSamples=[{string.Join(", ", m.InteractiveFrameSamples.Select(v => v.ToString("0.##", CultureInfo.InvariantCulture)))}]ms " +
+                    $"blitWithoutRebuild={m.InteractiveBlitNoRebuild}; " +
+                    $"interactiveRebuildSamples=[{string.Join(", ", m.InteractiveRebuildSamples.Select(v => v.ToString("0.#", CultureInfo.InvariantCulture)))}]ms " +
+                    $"rebuilt={m.InteractiveRebuildRebuilt} quality={m.InteractiveRebuildQuality}");
+        Details.Add($"- {m.Name}: hitSamples=[{string.Join(", ", m.HitSamples.Select(v => v.ToString("0", CultureInfo.InvariantCulture)))}]ms " +
+                    $"perHit median={m.HitMedianPerCallMs:0.###}ms");
 
         Console.WriteLine(Ascii($"[{m.Name}] loadSrc={Num(m.LoadSourceMs)} loadWorking={Num(m.LoadWorkingMs)} " +
                                 $"build={m.BuildMs:0}ms items={m.ItemCount} hashCold={m.HashColdMs:0.#}ms " +
-                                $"hashRepeat={m.HashRepeatMs:0.###}ms snapshot={m.SnapshotMs:0}ms " +
+                                $"hashRepeat={m.HashRepeatMs:0.###}ms snapshot={m.SnapshotMs:0}ms(warm {m.SnapshotWarmMs:0}) " +
                                 $"refined={m.RefinedFrameMs:0.#}ms(+{m.RefinedEncodeMs:0.#}) " +
-                                $"interactive={m.InteractiveFrameMs:0.##}/{m.InteractiveFrame2Ms:0.##}ms " +
-                                $"hit2000={m.HitTotalMs:0}ms per={m.HitPerCallMs:0.###}ms mem={m.ManagedMb}MB " +
+                                $"panMed={m.InteractiveFrameMs:0.##}ms rebuildMed={m.InteractiveRebuildMedianMs:0.#}ms " +
+                                $"hitMed={m.HitMedianTotalMs:0}ms per={m.HitMedianPerCallMs:0.###}ms mem={m.ManagedMb}MB " +
                                 $"census={m.CensusState} untouched={m.SourceUntouched} noReread={m.NoSourceReread} " +
                                 $"status={status}"));
     }
@@ -399,27 +493,31 @@ internal static class Program
     private static string Status(Metrics m)
     {
         var parts = new List<string>();
-        bool frameOk = m.InteractiveFrameMs < InteractiveTargetMs || m.InteractiveFrame2Ms < InteractiveTargetMs;
-        bool hitOk = m.HitPerCallMs < HitTargetMs;
+        bool frameOk = m.InteractiveFrameMs < InteractiveTargetMs;
+        bool rebuildOk = m.InteractiveRebuildMedianMs < InteractiveTargetMs;
+        bool hitOk = m.HitMedianPerCallMs < HitTargetMs;
         bool refinedOk = m.RefinedFrameMs < RefinedTargetMs;
         bool snapOk = m.SnapshotMs < SnapshotTargetMs;
-        string info = $"INFO (frame {(frameOk ? "PASS" : "TARGET")}, hit {(hitOk ? "PASS" : "TARGET")}, " +
-                      $"refined {(refinedOk ? "PASS" : "TARGET")}, snapshot {(snapOk ? "PASS" : "TARGET")})";
+        string info = $"INFO (frame {(frameOk ? "PASS" : "TARGET")}, rebuild {(rebuildOk ? "PASS" : "TARGET")}, " +
+                      $"hit {(hitOk ? "PASS" : "TARGET")}, refined {(refinedOk ? "PASS" : "TARGET")}, " +
+                      $"snapshot {(snapOk ? "PASS" : "TARGET")})";
         if (!m.Targets)
         {
             parts.Add(info);
             return string.Join("; ", parts);
         }
-        // 真实图：全部目标（含二开语义/哈希）。合成 200k：spec §7 只要求交互帧 + 命中。
+        // 真实图：全部目标（含二开语义/哈希）。合成：spec §7 只要求交互帧 + 命中（重建为 §8 交互语义，并列 INFO）。
         parts.Add(frameOk ? "frame PASS" : "frame TARGET");
         parts.Add(hitOk ? "hit PASS" : "hit TARGET");
         if (m.Kind == "drawing")
         {
+            parts.Add(rebuildOk ? "rebuild PASS" : "rebuild TARGET");
             parts.Add(refinedOk ? "refined PASS" : "refined TARGET");
             parts.Add(snapOk ? "snapshot PASS" : "snapshot TARGET");
             parts.Add(m.HashRepeatMs < 1 ? "hash PASS" : "hash TARGET");
             parts.Add(m.SourceUntouched == true ? "srcUntouched PASS" : "srcUntouched TARGET");
             parts.Add(m.NoSourceReread == true ? "noReread PASS" : "noReread TARGET");
+            parts.Add(m.InteractiveRebuildRebuilt ? "rebuildVerified PASS" : "rebuildVerified TARGET");
         }
         else
         {
@@ -440,19 +538,55 @@ internal static class Program
         return sw.Elapsed.TotalMilliseconds;
     }
 
-    private static string? ArgValue(string[] args, string name)
+    private static double Median(IReadOnlyList<double> values)
     {
-        for (int i = 0; i < args.Length - 1; i++)
-            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
-        return null;
+        double[] sorted = values.ToArray();
+        Array.Sort(sorted);
+        return sorted[sorted.Length / 2];
     }
 
-    private static IReadOnlyList<string> ArgValues(string[] args, string name)
+    /// <summary>
+    /// 严格参数解析：未知参数、缺值（末位或后随另一 --flag）、重复 --out/--synth 均报错
+    /// （ASCII 文案，调用方打印到 stderr 并以非 0 退出）。
+    /// </summary>
+    private static bool TryParseArgs(string[] args, out string? outPath, out IReadOnlyList<string> drawings,
+        out string? synth, out string? error)
     {
-        var values = new List<string>();
-        for (int i = 0; i < args.Length - 1; i++)
-            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)) values.Add(args[i + 1]);
-        return values;
+        outPath = null;
+        synth = null;
+        error = null;
+        var list = new List<string>();
+        drawings = list;
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i];
+            if (arg is not ("--out" or "--synth" or "--drawing"))
+            {
+                error = Ascii($"unknown argument '{arg}'");
+                return false;
+            }
+            if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                error = $"missing value for {arg}";
+                return false;
+            }
+            string value = args[++i];
+            switch (arg)
+            {
+                case "--out":
+                    if (outPath is not null) { error = "duplicate --out"; return false; }
+                    outPath = value;
+                    break;
+                case "--synth":
+                    if (synth is not null) { error = "duplicate --synth"; return false; }
+                    synth = value;
+                    break;
+                default:
+                    list.Add(value);
+                    break;
+            }
+        }
+        return true;
     }
 
     private static int ParseSynth(string raw)
@@ -460,7 +594,7 @@ internal static class Program
         string v = raw.Trim().ToLowerInvariant();
         int factor = v.EndsWith('k') ? 1000 : 1;
         if (v.EndsWith('k')) v = v[..^1];
-        if (!int.TryParse(v, out int n) || n <= 0) throw new ArgumentException($"无效 --synth: {raw}（例 20k/80k/200k）");
+        if (!int.TryParse(v, out int n) || n <= 0) throw new ArgumentException($"invalid --synth: {raw} (e.g. 20k/80k/200k)");
         return n * factor;
     }
 
@@ -536,9 +670,21 @@ internal static class Program
         public double RefinedEncodeMs;
         public double RefinedWarmMs;
         public double InteractiveFrameMs;
-        public double InteractiveFrame2Ms;
-        public double HitTotalMs;
-        public double HitPerCallMs;
+        public double InteractiveFrameMinMs;
+        public double InteractiveFrameMaxMs;
+        public bool InteractiveBlitNoRebuild;
+        public IReadOnlyList<double> InteractiveFrameSamples = Array.Empty<double>();
+        public double InteractiveRebuildMs;
+        public double InteractiveRebuildMedianMs;
+        public double InteractiveRebuildMinMs;
+        public IReadOnlyList<double> InteractiveRebuildSamples = Array.Empty<double>();
+        public bool InteractiveRebuildRebuilt;
+        public RenderQuality InteractiveRebuildQuality;
+        public double HitMedianTotalMs;
+        public double HitMedianPerCallMs;
+        public double HitMinTotalMs;
+        public double HitMaxTotalMs;
+        public IReadOnlyList<double> HitSamples = Array.Empty<double>();
         public int HitCount;
         public long ManagedMb;
     }
