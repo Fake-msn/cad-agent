@@ -2,6 +2,7 @@ using System.Text.Json;
 using ACadSharp;
 using ACadSharp.Classes;
 using ACadSharp.Entities;
+using ACadSharp.Objects;
 using ACadSharp.Tables;
 using CadAgent.Core;
 using CadAgent.Data;
@@ -76,6 +77,96 @@ public class EditViewModelTests
             set.Upsert(a);
             set.Save(path);
         }
+
+        public void Dispose()
+        {
+            Audit.Dispose();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(DxfPath);
+            if (Directory.Exists(ProjectDir)) Directory.Delete(ProjectDir, true);
+        }
+    }
+
+    /// <summary>
+    /// Plan-2 T4 夹具：模型文字 + 纸面布局「布局1」（先 AddViewport 再挂纸面实体，既有夹具口径）
+    /// + 标题块 Insert 的图号实例属性。模型/纸面坐标刻意区分，保证「另一空间未动」断言可辨。
+    /// </summary>
+    private sealed class PaperFixture : IDisposable
+    {
+        public const string LayoutName = "布局1";
+        public const string ModelTextValue = "模型字";
+        public const string PaperTextValue = "纸面旧字";
+        public string ProjectDir { get; }
+        public string DxfPath { get; }
+        public DrawingSession Session { get; }
+        public SqliteAuditStore Audit { get; }
+        public SnapshotStore Snapshots { get; }
+        public string ModelTextHandle { get; }
+        public string PaperLineHandle { get; }
+        public string PaperTextHandle { get; }
+        public string AttributeHandle { get; }
+
+        public PaperFixture()
+        {
+            ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-paper-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(ProjectDir, ".cadagent"));
+            DxfPath = DxfFixture.CreateTempDxf(doc =>
+            {
+                var layout = new Layout(LayoutName);
+                doc.Layouts.Add(layout);
+                layout.AddViewport(new Viewport
+                {
+                    Center = new XYZ(500, 350, 0),
+                    Width = 1000,
+                    Height = 700,
+                    ViewTarget = new XYZ(0, 0, 0),
+                    ViewHeight = 200
+                });
+                doc.Entities.Add(new TextEntity
+                {
+                    InsertPoint = new XYZ(0, 200, 0), Value = ModelTextValue, Height = 3.5
+                });
+                layout.AssociatedBlock!.Entities.Add(new Line
+                {
+                    StartPoint = new XYZ(10, 10, 0),
+                    EndPoint = new XYZ(60, 10, 0)
+                });
+                layout.AssociatedBlock!.Entities.Add(new TextEntity
+                {
+                    InsertPoint = new XYZ(10, 20, 0), Value = PaperTextValue, Height = 3.5
+                });
+                var titleBlock = new BlockRecord("TITLE_A1");
+                titleBlock.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(841, 0, 0) });
+                doc.BlockRecords.Add(titleBlock);
+                var insert = new Insert(titleBlock) { InsertPoint = new XYZ(420, 297, 0) };
+                var attr = new AttributeEntity { Tag = "图号", Value = "OLD" };
+                attr.InsertPoint = new XYZ(430, 280, 0);
+                attr.AlignmentPoint = new XYZ(430, 280, 0);
+                insert.Attributes.Add(attr);
+                layout.AssociatedBlock!.Entities.Add(insert);
+            });
+            Session = DrawingSession.Load(DxfPath);
+            Layout layout = PaperLayout();
+            ModelTextHandle = Session.Doc.Entities.OfType<TextEntity>().Single().Handle.ToString();
+            PaperLineHandle = layout.AssociatedBlock!.Entities.OfType<Line>().Single().Handle.ToString();
+            PaperTextHandle = layout.AssociatedBlock!.Entities.OfType<TextEntity>().Single().Handle.ToString();
+            AttributeHandle = layout.AssociatedBlock!.Entities.OfType<Insert>().Single()
+                .Attributes.Single().Handle.ToString();
+            Audit = new SqliteAuditStore(Path.Combine(ProjectDir, ".cadagent", "audit.db"));
+            Snapshots = new SnapshotStore(Path.Combine(ProjectDir, ".cadagent", "snapshots"));
+        }
+
+        public Layout PaperLayout() => Session.Doc.Layouts.First(l => l.Name == LayoutName);
+        public TextEntity ModelText() => Session.Doc.Entities.OfType<TextEntity>().Single();
+        public Line PaperLine() => PaperLayout().AssociatedBlock!.Entities.OfType<Line>().Single();
+        public TextEntity PaperText() => PaperLayout().AssociatedBlock!.Entities.OfType<TextEntity>().Single();
+        public AttributeEntity Attribute() =>
+            PaperLayout().AssociatedBlock!.Entities.OfType<Insert>().Single().Attributes.Single();
+
+        public EditViewModel MakeVm() =>
+            new(Session, Audit, Snapshots,
+                new FixedIdentity(new OperatorIdentity("tester", Role.Draw)),
+                new RoleChecker(), ProjectDir);
 
         public void Dispose()
         {
@@ -766,5 +857,158 @@ public class EditViewModelTests
             File.Delete(dxf);
             if (Directory.Exists(projectDir)) Directory.Delete(projectDir, true);
         }
+    }
+
+    // ---- Plan-2 T4：纸面空间参数（space/layout）+ 改文字/改属性工具入口 ----
+
+    [Fact]
+    public async Task SetText_ModelText_Persisted_AuditsToolAndStepParams()
+    {
+        using var f = new PaperFixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.SetTextAsync(f.ModelTextHandle, "新模型字");
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("新模型字", f.ModelText().Value);
+        // 落盘（StepEngine.SaveWorking）：新加载的图纸读到新值。
+        Assert.Equal("新模型字", DrawingSession.Load(f.DxfPath).Doc.Entities.OfType<TextEntity>().Single().Value);
+        ulong handle = ulong.Parse(f.ModelTextHandle);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        Assert.Equal("SetText", Params(req).GetProperty("tool").GetString());
+        JsonElement args = Params(req).GetProperty("args");
+        Assert.Equal(handle, args.GetProperty("handle").GetUInt64());
+        Assert.Equal("新模型字", args.GetProperty("text").GetString());
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        Assert.Equal("set-text", Params(step).GetProperty("Kind").GetString());
+        JsonElement stepParams = Params(step).GetProperty("Params");
+        Assert.Equal(handle, stepParams.GetProperty("handle").GetUInt64());
+        Assert.Equal("新模型字", stepParams.GetProperty("text").GetString());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task SetText_PaperText_OnlyPaperChanged_OneTx()
+    {
+        using var f = new PaperFixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.SetTextAsync(f.PaperTextHandle, "纸面新字");
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("纸面新字", f.PaperText().Value);
+        Assert.Equal(PaperFixture.ModelTextValue, f.ModelText().Value); // 模型空间未动
+        Assert.Equal(new[] { r.TxId }, vm.RecentTxIds);
+        Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "tx-commit"); // 单事务
+        // 落盘：重新加载后纸面新值、模型旧值。
+        DrawingSession reloaded = DrawingSession.Load(f.DxfPath);
+        Layout layout = reloaded.Doc.Layouts.First(l => l.Name == PaperFixture.LayoutName);
+        Assert.Equal("纸面新字", layout.AssociatedBlock!.Entities.OfType<TextEntity>().Single().Value);
+        Assert.Equal(PaperFixture.ModelTextValue, reloaded.Doc.Entities.OfType<TextEntity>().Single().Value);
+    }
+
+    [Fact]
+    public async Task Move_PaperLine_WithSpaceLayout_MovesPaper_AuditsSpaceLayoutArgs()
+    {
+        using var f = new PaperFixture();
+        EditViewModel vm = f.MakeVm();
+        (double X, double Y) modelBefore = (f.ModelText().InsertPoint.X, f.ModelText().InsertPoint.Y);
+
+        EditResult r = await vm.MoveAsync(f.PaperLineHandle, 5, 7, "paper", PaperFixture.LayoutName);
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(15, f.PaperLine().StartPoint.X, 6);
+        Assert.Equal(17, f.PaperLine().StartPoint.Y, 6);
+        Assert.Equal(65, f.PaperLine().EndPoint.X, 6);
+        Assert.Equal(17, f.PaperLine().EndPoint.Y, 6);
+        Assert.Equal(modelBefore, (f.ModelText().InsertPoint.X, f.ModelText().InsertPoint.Y)); // 模型未动
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        Assert.Equal("Move", Params(req).GetProperty("tool").GetString());
+        JsonElement args = Params(req).GetProperty("args");
+        Assert.Equal("paper", args.GetProperty("space").GetString());
+        Assert.Equal(PaperFixture.LayoutName, args.GetProperty("layout").GetString());
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        JsonElement stepParams = Params(step).GetProperty("Params");
+        Assert.Equal("paper", stepParams.GetProperty("space").GetString());
+        Assert.Equal(PaperFixture.LayoutName, stepParams.GetProperty("layout").GetString());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task Move_WithoutSpaceLayout_ArgsOmitNullKeys()
+    {
+        using var f = new Fixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.MoveAsync(f.LineHandle, 1, 2);
+
+        Assert.True(r.Ok, r.Error);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        JsonElement args = Params(req).GetProperty("args");
+        Assert.False(args.TryGetProperty("space", out _));
+        Assert.False(args.TryGetProperty("layout", out _));
+        // 原始审计 JSON 逐字无 null 噪声（含 step params 通道）。
+        Assert.DoesNotContain("\"space\"", req.Entry.ParamsJson);
+        Assert.DoesNotContain("\"layout\"", req.Entry.ParamsJson);
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        Assert.DoesNotContain("\"space\"", step.Entry.ParamsJson);
+        Assert.DoesNotContain("\"layout\"", step.Entry.ParamsJson);
+    }
+
+    [Fact]
+    public async Task SetAttribute_AttribHandle_ChangesValue_AuditsKind()
+    {
+        using var f = new PaperFixture();
+        EditViewModel vm = f.MakeVm();
+
+        EditResult r = await vm.SetAttributeAsync(f.AttributeHandle, "栖贤雅庭");
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("栖贤雅庭", f.Attribute().Value);
+        AuditRecord req = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit");
+        Assert.Equal("SetAttribute", Params(req).GetProperty("tool").GetString());
+        Assert.Equal("栖贤雅庭", Params(req).GetProperty("args").GetProperty("value").GetString());
+        AuditRecord step = Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "step");
+        Assert.Equal("set-attribute", Params(step).GetProperty("Kind").GetString());
+        Assert.True(f.Audit.VerifyChain(out string error), error);
+    }
+
+    [Fact]
+    public async Task DrawLine_WithPaperSpace_WritesPaperNotModel()
+    {
+        using var f = new PaperFixture();
+        EditViewModel vm = f.MakeVm();
+        int paperBefore = f.PaperLayout().AssociatedBlock!.Entities.Count(e => e is not Viewport);
+
+        EditResult r = await vm.DrawLineAsync(0, 0, 5, 5, "0", "paper", PaperFixture.LayoutName);
+
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(paperBefore + 1, f.PaperLayout().AssociatedBlock!.Entities.Count(e => e is not Viewport));
+        Assert.Empty(f.Session.Doc.Entities.OfType<Line>()); // 模型空间无写入
+        JsonElement args = Params(Assert.Single(f.Audit.ReadAll(), x => x.Entry.Kind == "view-edit"))
+            .GetProperty("args");
+        Assert.Equal("paper", args.GetProperty("space").GetString());
+        Assert.Equal(PaperFixture.LayoutName, args.GetProperty("layout").GetString());
+    }
+
+    [Fact]
+    public async Task SetText_Newline_Fails_HandlerMessage_NoTx_NoValueChange()
+    {
+        using var f = new Fixture();
+        EditViewModel vm = f.MakeVm();
+        byte[] fileBefore = await File.ReadAllBytesAsync(f.DxfPath);
+
+        EditResult r = await vm.SetTextAsync(f.TextHandle, "甲\n乙");
+
+        Assert.False(r.Ok);
+        Assert.Contains("单行文字不支持换行（多行请用 MText）", r.Error);
+        Assert.Equal(r.Error, vm.ErrorMessage);
+        Assert.Empty(vm.RecentTxIds);
+        Assert.Equal("注记", f.Session.Doc.Entities.OfType<TextEntity>().Single().Value); // 原值不变
+        Assert.Equal(fileBefore, await File.ReadAllBytesAsync(f.DxfPath)); // 无部分保存
+        List<AuditRecord> records = f.Audit.ReadAll().ToList();
+        Assert.Single(records, x => x.Entry.Kind == "step-failed");
+        Assert.DoesNotContain(records, x => x.Entry.Kind == "tx-commit");
+        Assert.True(f.Audit.VerifyChain(out string error), error);
     }
 }

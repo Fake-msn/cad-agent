@@ -2301,6 +2301,11 @@ public sealed class MainWindow : Window
                 Canvas.Select(Canvas.HitTest(wx, wy, PickTolerancePixels / Canvas.Scale));
                 return true;
 
+            case EditTool.SetText:
+                // 项2 T4 防御分支：改文字工具尚无 UI 入口（T5 接线），点击一律消费、不产生编辑
+                // （不得落入 default 的默认选择路径）。
+                return true;
+
             default:
                 return false; // Select：默认 HitTest→Select 路径
         }
