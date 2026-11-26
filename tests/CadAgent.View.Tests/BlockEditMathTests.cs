@@ -166,6 +166,41 @@ public class BlockEditMathTests
     }
 
     [Fact]
+    public void WorldDeltaToBlockDelta_MirroredNormalInsert_MatchesRenderedOcsGeometry()
+    {
+        // 镜像法向（Normal=(0,0,-1)）的 Insert 复合含 OCS 映射（OcsAffine）——逆解必须与
+        // 渲染几何同口径。期望世界增量由渲染出的块基向量实测（不调用内部 OcsAffine）：
+        // 块内两条线 (0,0)→(1,0) / (0,0)→(0,1) 的渲染端点差即 t 的两列。
+        WithSession(doc =>
+        {
+            var block = new BlockRecord("MIRB");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(0, 1, 0) });
+            doc.BlockRecords.Add(block);
+            doc.Entities.Add(new Insert(block)
+            {
+                InsertPoint = new XYZ(4, -9, 0), Rotation = Math.PI / 4,
+                XScale = 2, YScale = 3, ZScale = 1, Normal = new XYZ(0, 0, -1)
+            });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s).Where(i => i.BlockName == "MIRB").ToList();
+            Assert.Equal(2, items.Count);
+            RenderItem xLine = items.Single(i => i.Handle.EndsWith(":0", StringComparison.Ordinal));
+            RenderItem yLine = items.Single(i => i.Handle.EndsWith(":1", StringComparison.Ordinal));
+            double dxX = xLine.Points[1].X - xLine.Points[0].X, dxY = xLine.Points[1].Y - xLine.Points[0].Y;
+            double dyX = yLine.Points[1].X - yLine.Points[0].X, dyY = yLine.Points[1].Y - yLine.Points[0].Y;
+
+            const double lx = 0.75, ly = -1.5;
+            var (ok, bx, by, err) = BlockEditMath.WorldDeltaToBlockDelta(
+                s.Doc, xLine.ParentInsertChain!, lx * dxX + ly * dyX, lx * dxY + ly * dyY);
+            Assert.True(ok, err);
+            Assert.Equal(lx, bx, Tol);
+            Assert.Equal(ly, by, Tol);
+        });
+    }
+
+    [Fact]
     public void WorldDeltaToBlockDelta_MissingChainHandle_ReturnsSpecificError()
     {
         WithSession(doc =>
