@@ -44,8 +44,12 @@ public class EditPanelHeadlessTests
 
         /// <summary>withLumBlock=true 追加块定义 LUM（插块测试用；块内实体不进模型空间，既有计数断言不变）。
         /// withLumInsert=true 追加 LUM 块 + 模型空间 Insert@(50,10)（Imp#3 子图元句柄测试）；
-        /// withDimension=true 追加带匿名块的 DimensionLinear（块内线 y=20，避开夹具 WALL 线）。</summary>
-        public Fixture(bool withLumBlock = false, bool withLumInsert = false, bool withDimension = false)
+        /// withDimension=true 追加带匿名块的 DimensionLinear（块内线 y=20，避开夹具 WALL 线）；
+        /// withModelAttribute=true 追加模型空间标题块 Insert@(50,10) + 属性「图名」@(60,4)
+        /// （I1：属性项在模型幅面须按 ATTRIB 实例编辑，不得落到父 Insert；锚点须落在
+        /// 无框单幅面 ModelBounds 内，否则 CropToFrame 会裁掉属性图元）。</summary>
+        public Fixture(bool withLumBlock = false, bool withLumInsert = false, bool withDimension = false,
+            bool withModelAttribute = false)
         {
             ProjectDir = Path.Combine(Path.GetTempPath(), "cadagent-edit-ui-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(AgentDir);
@@ -59,6 +63,17 @@ public class EditPanelHeadlessTests
                 {
                     var block = doc.BlockRecords.First(b => b.Name == "LUM");
                     doc.Entities.Add(new Insert(block) { InsertPoint = new XYZ(50, 10, 0) });
+                }
+                if (withModelAttribute)
+                {
+                    var titleBlock = new BlockRecord("TB_TITLE");
+                    doc.BlockRecords.Add(titleBlock);
+                    var title = new Insert(titleBlock) { InsertPoint = new XYZ(50, 10, 0) };
+                    var attr = new AttributeEntity { Tag = "图名", Value = "旧图名", Height = 10 };
+                    attr.InsertPoint = new XYZ(60, 4, 0);
+                    attr.AlignmentPoint = new XYZ(60, 4, 0);
+                    title.Attributes.Add(attr);
+                    doc.Entities.Add(title);
                 }
                 if (withDimension)
                 {
@@ -87,9 +102,9 @@ public class EditPanelHeadlessTests
     }
 
     private static (MainWindow Window, Fixture F) ShowWindow(bool withLumBlock = false,
-        bool withLumInsert = false, bool withDimension = false)
+        bool withLumInsert = false, bool withDimension = false, bool withModelAttribute = false)
     {
-        var f = new Fixture(withLumBlock, withLumInsert, withDimension);
+        var f = new Fixture(withLumBlock, withLumInsert, withDimension, withModelAttribute);
         var vm = new MainViewModel(f.DxfPath, f.ProjectDir);
         Assert.Null(vm.ErrorMessage);
         var window = new MainWindow(vm, new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
@@ -585,6 +600,150 @@ public class EditPanelHeadlessTests
             JsonElement args = JsonDocument.Parse(req.Entry.ParamsJson).RootElement.GetProperty("args");
             Assert.Equal(3.5, args.GetProperty("height").GetDouble(), 3);
             Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    // ---- 项2 Plan-2 T5 收尾：改文字工具的 UI 接线（模型幅面）----
+
+    /// <summary>模型幅面 SetText UI 路径：Text 工具建字 → 改文字点同一图元 → 落盘值变更 + 画布更新。</summary>
+    [AvaloniaFact]
+    public async Task SetTextTool_ModelText_PersistsNewValue()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "旧字";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 40));
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+
+            ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(EditTool.SetText, window.Edit.ActiveTool);
+            window.EditTextInput.Text = "新字";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 40)); // 命中文字盒
+
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.Equal(2, window.Edit.RecentTxIds.Count);
+            var saved = CadAgent.Data.DrawingSession.Load(f.DxfPath);
+            Assert.Equal("新字", Assert.Single(saved.Doc.Entities.OfType<TextEntity>()).Value);
+            RenderItem item = Assert.Single(window.Canvas!.Items, i => i.Kind == RenderKind.Text);
+            Assert.Equal("新字", item.Text);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    /// <summary>改文字目标非文字类（夹具 WALL 线）→ 「仅文字/属性可改文字」，零 tx、无审计库。</summary>
+    [AvaloniaFact]
+    public void SetTextTool_LineTarget_Refused_NoTx()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "新字";
+            ClickCanvasAtWorld(window, 50, 0); // 命中模型 WALL 线
+
+            Assert.True(window.EditError!.IsVisible);
+            Assert.Contains("仅文字/属性可改文字", window.EditError.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            Assert.False(File.Exists(f.AuditDbPath));
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    // ---- I1（终审修复）：模型幅面属性项 = ATTRIB 实例编辑，不得落到父 Insert ----
+
+    /// <summary>I1 夹具：模型 Insert@(50,10) + 属性「图名」@(60,4)（默认左/基线对齐）。</summary>
+    private static void SelectModelAttribute(MainWindow window)
+    {
+        ClickCanvasAtWorld(window, 65, 8); // 属性文字盒内（宽 3 字 × 高 10 × 0.6 = 18）
+        Assert.NotNull(window.Canvas!.SelectedHandle);
+        Assert.Contains(":attr:", window.Canvas.SelectedHandle);
+    }
+
+    [AvaloniaFact]
+    public async Task Delete_ModelAttributeSelected_RemovesAttribOnly_InsertKept()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withModelAttribute: true);
+        try
+        {
+            window.ConfirmDeleteOverride = _ => Task.FromResult(true);
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            SelectModelAttribute(window);
+
+            await ActAndWaitForEditAsync(window, () =>
+                ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
+            Assert.Null(window.Edit!.ErrorMessage); // 旧缺陷：父句柄删除整个 Insert
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(f.DxfPath);
+            Insert insert = Assert.Single(saved.Doc.Entities.OfType<Insert>()); // 父 Insert 仍在盘上
+            Assert.Empty(insert.Attributes); // ATTRIB 实例级移除
+            using var audit = new SqliteAuditStore(f.AuditDbPath);
+            List<AuditRecord> records = audit.ReadAll().ToList();
+            Assert.Single(records, r => r.Entry.Kind == "tx-commit"); // 单事务
+            JsonElement stepParams = JsonDocument.Parse(Assert.Single(records,
+                r => r.Entry.Kind == "step").Entry.ParamsJson).RootElement.GetProperty("Params");
+            Assert.True(stepParams.GetProperty("attribute").GetBoolean()); // attribute:true 固化意图
+            Assert.True(audit.VerifyChain(out string error), error);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task Move_ModelAttributeSelected_MovesAttribOnly_InsertUnchanged()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withModelAttribute: true);
+        try
+        {
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            SelectModelAttribute(window); // 基准 = 属性锚点 (60,4)
+
+            // 第二击空白点 (90,9) → dx=30, dy=5（仅 ATTRIB 两点平移，仍在幅面 bounds 内）。
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 90, 9));
+
+            Assert.Null(window.Edit!.ErrorMessage); // 旧缺陷：父 Insert 整体移动
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(f.DxfPath);
+            Insert insert = Assert.Single(saved.Doc.Entities.OfType<Insert>());
+            AttributeEntity attr = Assert.Single(insert.Attributes);
+            Assert.Equal(90, attr.InsertPoint.X, 6);
+            Assert.Equal(9, attr.InsertPoint.Y, 6);
+            Assert.Equal(90, attr.AlignmentPoint.X, 6);
+            Assert.Equal(9, attr.AlignmentPoint.Y, 6);
+            Assert.Equal(50, insert.InsertPoint.X, 6); // 父 Insert 原位
+            Assert.Equal(10, insert.InsertPoint.Y, 6);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    [AvaloniaFact]
+    public async Task ChangeLayer_ModelAttributeSelected_ChangesAttribLayerOnly()
+    {
+        (MainWindow window, Fixture f) = ShowWindow(withModelAttribute: true);
+        try
+        {
+            ToolButton(window, "ChangeLayer").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            SelectModelAttribute(window);
+            Assert.Contains("WALL", window.EditLayerSelector!.ItemsSource!.Cast<string>());
+
+            await ActAndWaitForEditAsync(window, () =>
+                window.EditLayerSelector.SelectedItem = "WALL");
+
+            Assert.Null(window.Edit!.ErrorMessage); // 旧缺陷：父 Insert 改层
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(f.DxfPath);
+            Insert insert = Assert.Single(saved.Doc.Entities.OfType<Insert>());
+            Assert.Equal("WALL", Assert.Single(insert.Attributes).Layer.Name);
+            Assert.Equal("0", insert.Layer.Name); // 父 Insert 层不变
         }
         finally { Cleanup(window, f); }
     }

@@ -8,8 +8,9 @@ using CadAgent.View.Services;
 
 namespace CadAgent.View.ViewModels;
 
-/// <summary>手动编辑工具（计划4 T9）。Select 为默认选择工具，不产生编辑。</summary>
-public enum EditTool { Select, Line, Text, Move, Delete, ChangeLayer, InsertBlock }
+/// <summary>手动编辑工具（计划4 T9）。Select 为默认选择工具，不产生编辑。
+/// SetText=「改文字」入口（项2 T4 只加枚举/kind，UI 接线在 T5）；追加在末尾不改既有序值。</summary>
+public enum EditTool { Select, Line, Text, Move, Delete, ChangeLayer, InsertBlock, SetText }
 
 /// <summary>编辑结果：Ok/TxId/Error（请求被拒于执行之前时 TxId 为空）；Warning 为编辑后回归警告
 /// （视图闭环 T7，镜像 CLI run-regression，观察性非阻塞）。Yellow 闸口警示通道自防假 Green T3
@@ -19,8 +20,8 @@ public sealed record EditResult(bool Ok, string TxId, string Error, string Warni
 /// <summary>
 /// 手动编辑视图模型（计划4 T9）：纯 C#，无 Avalonia 依赖，可单测。
 /// **所有编辑经 StepEngine——无直接 Doc 修改、无审计旁路**：
-/// ApplyAsync 构造单步 StepPlan（planId="view-edit-{guid:N}"，kind 对应六处理器
-/// 契约）→ 先审计 view-edit 请求（Source="view"，Kind="view-edit"，
+/// ApplyAsync 构造单步 StepPlan（planId="view-edit-{guid:N}"，kind 对应处理器
+/// 契约；项2 T4 追加 set-text/set-attribute 入口与 space/layout/attribute 限定）→ 先审计 view-edit 请求（Source="view"，Kind="view-edit"，
 /// params{tool,args,planId}，Target=图纸路径，前后哈希一致——请求本身不改图，
 /// PlanRef=planId 供审计员关联后续 tx）→ 准入闸口（镜像 CLI RunPlan：
 /// GateDetector.Inspect + EmptySupportMatrix，Red/Yellow→run-rejected 留痕拒绝执行——
@@ -54,6 +55,10 @@ public sealed class EditViewModel
     private readonly SemaphoreSlim _gate;
     private readonly List<string> _recentTxIds = new();
 
+    // set-attribute 无 EditTool 成员（无独立工具按钮）：tool/kind 成对常量化，防字面量漂移。
+    private const string SetAttributeToolName = "SetAttribute";
+    private const string SetAttributeKind = "set-attribute";
+
     public EditViewModel(DrawingSession session, IAuditStore auditStore, SnapshotStore snapshotStore,
         IIdentityProvider identity, RoleChecker roleChecker, string projectDir,
         string? sessionId = null, SemaphoreSlim? sessionGate = null)
@@ -81,24 +86,83 @@ public sealed class EditViewModel
     public event Action? EditCompleted;
 
     // ---- 类型化便捷入口（UI/测试）：args 与六处理器 params 契约一一对应 ----
+    // 项2 T4：space/layout/attribute 仅在有效时写入 args——审计 view-edit 请求与 step
+    // params 因此不留 "space":null/"attribute":false 噪声（conditional assembly）。
 
-    public Task<EditResult> DrawLineAsync(double x1, double y1, double x2, double y2, string? layer = null) =>
-        ApplyAsync(EditTool.Line, JsonSerializer.SerializeToElement(new { x1, y1, x2, y2, layer }));
+    public Task<EditResult> DrawLineAsync(double x1, double y1, double x2, double y2,
+        string? layer = null, string? space = null, string? layout = null)
+    {
+        var args = new Dictionary<string, object?> { ["x1"] = x1, ["y1"] = y1, ["x2"] = x2, ["y2"] = y2, ["layer"] = layer };
+        AddSpace(args, space, layout);
+        return ApplyAsync(EditTool.Line, JsonSerializer.SerializeToElement(args));
+    }
 
-    public Task<EditResult> AddTextAsync(double x, double y, string text, double height, string? layer = null) =>
-        ApplyAsync(EditTool.Text, JsonSerializer.SerializeToElement(new { x, y, text, height, layer }));
+    public Task<EditResult> AddTextAsync(double x, double y, string text, double height,
+        string? layer = null, string? space = null, string? layout = null)
+    {
+        var args = new Dictionary<string, object?> { ["x"] = x, ["y"] = y, ["text"] = text, ["height"] = height, ["layer"] = layer };
+        AddSpace(args, space, layout);
+        return ApplyAsync(EditTool.Text, JsonSerializer.SerializeToElement(args));
+    }
 
-    public Task<EditResult> MoveAsync(string handle, double dx, double dy) =>
-        WithHandle(handle, h => ApplyAsync(EditTool.Move, JsonSerializer.SerializeToElement(new { handle = h, dx, dy })));
+    public Task<EditResult> MoveAsync(string handle, double dx, double dy,
+        string? space = null, string? layout = null) =>
+        WithHandle(handle, h =>
+        {
+            var args = HandleArgs(h, space, layout, attribute: false);
+            args["dx"] = dx;
+            args["dy"] = dy;
+            return ApplyAsync(EditTool.Move, JsonSerializer.SerializeToElement(args));
+        });
 
-    public Task<EditResult> DeleteAsync(string handle) =>
-        WithHandle(handle, h => ApplyAsync(EditTool.Delete, JsonSerializer.SerializeToElement(new { handle = h })));
+    /// <summary>attribute=true 时仅检索 Insert 属性（实例语义；ATTRIB 句柄与实体句柄同口径）。</summary>
+    public Task<EditResult> DeleteAsync(string handle, string? space = null, string? layout = null, bool attribute = false) =>
+        WithHandle(handle, h => ApplyAsync(EditTool.Delete,
+            JsonSerializer.SerializeToElement(HandleArgs(h, space, layout, attribute))));
 
-    public Task<EditResult> ChangeLayerAsync(string handle, string layer) =>
-        WithHandle(handle, h => ApplyAsync(EditTool.ChangeLayer, JsonSerializer.SerializeToElement(new { handle = h, layer })));
+    public Task<EditResult> ChangeLayerAsync(string handle, string layer,
+        string? space = null, string? layout = null) =>
+        WithHandle(handle, h =>
+        {
+            var args = HandleArgs(h, space, layout, attribute: false);
+            args["layer"] = layer;
+            return ApplyAsync(EditTool.ChangeLayer, JsonSerializer.SerializeToElement(args));
+        });
 
-    public Task<EditResult> InsertBlockAsync(string block, double x, double y, double scale = 1, double rotation = 0) =>
-        ApplyAsync(EditTool.InsertBlock, JsonSerializer.SerializeToElement(new { block, x, y, scale, rotation }));
+    /// <summary>插块（space:"paper"+layout → 布局纸面，项2 T5；默认模型，源兼容）。</summary>
+    public Task<EditResult> InsertBlockAsync(string block, double x, double y, double scale = 1,
+        double rotation = 0, string? space = null, string? layout = null)
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["block"] = block, ["x"] = x, ["y"] = y, ["scale"] = scale, ["rotation"] = rotation
+        };
+        AddSpace(args, space, layout);
+        return ApplyAsync(EditTool.InsertBlock, JsonSerializer.SerializeToElement(args));
+    }
+
+    /// <summary>改文字（spec §3.3 set-text）：TEXT/MText/ATTRIB 改值；句柄默认检索序=模型→纸面→属性。</summary>
+    public Task<EditResult> SetTextAsync(string handle, string text) =>
+        WithHandle(handle, h => ApplyAsync(EditTool.SetText, JsonSerializer.SerializeToElement(new { handle = h, text })));
+
+    /// <summary>改实例属性值（spec §3.3 set-attribute 句柄形态；整实例级，不涉块定义）。</summary>
+    public Task<EditResult> SetAttributeAsync(string handle, string value) =>
+        WithHandle(handle, h => ApplyAsync(SetAttributeToolName, SetAttributeKind,
+            JsonSerializer.SerializeToElement(new { handle = h, value })));
+
+    private static Dictionary<string, object?> HandleArgs(ulong handle, string? space, string? layout, bool attribute)
+    {
+        var args = new Dictionary<string, object?> { ["handle"] = handle };
+        AddSpace(args, space, layout);
+        if (attribute) args["attribute"] = true; // 仅 true 落 params（false 无意义，徒增噪声）
+        return args;
+    }
+
+    private static void AddSpace(Dictionary<string, object?> args, string? space, string? layout)
+    {
+        if (space is not null) args["space"] = space;
+        if (layout is not null) args["layout"] = layout;
+    }
 
     /// <summary>句柄为十进制 ulong 字符串（RenderItem.Handle/审计 Target 同口径）；非法→拒绝，不留审计。</summary>
     private static Task<EditResult> WithHandle(string handle, Func<ulong, Task<EditResult>> apply) =>
@@ -106,18 +170,27 @@ public sealed class EditViewModel
             ? apply(h)
             : Task.FromResult(new EditResult(false, "", $"非法句柄: {handle}"));
 
-    /// <summary>
-    /// 核心入口：tool→kind 单步计划。校验（Select/非对象 args）先于任何副作用；
-    /// 请求审计先于 tx；核心体在后台执行并整段持会话闸，结果回到调用方上下文发布。
-    /// args 须为调用方保活的 JsonElement（SerializeToElement 产物或已 Clone）。
-    /// </summary>
     public async Task<EditResult> ApplyAsync(EditTool tool, JsonElement args)
     {
         if (tool == EditTool.Select)
             return new EditResult(false, "", "Select 工具不产生编辑");
         if (args.ValueKind != JsonValueKind.Object)
             return new EditResult(false, "", "编辑参数必须是 JSON 对象");
-        string kind = KindFor(tool);
+        return await ApplyAsync(tool.ToString(), KindFor(tool), args);
+    }
+
+    /// <summary>
+    /// 核心入口：toolName→kind 单步计划。校验（Select/非对象 args）先于任何副作用；
+    /// 请求审计先于 tx；核心体在后台执行并整段持会话闸，结果回到调用方上下文发布。
+    /// args 须为调用方保活的 JsonElement（SerializeToElement 产物或已 Clone）。
+    /// 拆出 toolName 形态：set-attribute 无对应 EditTool 成员（UI 无独立工具按钮），
+    /// 由 SetAttributeAsync 直接给 kind，仍走同一条审计/闸口/引擎通道。
+    /// </summary>
+    private async Task<EditResult> ApplyAsync(string toolName, string kind, JsonElement args)
+    {
+        // 与公开重载同口径：非对象 args 先于任何副作用拒绝（不留审计、不取闸）。
+        if (args.ValueKind != JsonValueKind.Object)
+            return new EditResult(false, "", "编辑参数必须是 JSON 对象");
         string planId = "view-edit-" + Guid.NewGuid().ToString("N");
 
         await _gate.WaitAsync();
@@ -126,7 +199,7 @@ public sealed class EditViewModel
         {
             try
             {
-                result = await Task.Run(() => ApplyCore(tool, kind, args, planId));
+                result = await Task.Run(() => ApplyCore(toolName, kind, args, planId));
             }
             catch (Exception ex)
             {
@@ -175,14 +248,14 @@ public sealed class EditViewModel
     }
 
     /// <summary>请求审计先于执行；闸口注入镜像 CLI RunPlan；tx 结果原样透传。</summary>
-    private EditResult ApplyCore(EditTool tool, string kind, JsonElement args, string planId)
+    private EditResult ApplyCore(string toolName, string kind, JsonElement args, string planId)
     {
         OperatorIdentity op = _identity.Current;
         // 请求审计（先于 tx）：请求本身不改图 → 前后哈希一致；PlanRef=planId 关联 tx。
         string hash = _session.ComputeHash();
         _audit.Append(new AuditEntry(DateTimeOffset.UtcNow, op.Account, op.Role.ToString(),
             _sessionId, "view", "view-edit", _session.SourcePath,
-            JsonSerializer.Serialize(new { tool = tool.ToString(), args, planId }),
+            JsonSerializer.Serialize(new { tool = toolName, args, planId }),
             hash, hash, "", planId));
 
         // 准入闸口（最终审查修复①，镜像 CLI RunPlan，spec §4.2）：每次 ApplyAsync 都检
@@ -339,6 +412,7 @@ public sealed class EditViewModel
         EditTool.Delete => "delete-entity",
         EditTool.ChangeLayer => "change-layer",
         EditTool.InsertBlock => "insert-block",
+        EditTool.SetText => "set-text",
         _ => throw new ArgumentOutOfRangeException(nameof(tool), tool, "未知编辑工具")
     };
 }

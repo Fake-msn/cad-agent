@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ACadSharp;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using CadAgent.Core;
@@ -8,6 +9,9 @@ namespace CadAgent.Data.Handlers;
 
 internal static class HandlerHelpers
 {
+    /// <summary>纸面限定缺 layout 的统一文案（解析器预校验/新建族/属性检索三处共用，防契约漂移）。</summary>
+    public const string PaperNeedsLayoutMessage = "space:\"paper\" 须配 layout";
+
     public static DrawingSession AsDrawing(IDrawingSession session) =>
         session as DrawingSession ?? throw new InvalidOperationException("处理器需要 DrawingSession");
 
@@ -37,26 +41,87 @@ internal static class HandlerHelpers
         return layer;
     }
 
-    public static Entity? Find(DrawingSession s, JsonElement p)
+    /// <summary>块内编辑属 Plan-3：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
+    public static StepResult? RejectBlockParam(JsonElement p) =>
+        p.TryGetProperty("block", out var v) && v.ValueKind != JsonValueKind.Null
+            ? new StepResult(false, EditTargetResolver.BlockDeferredMessage, "")
+            : null;
+
+    /// <summary>
+    /// R3：space 仅支持 "paper"（大小写不敏感）。其他取值（含 "model"/未知词）在入口即拒，
+    /// 不得塌陷为"句柄不存在"（解析层 fail-closed → null 会误报为未找到）。
+    /// </summary>
+    public static StepResult? RejectUnsupportedSpace(JsonElement p)
     {
-        // handle 契约（计划 3a）：JSON 数字或十进制字符串皆可（Summarize 暴露字符串，
-        // LLM 计划编写层可直接回灌）；非法形态→null→"句柄不存在"优雅失败。
-        var hEl = p.GetProperty("handle");
-        ulong handle;
-        switch (hEl.ValueKind)
+        if (!p.TryGetProperty("space", out var v) || v.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return null;
+        return string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : new StepResult(false, "space 仅支持 paper", "");
+    }
+
+    /// <summary>
+    /// 句柄类编辑（delete/move/change-layer/set-text/set-attribute 两形态）的 space/layout/attribute
+    /// 语义预校验：先于 Resolver/TopLevelCollections 给出准确原因——显式限定非法时 Resolver
+    /// fail-closed 返回 null，调用方会把限定错误误报成"句柄不存在"。
+    /// space 取值本身仍由 <see cref="RejectUnsupportedSpace"/> 先行拒绝。
+    /// </summary>
+    public static StepResult? RejectInvalidTargetScope(DrawingSession s, JsonElement p)
+    {
+        if (p.TryGetProperty("attribute", out var attr)
+            && attr.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
+            && attr.ValueKind != JsonValueKind.True)
+            return new StepResult(false, "attribute 仅支持 true", "");
+        if (!string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase)) return null;
+        string? layoutName = OptString(p, "layout");
+        if (string.IsNullOrEmpty(layoutName))
+            return new StepResult(false, PaperNeedsLayoutMessage, "");
+        var layout = EditTargetResolver.FindLayout(s, layoutName);
+        if (layout is null || !layout.IsPaperSpace || layout.AssociatedBlock is null)
+            return new StepResult(false, $"布局不存在或非纸面布局: {layoutName}", "");
+        return null;
+    }
+
+    /// <summary>
+    /// 新建实体目标集合：默认模型（历史行为不变）；space:"paper"+layout → 该布局纸面关联块
+    /// 实体集合（layout 必须存在且 IsPaperSpace，否则 fail-closed）。
+    /// </summary>
+    public static bool TryResolveAddCollection(DrawingSession s, JsonElement p,
+        out CadObjectCollection<Entity>? target, out string error)
+    {
+        target = null;
+        error = "";
+        bool hasSpace = p.TryGetProperty("space", out var sp) && sp.ValueKind != JsonValueKind.Null;
+        bool hasLayout = p.TryGetProperty("layout", out var ly) && ly.ValueKind != JsonValueKind.Null;
+        if (!hasSpace && !hasLayout)
         {
-            case JsonValueKind.Number:
-                handle = hEl.GetUInt64();
-                break;
-            case JsonValueKind.String:
-                if (!ulong.TryParse(hEl.GetString(), System.Globalization.NumberStyles.Integer,
-                        System.Globalization.CultureInfo.InvariantCulture, out handle))
-                    return null;
-                break;
-            default:
-                return null;
+            target = s.Doc.Entities;
+            return true;
         }
-        return s.Doc.Entities.FirstOrDefault(e => e.Handle == handle);
+        if (hasSpace && !string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase))
+        {
+            error = "space 仅支持 paper"; // 与 RejectUnsupportedSpace 同文案（入口已先拒，此处为兜底）
+            return false;
+        }
+        string? layoutName = OptString(p, "layout");
+        if (string.IsNullOrEmpty(layoutName))
+        {
+            error = PaperNeedsLayoutMessage;
+            return false;
+        }
+        var layout = EditTargetResolver.FindLayout(s, layoutName);
+        if (layout is null)
+        {
+            error = $"布局不存在：{layoutName}";
+            return false;
+        }
+        if (!layout.IsPaperSpace || layout.AssociatedBlock is null)
+        {
+            error = $"布局不是纸面空间：{layoutName}";
+            return false;
+        }
+        target = layout.AssociatedBlock.Entities;
+        return true;
     }
 }
 
@@ -66,13 +131,17 @@ public sealed class AddLineHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
+            return new StepResult(false, spaceError, "");
         var line = new Line
         {
             StartPoint = (XYZ)new XY(HandlerHelpers.Req(p, "x1"), HandlerHelpers.Req(p, "y1")),
             EndPoint = (XYZ)new XY(HandlerHelpers.Req(p, "x2"), HandlerHelpers.Req(p, "y2")),
             Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
         };
-        s.Doc.Entities.Add(line);
+        target!.Add(line);
         return new StepResult(true, "", line.Handle.ToString());
     }
 }
@@ -83,6 +152,10 @@ public sealed class AddTextHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
+            return new StepResult(false, spaceError, "");
         var text = new TextEntity
         {
             InsertPoint = (XYZ)new XY(HandlerHelpers.Req(p, "x"), HandlerHelpers.Req(p, "y")),
@@ -90,18 +163,23 @@ public sealed class AddTextHandler : IStepHandler
             Height = HandlerHelpers.Req(p, "height"),
             Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
         };
-        s.Doc.Entities.Add(text);
+        target!.Add(text);
         return new StepResult(true, "", text.Handle.ToString());
     }
 }
 
-/// <summary>add-circle（3j 生成式绘制补全）：params {x,y,radius,layer?}。</summary>
+/// <summary>add-circle（3j 生成式绘制补全）：params {x,y,radius,layer?,space?,layout?}。</summary>
 public sealed class AddCircleHandler : IStepHandler
 {
     public string Kind => "add-circle";
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        // 与 add-line/add-text 同一集合解析：默认模型；space:"paper"+layout → 布局纸面关联块。
+        if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
+            return new StepResult(false, spaceError, "");
         double radius = HandlerHelpers.Req(p, "radius");
         if (radius <= 0) return new StepResult(false, "radius 须为正数", "");
         var circle = new Circle
@@ -110,7 +188,7 @@ public sealed class AddCircleHandler : IStepHandler
             Radius = radius,
             Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
         };
-        s.Doc.Entities.Add(circle);
+        target!.Add(circle);
         return new StepResult(true, "", circle.Handle.ToString());
     }
 }

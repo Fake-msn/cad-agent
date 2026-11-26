@@ -24,8 +24,9 @@ namespace CadAgent.View.Tests;
 /// （internal SheetSelector）——默认首幅面裁剪（R4 sanctioned 行为变更），切换幅面 →
 /// Canvas.Items 刷新为该幅面图元（模型幅面=框内锚点裁剪；布局幅面=ComposeLayout
 /// 纸面→视口内模型→视口框），状态栏显示幅面名。单幅面夹具无感（既有 headless 回归闸口）；
-/// 多幅面夹具断言按幅面。项2 A（Task 7）：布局幅面视口内可编辑模型（纸→模型逆映射），
-/// 纸面编辑未启用（拒绝路径钉住）。
+/// 多幅面夹具断言按幅面。项2 A（Task 7）：布局幅面视口内可编辑模型（纸→模型逆映射）；
+/// 项2 B（Plan-2 T5）：纸面编辑启用——纸面允许路径/纸面新建/改文字覆盖移至
+/// PaperEditHeadlessTests，本文件保留模型幅面语义、视口框只读与跨空间拒绝回归。
 /// </summary>
 public class SheetSelectorHeadlessTests
 {
@@ -60,12 +61,11 @@ public class SheetSelectorHeadlessTests
     /// </summary>
     /// <param name="nearLineEndX">近线模型终点 X（默认 1000 → 纸面映射到 (4000,350)）。Move 用例取小值，
     /// 使纸面目标点为空点（全长映射线会在目标点二次命中 → 只重置基准不移动）。</param>
-    /// <param name="paperLine">纸面项夹具（Important 2）：布局关联块内的纸面线 (100,100)-(200,100)。</param>
     /// <param name="twist">视口 TwistAngle（弧度）：非 0 时布局仍登记（尺寸合法）但纸→模型不可映射。</param>
     /// <param name="blockChild">模型空间追加块 LUM_CHILD（一条对角线子图元）+ Insert@(20,20)，
-    /// 锚点落在视口模型区域内（BlockChild 允许路径夹具）。</param>
+    /// 锚点落在视口模型区域内——块子图元 Plan-3 拒绝用例夹具。</param>
     /// <param name="extraLayer">追加空图层（布局幅面 ChangeLayer 允许路径目标）。</param>
-    private static string LayoutDxf(double nearLineEndX = 1000, bool paperLine = false, double twist = 0,
+    private static string LayoutDxf(double nearLineEndX = 1000, double twist = 0,
         bool blockChild = false, string? extraLayer = null)
         => DxfFixture.CreateTempDxf(doc =>
     {
@@ -90,9 +90,6 @@ public class SheetSelectorHeadlessTests
             ViewHeight = 200,
             TwistAngle = twist,
         });
-        if (paperLine)
-            layout.AssociatedBlock!.Entities.Add(
-                new Line { StartPoint = new XYZ(100, 100, 0), EndPoint = new XYZ(200, 100, 0) });
     });
 
     private sealed class FixedIdentity : IIdentityProvider
@@ -183,7 +180,7 @@ public class SheetSelectorHeadlessTests
             Assert.Equal(500, item.Points[0].X, 6);
             Assert.Equal(350, item.Points[0].Y, 6);
             Assert.Contains("布局1", window.Status!.Text);
-            Assert.Contains("视口内可编辑模型", window.Status.Text);
+            Assert.Contains("纸面/模型双空间", window.Status.Text);
         }
         finally { Cleanup(window, path, projectDir); }
     }
@@ -246,32 +243,10 @@ public class SheetSelectorHeadlessTests
         finally { Cleanup(window, path, projectDir); }
     }
 
-    /// <summary>Plan-1 纸面编辑未启用：视口外纸面点击拒绝（无预览锚点、无 tx、行内提示）。</summary>
-    [AvaloniaFact]
-    public void LayoutSheet_PaperClick_Refused_NoTx()
-    {
-        (MainWindow window, string path, string projectDir) = Show(LayoutDxf(),
-            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
-        try
-        {
-            window.SheetSelector!.SelectedIndex = 1;
-            Dispatcher.UIThread.RunJobs();
-            ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Dispatcher.UIThread.RunJobs();
-            ClickCanvasAtWorld(window, 1200, 350); // 视口外纸面
-            Assert.Null(window.Canvas.PendingPoint);
-            Assert.True(window.EditError!.IsVisible);
-            Assert.Contains("纸面编辑", window.EditError.Text);
-            Assert.Empty(window.Edit.RecentTxIds);
-            // 拒绝不触审计管线（不惰性建库）
-            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
-        }
-        finally { Cleanup(window, path, projectDir); }
-    }
-
     /// <summary>
     /// Important I2：跨空间两击——首击视口内（=模型锚点，pending 已设）、次击视口外纸面：
-    /// 不得混空间成线；pending 清除 + 行内「纸面编辑」拒绝 + 零 tx + 图元数不变。
+    /// 不得混空间成线；pending 清除 + 行内跨空间拒绝 + 零 tx + 图元数不变。
+    /// （项2 Plan-2 T5：纸面新建已启用，拒绝原因从「纸面未启用」改为「跨空间」。）
     /// </summary>
     [AvaloniaFact]
     public void LayoutSheet_LineToolCrossSpaceTwoClicks_ClearsPending_NoTx()
@@ -287,10 +262,10 @@ public class SheetSelectorHeadlessTests
             Dispatcher.UIThread.RunJobs();
             ClickCanvasAtWorld(window, 500, 350); // 视口内 → 预览锚点
             Assert.NotNull(window.Canvas.PendingPoint);
-            ClickCanvasAtWorld(window, 1200, 350); // 视口外纸面 → 次击拒绝
+            ClickCanvasAtWorld(window, 1200, 350); // 视口外纸面 → 次击跨空间拒绝
             Assert.Null(window.Canvas.PendingPoint);
             Assert.True(window.EditError!.IsVisible);
-            Assert.Contains("纸面编辑", window.EditError.Text);
+            Assert.Contains("跨空间", window.EditError.Text);
             Assert.Empty(window.Edit!.RecentTxIds);
             Assert.Equal(5, window.Canvas.Items.Count); // 无新实体
         }
@@ -340,7 +315,7 @@ public class SheetSelectorHeadlessTests
 
     /// <summary>
     /// Important 1：twist 夹具（TwistAngle=0.3，尺寸合法 → 布局仍登记）——视口内点工具拒绝，
-    /// 文案不得声称纸面编辑可用（R14，Plan-1 纸面未启用）；无预览锚点、零 tx、无新实体。
+    /// 文案为旋转原因（不得落入纸面新建）；无预览锚点、零 tx、无新实体。
     /// </summary>
     [AvaloniaFact]
     public void LayoutSheet_TwistedViewport_LineClickRefused_NoTx()
@@ -367,75 +342,12 @@ public class SheetSelectorHeadlessTests
     }
 
     /// <summary>
-    /// Important 2：纸面项（Space==PaperSpace）Delete——守卫先于确认（confirm seam 不触发）、
-    /// 行内「纸面编辑」拒绝、零 tx、audit.db 不落盘。
-    /// </summary>
-    [AvaloniaFact]
-    public void LayoutSheet_PaperItemDelete_RefusedBeforeConfirm_NoAudit()
-    {
-        (MainWindow window, string path, string projectDir) = Show(LayoutDxf(paperLine: true),
-            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
-        try
-        {
-            window.SheetSelector!.SelectedIndex = 1;
-            Dispatcher.UIThread.RunJobs();
-            Assert.Equal(6, window.Canvas!.Items.Count); // 纸面 1 + 模型 1 + 框 4
-            int paperIndex = window.Canvas.Items.ToList()
-                .FindIndex(i => i.Space == RenderSpace.PaperSpace && !i.Locked);
-            Assert.True(paperIndex >= 0);
-
-            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Dispatcher.UIThread.RunJobs();
-            window.Canvas.Select(paperIndex);
-            bool confirmInvoked = false;
-            window.ConfirmDeleteOverride = _ => { confirmInvoked = true; return Task.FromResult(true); };
-            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); // 二次按压=确认
-            Dispatcher.UIThread.RunJobs();
-
-            Assert.False(confirmInvoked); // 守卫先于确认（不对纸面目标弹确认）
-            Assert.True(window.EditError!.IsVisible);
-            Assert.Contains("纸面编辑", window.EditError.Text);
-            Assert.Empty(window.Edit!.RecentTxIds);
-            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
-        }
-        finally { Cleanup(window, path, projectDir); }
-    }
-
-    /// <summary>Important 2：纸面项 ChangeLayer——同样守卫拒绝（零 tx、audit.db 不落盘）。</summary>
-    [AvaloniaFact]
-    public void LayoutSheet_PaperItemChangeLayer_Refused_NoAudit()
-    {
-        (MainWindow window, string path, string projectDir) = Show(LayoutDxf(paperLine: true),
-            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
-        try
-        {
-            window.SheetSelector!.SelectedIndex = 1;
-            Dispatcher.UIThread.RunJobs();
-            int paperIndex = window.Canvas!.Items.ToList()
-                .FindIndex(i => i.Space == RenderSpace.PaperSpace && !i.Locked);
-            Assert.True(paperIndex >= 0);
-
-            ToolButton(window, "ChangeLayer").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Dispatcher.UIThread.RunJobs();
-            Assert.Equal(EditTool.ChangeLayer, window.Edit!.ActiveTool);
-            window.Canvas.Select(paperIndex);
-            window.EditLayerSelector!.SelectedItem = window.EditLayerSelector.ItemsSource!.Cast<string>().First();
-            Dispatcher.UIThread.RunJobs();
-
-            Assert.True(window.EditError!.IsVisible);
-            Assert.Contains("纸面编辑", window.EditError.Text);
-            Assert.Empty(window.Edit.RecentTxIds);
-            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
-        }
-        finally { Cleanup(window, path, projectDir); }
-    }
-
-    /// <summary>
-    /// 旧「布局整体只读」语义作废（Task 7 取代）：视口内可编辑，视口框只读。
+    /// 布局幅面守卫（项2 B 口径）：工具激活不允许被整体拒绝；视口框只读（拒绝先于确认），
+    /// 切回模型幅面后编辑恢复可用。
     /// 拒绝路径无 EditCompleted，故 Delete 按压不等待编辑事件（守卫先于确认对话框）。
     /// </summary>
     [AvaloniaFact]
-    public void LayoutSheet_ViewportEditsAllowed_FrameAndPaperProtected()
+    public void LayoutSheet_LockedFrameAndPaperGuards()
     {
         (MainWindow window, string path, string projectDir) = Show(LayoutDxf(),
             new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
@@ -669,12 +581,12 @@ public class SheetSelectorHeadlessTests
     }
 
     /// <summary>
-    /// 块子图元允许路径 E2E：视口内 Insert 子图元（句柄 "{insert}:0"）Delete（确认 seam=true）
-    /// → 剥后缀按父 Insert 整体删除（落盘无 Insert）、恰好一 tx、不走"纸面编辑"拒绝、
-    /// audit.db 有 step 行（编辑经审计管线）。
+    /// 项2 B（Plan-2 T5）取代 Plan-1 的「块子图元按父实体整体」允许路径：布局幅面下块子图元
+    /// （模型空间 Insert 子线，句柄 "{insert}:0"）Delete → Plan-3 拒绝文案、零 tx、确认不触发、
+    /// audit.db 不落盘（父 Insert 与两条线原样保留）。模型幅面的整父语义不变（见 MainWindow 早期口径）。
     /// </summary>
     [AvaloniaFact]
-    public async Task LayoutSheet_BlockChildDelete_RemovesParentInsert_WithAudit()
+    public void LayoutSheet_BlockChildDelete_RefusedPlan3_NoTx()
     {
         (MainWindow window, string path, string projectDir) = Show(LayoutDxf(blockChild: true),
             new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
@@ -690,21 +602,20 @@ public class SheetSelectorHeadlessTests
 
             ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
-            window.ConfirmDeleteOverride = _ => Task.FromResult(true);
+            bool confirmInvoked = false;
+            window.ConfirmDeleteOverride = _ => { confirmInvoked = true; return Task.FromResult(true); };
             window.Canvas.Select(index);
-            await ActAndWaitForEditAsync(window, () =>
-                ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+            ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
 
-            Assert.Null(window.Edit!.ErrorMessage);
-            Assert.False(window.EditError?.IsVisible ?? false); // 不得落入"纸面编辑"拒绝通道
-            Assert.Single(window.Edit.RecentTxIds);
+            Assert.False(confirmInvoked); // 守卫先于确认（Plan-3 目标不弹确认）
+            Assert.True(window.EditError?.IsVisible ?? false);
+            Assert.Contains("Plan-3", window.EditError!.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
             var saved = CadAgent.Data.DrawingSession.Load(path);
-            Assert.DoesNotContain(saved.Doc.Entities, e => e is Insert);
-            Assert.Equal(2, saved.Doc.Entities.OfType<Line>().Count()); // 近线 + 远线保留
-            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
-            Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "step"
-                && r.Entry.ParamsJson.Contains("delete-entity"));
-            Assert.True(audit.VerifyChain(out string error), error);
+            Assert.Contains(saved.Doc.Entities, e => e is Insert); // 父 Insert 原样保留
+            Assert.Equal(2, saved.Doc.Entities.OfType<Line>().Count());
+            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
         }
         finally { Cleanup(window, path, projectDir); }
     }
@@ -841,7 +752,7 @@ public class SheetSelectorHeadlessTests
 
     /// <summary>
     /// Text 工具逆映射：布局幅面纸面 (850,420) 单击 → 模型 (100,20) 落盘 TextEntity；
-    /// 纸面显示位置回验（Text 与 Line/Move 共用 TryModelPoint 通道）。
+    /// 纸面显示位置回验（Text 与 Line/Move 共用 TryPointTarget 通道）。
     /// </summary>
     [AvaloniaFact]
     public async Task LayoutSheet_TextTool_WritesModelTextAtInversePoint()

@@ -11,11 +11,42 @@ public sealed class DeleteEntityHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        var entity = HandlerHelpers.Find(s, p);
-        if (entity == null) return new StepResult(false, "句柄不存在", "");
-        string handle = entity.Handle.ToString();
-        s.Doc.Entities.Remove(entity);
-        return new StepResult(true, "", handle);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
+        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        if (target == null)
+            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+        if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        // 按所有者集合移除：纸面实体不在 Doc.Entities 中，删错集合会静默无效。
+        switch (target.Owner)
+        {
+            case EditOwnerKind.Model:
+                if (!s.Doc.Entities.Remove(target.Entity))
+                    return new StepResult(false, "实体移除失败", "");
+                break;
+            case EditOwnerKind.Paper:
+            {
+                var layout = EditTargetResolver.FindLayout(s, target.LayoutName);
+                if (layout?.AssociatedBlock is null)
+                    return new StepResult(false, $"布局不存在：{target.LayoutName}", "");
+                if (!layout.AssociatedBlock.Entities.Remove(target.Entity))
+                    return new StepResult(false, "实体移除失败", "");
+                break;
+            }
+            case EditOwnerKind.InsertAttribute:
+                // ATTRIB 实例：Insert.Attributes（SeqendCollection<AttributeEntity>）的 Remove(T)
+                // 实件存在（ACadSharp 3.8.35 反射核验），无需重建集合。
+                // 显式分支而非 default：未来新增枚举成员不得落到这里的强制转换（InvalidCastException）。
+                if (target.Entity is not AttributeEntity attribute || target.AttributeOwner is null)
+                    return new StepResult(false, "属性所属插入缺失", "");
+                if (!target.AttributeOwner.Attributes.Remove(attribute))
+                    return new StepResult(false, "实体移除失败", "");
+                break;
+            default:
+                return new StepResult(false, $"delete 暂不支持所有者 {target.Owner}", "");
+        }
+        return new StepResult(true, "", target.Entity.Handle.ToString());
     }
 }
 
@@ -25,8 +56,14 @@ public sealed class MoveEntityHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        var entity = HandlerHelpers.Find(s, p);
-        if (entity == null) return new StepResult(false, "句柄不存在", "");
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
+        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        if (target == null)
+            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+        if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        Entity entity = target.Entity;
         double dx = HandlerHelpers.Req(p, "dx"), dy = HandlerHelpers.Req(p, "dy");
         switch (entity)
         {
@@ -36,6 +73,16 @@ public sealed class MoveEntityHandler : IStepHandler
                 line.StartPoint = new XYZ(line.StartPoint.X + dx, line.StartPoint.Y + dy, line.StartPoint.Z);
                 line.EndPoint = new XYZ(line.EndPoint.X + dx, line.EndPoint.Y + dy, line.EndPoint.Z);
                 break;
+            // ATTRIB 须先于 TextEntity 分支（AttributeBase : TextEntity，否则属性走纯文本分支）。
+            // 渲染锚点按对齐方式二选一（InsertPoint/AlignmentPoint，RenderModel.EmitAttribute）：
+            // 两点同施增量，否则非默认对齐的属性移动后文字不回位。
+            case AttributeEntity attr:
+            {
+                var (odx, ody) = OcsDelta(attr.Normal, dx, dy);
+                attr.InsertPoint = new XYZ(attr.InsertPoint.X + odx, attr.InsertPoint.Y + ody, attr.InsertPoint.Z);
+                attr.AlignmentPoint = new XYZ(attr.AlignmentPoint.X + odx, attr.AlignmentPoint.Y + ody, attr.AlignmentPoint.Z);
+                break;
+            }
             case TextEntity text:
             {
                 // OCS 原值坐标：WCS dx/dy 须逆投影到 OCS（见 OcsDelta 注释）。
@@ -136,10 +183,15 @@ public sealed class ChangeLayerHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        var entity = HandlerHelpers.Find(s, p);
-        if (entity == null) return new StepResult(false, "句柄不存在", "");
-        entity.Layer = HandlerHelpers.ResolveLayer(s, p.GetProperty("layer").GetString());
-        return new StepResult(true, "", entity.Handle.ToString());
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
+        if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
+        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        if (target == null)
+            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+        if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        target.Entity.Layer = HandlerHelpers.ResolveLayer(s, p.GetProperty("layer").GetString());
+        return new StepResult(true, "", target.Entity.Handle.ToString());
     }
 }
 
@@ -149,6 +201,7 @@ public static class HandlerRegistry
     {
         new AddLineHandler(), new AddTextHandler(),
         new DeleteEntityHandler(), new MoveEntityHandler(), new ChangeLayerHandler(),
+        new SetTextHandler(), new SetAttributeHandler(),
         new InsertBlockHandler(), new LayoutLightingHandler(), new LabelLuminairesHandler(),
         new AddCircleHandler()
     };
