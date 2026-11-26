@@ -65,7 +65,8 @@ public sealed record RenderItem(
 /// <summary>
 /// DrawingSession -> flat render-item list (plan 4 task 2). Pure logic: no Avalonia
 /// dependency, safe to unit-test headless. Supported entities: Line, Circle, Arc,
-/// LwPolyline, Polyline2D, TextEntity, MText, Insert (block expansion), Dimension
+/// LwPolyline, Polyline2D, TextEntity, MText, Insert (block expansion + ATTRIB
+/// attributes as Text items), Dimension
 /// (anonymous-block expansion), Hatch (boundary paths + solid fill). Anything
 /// else is skipped and counted via the <c>out skippedCount</c> overload.
 /// ACadSharp 3.8.35 API verified via package XML docs + runtime probe:
@@ -264,11 +265,22 @@ public static class RenderModelBuilder
         return minX > maxX || minY > maxY ? (0, 0, 1, 1) : (minX, minY, maxX, maxY);
     }
 
+    /// <summary>
+    /// Append 来源上下文（项2 F）：空间 + 来源句柄（不含子索引后缀，溯源用）+
+    /// 块展开路径（最内层块名 / Insert 句柄链）+ 属性标签。null=顶层实体（模型空间、无块路径）。
+    /// </summary>
+    private readonly record struct EmitContext(
+        RenderSpace Space, string? SourceHandle, string? BlockName,
+        IReadOnlyList<string>? InsertChain, string? AttributeTag);
+
     private static void Append(
         Entity e, List<RenderItem> items, ref int skipped,
         Affine t, double rotationDeg, double heightScale, uint? byBlockColor, int depth,
-        string? handle = null)
+        string? handle = null, EmitContext? ctx = null)
     {
+        EmitContext c = ctx ?? new EmitContext(RenderSpace.ModelSpace, null, null, null, null);
+        // 本次调用新增图元的起点：switch 之后统一戳记（子递归已自带来源，仅补空间）。
+        int startIndex = items.Count;
         string layer = e.Layer?.Name ?? "0";
         uint color = ResolveColor(e, byBlockColor);
         // Top-level entities use their own DXF handle; insert children receive the
@@ -397,12 +409,27 @@ public static class RenderModelBuilder
                 Affine composed = t.Compose(ocs.Compose(InsertTransform(insert)));
                 double rot = rotationDeg + ToDeg(insert.Rotation);
                 double hs = heightScale * Math.Abs(insert.YScale);
+                // 来源戳记：块子图元带最内层块名 + 完整 insert 句柄链（嵌套逐层追加）。
+                string insertHandle = handle;
+                string insertHandleStr = insert.Handle.ToString(CultureInfo.InvariantCulture);
+                var chain = (c.InsertChain ?? Array.Empty<string>()).Append(insertHandleStr).ToArray();
                 int childIndex = 0;
                 foreach (Entity child in insert.Block.Entities)
                 {
                     Append(child, items, ref skipped, composed, rot, hs, color, depth + 1,
-                        handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture));
+                        handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture),
+                        new EmitContext(c.Space, child.Handle.ToString(CultureInfo.InvariantCulture),
+                            insert.Block.Name, chain, null));
                     childIndex++;
+                }
+                // 属性（ATTRIB）为 Insert 自身附属文本，非块内容： AttributeEntity : TextEntity，
+                // 经同一 Append 渲染 Value/InsertPoint/Height/Rotation；Handle 取 "{insert}:attr:{tag}"、
+                // SourceHandle 为 ATTRIB 句柄（编辑逆映射定位用）。
+                foreach (AttributeEntity attr in insert.Attributes)
+                {
+                    Append(attr, items, ref skipped, composed, rot, hs, color, depth + 1,
+                        insertHandle + ":attr:" + attr.Tag,
+                        new EmitContext(c.Space, attr.Handle.ToString(CultureInfo.InvariantCulture), null, null, attr.Tag));
                 }
                 break;
             }
@@ -414,10 +441,14 @@ public static class RenderModelBuilder
                 // 深度守卫与 Insert 对齐：病态 DXF 中块内 Dimension 可回指祖先块（自指环）
                 // →无限递归 StackOverflow；共享块 Dimension DAG 可指数展开。顶层 depth=0 不受影响。
                 if (depth >= MaxInsertDepth || dim.Block is null) { skipped++; break; }
+                var chain = (c.InsertChain ?? Array.Empty<string>())
+                    .Append(dim.Handle.ToString(CultureInfo.InvariantCulture)).ToArray();
                 int childIndex = 0;
                 foreach (Entity child in dim.Block.Entities)
                     Append(child, items, ref skipped, t, rotationDeg, heightScale, byBlockColor, depth + 1,
-                        handle + ":" + childIndex++.ToString(CultureInfo.InvariantCulture));
+                        handle + ":" + childIndex++.ToString(CultureInfo.InvariantCulture),
+                        new EmitContext(c.Space, child.Handle.ToString(CultureInfo.InvariantCulture),
+                            dim.Block.Name, chain, null));
                 break;
             }
 
@@ -444,6 +475,23 @@ public static class RenderModelBuilder
             default:
                 skipped++;
                 break;
+        }
+
+        // 统一戳记本次新产图元：来源上下文优先，SourceHandle 缺失回落自身 Handle
+        // （顶层实体=自身句柄，溯源/编辑逆映射同口径）。子递归已自带来源则不覆盖（仅补空间），
+        // 保证最内层块名/句柄链不被外层上下文改写。
+        for (int i = startIndex; i < items.Count; i++)
+        {
+            RenderItem it = items[i];
+            if (it.SourceHandle is not null) { items[i] = it with { Space = c.Space }; continue; }
+            items[i] = it with
+            {
+                Space = c.Space,
+                SourceHandle = c.SourceHandle ?? it.Handle,
+                BlockName = it.BlockName ?? c.BlockName,
+                ParentInsertChain = it.ParentInsertChain ?? c.InsertChain,
+                AttributeTag = it.AttributeTag ?? c.AttributeTag,
+            };
         }
     }
 

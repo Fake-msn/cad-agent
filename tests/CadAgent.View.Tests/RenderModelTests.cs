@@ -1205,4 +1205,68 @@ public class RenderModelTests
         Assert.Null(item.AttributeTag);
         Assert.False(item.Locked);
     }
+
+    // ---- 项2 F（Task 2）：Insert 属性文本入图 + 图元来源戳记 ----
+
+    [Fact]
+    public void Build_InsertWithAttribute_RendersAttributeText_WithSourceHandleAndTag()
+    {
+        string path = DxfFixture.CreateTempDxf(doc =>
+        {
+            var block = new BlockRecord("图框");
+            block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(100, 0, 0) });
+            doc.BlockRecords.Add(block);
+            var ins = new Insert(block) { InsertPoint = new XYZ(10, 20, 0) };
+            ins.Attributes.Add(new AttributeEntity
+            {
+                Tag = "图号", Value = "Z-E01", InsertPoint = new XYZ(5, 5, 0), Height = 2.5
+            });
+            doc.Entities.Add(ins);
+        });
+        try
+        {
+            var session = DrawingSession.Load(path);
+            var items = RenderModelBuilder.Build(session);
+            var attr = Assert.Single(items, i => i.AttributeTag == "图号");
+            Assert.Equal(RenderKind.Text, attr.Kind);
+            Assert.Equal("Z-E01", attr.Text);
+            Assert.EndsWith(":attr:图号", attr.Handle);
+            Assert.NotNull(attr.SourceHandle);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Build_InsertChildren_StampedWithBlockNameAndInsertChain()
+    {
+        // 块子图元来源戳记：BlockName=最内层块名，ParentInsertChain=Insert 句柄链（外→内），
+        // SourceHandle=块内实体自身句柄（不带子索引后缀）；顶层实体 SourceHandle 回落自身 Handle。
+        WithSession(doc =>
+        {
+            AddSymBlock(doc);
+            var nest = new BlockRecord("NEST");
+            nest.Entities.Add(new Insert(doc.BlockRecords["SYM"]) { InsertPoint = new XYZ(5, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+            doc.BlockRecords.Add(nest);
+            doc.Entities.Add(new Insert(nest) { InsertPoint = new XYZ(0, 0, 0), XScale = 1, YScale = 1, ZScale = 1 });
+            doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+        }, s =>
+        {
+            var items = RenderModelBuilder.Build(s);
+            Assert.Equal(2, items.Count);
+
+            RenderItem top = items[1];
+            Assert.Equal(top.Handle, top.SourceHandle); // 顶层回落自身句柄
+            Assert.Null(top.BlockName);
+            Assert.Null(top.ParentInsertChain);
+
+            RenderItem child = items[0];
+            Assert.Equal("SYM", child.BlockName); // 最内层块名（非 NEST）
+            var topIns = s.Doc.Entities.OfType<Insert>().Single();
+            var nestIns = topIns.Block.Entities.OfType<Insert>().Single();
+            Assert.Equal(new[] { topIns.Handle.ToString(), nestIns.Handle.ToString() },
+                child.ParentInsertChain!.ToArray());
+            Assert.DoesNotContain(":", child.SourceHandle); // 来源句柄不含子索引后缀
+            Assert.Equal(nestIns.Block.Entities.OfType<Line>().Single().Handle.ToString(), child.SourceHandle);
+        });
+    }
 }
