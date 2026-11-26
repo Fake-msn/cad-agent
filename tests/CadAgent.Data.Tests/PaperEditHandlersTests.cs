@@ -11,7 +11,7 @@ namespace CadAgent.Data.Tests;
 /// <summary>
 /// Task 1：既有编辑处理器三空间化（模型/纸面/顶层 Insert 属性）。夹具复用
 /// <see cref="PaperFixtures"/>（纸面布局 + 纸面线；new DrawingSession(path, doc) 直编同一对象图）。
-/// 断言口径：目标空间被改且另一空间逐字不变；Viewport/block 参数 fail-closed。
+/// 断言口径：目标空间被改且另一空间逐字不变；Viewport fail-closed；add-* 仍拒 block（块定义编辑见 BlockEditHandlerTests）。
 /// </summary>
 public class PaperEditHandlersTests : IDisposable
 {
@@ -132,16 +132,18 @@ public class PaperEditHandlersTests : IDisposable
     }
 
     [Fact]
-    public void Move_BlockParam_RejectedAsPlan3()
+    public void Move_UnknownBlockName_RejectedAsBlockMiss()
     {
+        // Plan-3 Task 5：block 已接通块定义；未知块名 → 块定义专用失败文案（不回落到纸面实体）。
         var (s, layout) = New();
         var line = PaperLine(layout);
         var r = new MoveEntityHandler().Apply(s, P(new
         {
-            handle = line.Handle.ToString(), dx = 1, dy = 1, block = "图框"
+            handle = line.Handle.ToString(), dx = 1, dy = 1, block = "不存在的块"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+        Assert.Contains("块定义中未找到句柄", r.Error);
+        Assert.Equal(0, line.StartPoint.X, 6);
     }
 
     [Fact]
@@ -220,16 +222,18 @@ public class PaperEditHandlersTests : IDisposable
     }
 
     [Fact]
-    public void Delete_BlockParam_RejectedAsPlan3()
+    public void Delete_UnknownBlockName_RejectedAsBlockMiss()
     {
+        // Plan-3 Task 5：block 已接通块定义；未知块名 → 纸面实体不在该块，不得删除。
         var (s, layout) = New();
         var line = PaperLine(layout);
         var r = new DeleteEntityHandler().Apply(s, P(new
         {
-            handle = line.Handle.ToString(), block = "图框"
+            handle = line.Handle.ToString(), block = "不存在的块"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+        Assert.Contains("块定义中未找到句柄", r.Error);
+        Assert.Contains(line, layout.AssociatedBlock!.Entities);
     }
 
     [Fact]

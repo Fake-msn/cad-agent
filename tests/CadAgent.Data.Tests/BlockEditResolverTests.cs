@@ -91,7 +91,7 @@ internal static class BlockFixtures
 /// <summary>
 /// Plan-3 Task 1 块定义目标解析矩阵：block+handle 仅检索命名块 Entities、块名大小写不敏感、
 /// 未知/受保护/布局块拒绝、非块空间句柄不回退、块嵌套不递归、block 与 space/layout/attribute 互斥、
-/// 默认（无 block）不检索块定义。处理器仍在入口预拒 block（Task 5 才接通），本文件直接考解析器。
+/// 默认（无 block）不检索块定义。处理器块定义接线见 BlockEditHandlerTests。
 /// </summary>
 public class BlockEditResolverTests : IDisposable
 {

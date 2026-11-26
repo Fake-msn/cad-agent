@@ -232,16 +232,17 @@ public class SetTextAttributeTests : IDisposable
     }
 
     [Fact]
-    public void SetText_BlockParam_RejectedAsPlan3()
+    public void SetText_UnknownBlockName_RejectedAsBlockMiss()
     {
+        // Plan-3 Task 5：block 已接通块定义；模型顶层句柄不在该块 → 块定义未命中，原值不变。
         TextEntity? text = null;
         var (s, _) = New(doc => text = AddModelText(doc, "原文"));
         var r = new SetTextHandler().Apply(s, P(new
         {
-            handle = text!.Handle.ToString(), text = "改", block = "图框"
+            handle = text!.Handle.ToString(), text = "改", block = "不存在的块"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+        Assert.Contains("块定义中未找到句柄", r.Error);
         Assert.Equal("原文", text.Value);
     }
 
@@ -423,8 +424,9 @@ public class SetTextAttributeTests : IDisposable
     }
 
     [Fact]
-    public void SetAttribute_BlockParam_RejectedAsPlan3()
+    public void SetAttribute_BlockParam_RejectedAsUnsupported()
     {
+        // Plan-3 范围仅文字/几何：块内属性编辑仍不支持（专用文案，非泛化 Plan-3 占位）。
         AttributeEntity? attr = null;
         var (s, _) = New(doc => (_, attr) = PaperFixtures.AddAttributeInsert(doc));
         var r = new SetAttributeHandler().Apply(s, P(new
@@ -432,7 +434,7 @@ public class SetTextAttributeTests : IDisposable
             handle = attr!.Handle.ToString(), value = "新值", block = "图框"
         }));
         Assert.False(r.Ok);
-        Assert.Equal("块内编辑将在后续切片提供（Plan-3）", r.Error);
+        Assert.Equal("块内属性编辑未支持（Plan-3 仅文字/几何）", r.Error);
         Assert.Equal("栖贤雅庭", attr.Value);
     }
 

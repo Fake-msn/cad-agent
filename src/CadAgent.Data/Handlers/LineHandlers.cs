@@ -41,11 +41,33 @@ internal static class HandlerHelpers
         return layer;
     }
 
-    /// <summary>块内编辑属 Plan-3：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
+    /// <summary>新建族（add-*）块内编辑仍不提供：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
     public static StepResult? RejectBlockParam(JsonElement p) =>
-        p.TryGetProperty("block", out var v) && v.ValueKind != JsonValueKind.Null
+        HasBlockParam(p)
             ? new StepResult(false, EditTargetResolver.BlockDeferredMessage, "")
             : null;
+
+    /// <summary>block 参数存在且非 null（与解析器 HasValue 同口径）。</summary>
+    public static bool HasBlockParam(JsonElement p) =>
+        p.TryGetProperty("block", out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+
+    /// <summary>
+    /// 句柄编辑统一目标解析（Plan-3）：block 显式 → 块定义专用文案（未知/受保护/互斥/非法句柄/未命中）；
+    /// 否则默认三空间解析（模型→纸面→顶层属性）。
+    /// </summary>
+    public static EditTarget? ResolveEditTarget(DrawingSession s, JsonElement p, out string error)
+    {
+        error = "";
+        if (!HasBlockParam(p))
+        {
+            EditTarget? target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+            if (target is null) error = resolveError ?? EditTargetResolver.NotFoundMessage;
+            return target;
+        }
+        EditTarget? blockTarget = EditTargetResolver.ResolveBlockTarget(s, p, out string? blockError);
+        if (blockTarget is null) error = blockError ?? EditTargetResolver.NotFoundMessage;
+        return blockTarget;
+    }
 
     /// <summary>
     /// R3：space 仅支持 "paper"（大小写不敏感）。其他取值（含 "model"/未知词）在入口即拒，

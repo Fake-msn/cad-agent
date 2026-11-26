@@ -11,13 +11,14 @@ public sealed class DeleteEntityHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
-        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);
         if (target == null)
-            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+            return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        // 移除后 ACadSharp 会清空句柄：审计/返回的目标句柄必须先取。
+        string handle = target.Entity.Handle.ToString();
         // 按所有者集合移除：纸面实体不在 Doc.Entities 中，删错集合会静默无效。
         switch (target.Owner)
         {
@@ -34,6 +35,21 @@ public sealed class DeleteEntityHandler : IStepHandler
                     return new StepResult(false, "实体移除失败", "");
                 break;
             }
+            case EditOwnerKind.BlockDefinition:
+            {
+                // 块名再查（同纸面布局模式）：解析后块表被改（删除/改名）→ fail-closed。
+                var block = target.BlockName is null
+                    ? null
+                    : EditTargetResolver.FindBlock(s, target.BlockName);
+                if (block is null)
+                    return new StepResult(false, $"块定义不存在：{target.BlockName}", "");
+                // 属性定义是实例属性模板（删除会毁全实例属性结构），定义层保护。
+                if (target.Entity is AttributeDefinition)
+                    return new StepResult(false, "属性定义不可删除", "");
+                if (!block.Entities.Remove(target.Entity))
+                    return new StepResult(false, "实体移除失败", "");
+                break;
+            }
             case EditOwnerKind.InsertAttribute:
                 // ATTRIB 实例：Insert.Attributes（SeqendCollection<AttributeEntity>）的 Remove(T)
                 // 实件存在（ACadSharp 3.8.35 反射核验），无需重建集合。
@@ -46,7 +62,7 @@ public sealed class DeleteEntityHandler : IStepHandler
             default:
                 return new StepResult(false, $"delete 暂不支持所有者 {target.Owner}", "");
         }
-        return new StepResult(true, "", target.Entity.Handle.ToString());
+        return new StepResult(true, "", handle);
     }
 }
 
@@ -56,12 +72,11 @@ public sealed class MoveEntityHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
-        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);
         if (target == null)
-            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+            return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
         Entity entity = target.Entity;
         double dx = HandlerHelpers.Req(p, "dx"), dy = HandlerHelpers.Req(p, "dy");
@@ -183,12 +198,11 @@ public sealed class ChangeLayerHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
-        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
         if (HandlerHelpers.RejectUnsupportedSpace(p) is { } spaceRejected) return spaceRejected;
         if (HandlerHelpers.RejectInvalidTargetScope(s, p) is { } scopeRejected) return scopeRejected;
-        var target = EditTargetResolver.TryResolve(s, p, out string? resolveError);
+        var target = HandlerHelpers.ResolveEditTarget(s, p, out string targetError);
         if (target == null)
-            return new StepResult(false, resolveError ?? EditTargetResolver.NotFoundMessage, "");
+            return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
         target.Entity.Layer = HandlerHelpers.ResolveLayer(s, p.GetProperty("layer").GetString());
         return new StepResult(true, "", target.Entity.Handle.ToString());

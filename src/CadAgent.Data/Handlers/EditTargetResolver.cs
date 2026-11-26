@@ -31,6 +31,8 @@ public static class EditTargetResolver
     public const string AmbiguousMessage = "句柄在多个空间出现，请用 space/layout/attribute 限定";
     public const string BlockNotFoundMessage = "块定义中未找到句柄: {0}（块 {1}）";
     public const string BlockProtectedMessage = "块不可编辑（匿名/外部参照/动态/未加载）: {0}";
+    public const string BlockScopeConflictMessage = "block 不能与 space/layout/attribute 同时使用";
+    public const string IllegalHandleMessage = "非法句柄: {0}（块内编辑须为已分配句柄）";
 
     // 处理器入口预拒 block 的专用文案（Task 5 接通块内编辑后仅 add-* 新建仍用它）。
     public const string BlockDeferredMessage = "块内编辑将在后续切片提供（Plan-3）";
@@ -43,20 +45,8 @@ public static class EditTargetResolver
         error = null;
         if (!TryReadHandle(p, out ulong handle)) return null;
 
-        // 显式块定义：仅检索该块自身实体（单层，不递归嵌套块定义）。
-        if (HasValue(p, "block"))
-        {
-            // 与纸面/属性限定互斥：多空间信号即 fail-closed，不猜优先级。
-            if (HasValue(p, "space") || HasValue(p, "layout") || HasValue(p, "attribute")) return null;
-            string? blockName = ReadBlockName(p);
-            if (blockName is null) return null; // 非字符串/非整数 → fail-closed
-            BlockRecord? block = FindBlock(s, blockName);
-            if (block is null || !IsBlockEditable(block)) return null; // 处理器用 FindBlock/IsBlockEditable 给专用文案
-            Entity? match = block.Entities.FirstOrDefault(e => e.Handle == handle);
-            return match is null
-                ? null
-                : new EditTarget(match, EditOwnerKind.BlockDefinition, BlockName: block.Name);
-        }
+        // 显式块定义：唯一 block 路径（含专用失败文案，处理器经 ResolveBlockTarget 直取）。
+        if (HasValue(p, "block")) return ResolveBlockTarget(s, p, out _);
 
         bool paperRestricted = HasValue(p, "space") || HasValue(p, "layout");
         if (HasValue(p, "space")
@@ -100,6 +90,51 @@ public static class EditTargetResolver
             return null;
         }
         return matches[0];
+    }
+
+    /// <summary>
+    /// 显式块定义目标（唯一 block 路径，TryResolve 委托）：仅检索该块直接实体（单层，不递归嵌套）。
+    /// 失败给处理器可直用的专用文案（未知块/受保护块/互斥限定/非法句柄/块内未命中）；
+    /// handle 0 = 未分配句柄，永不解析（多条未分配实体同为 0 会误命中）。
+    /// </summary>
+    public static EditTarget? ResolveBlockTarget(DrawingSession s, JsonElement p, out string? error)
+    {
+        error = null;
+        string? blockName = ReadBlockName(p);
+        BlockRecord? block = blockName is null ? null : FindBlock(s, blockName);
+        if (block is null)
+        {
+            error = string.Format(BlockNotFoundMessage, Raw(p, "handle"), blockName ?? Raw(p, "block"));
+            return null;
+        }
+        if (!IsBlockEditable(block))
+        {
+            error = string.Format(BlockProtectedMessage, block.Name);
+            return null;
+        }
+        // 与纸面/属性限定互斥：多空间信号即 fail-closed，不猜优先级。
+        if (HasValue(p, "space") || HasValue(p, "layout") || HasValue(p, "attribute"))
+        {
+            error = BlockScopeConflictMessage;
+            return null;
+        }
+        if (!TryReadHandle(p, out ulong handle))
+        {
+            error = string.Format(IllegalHandleMessage, Raw(p, "handle"));
+            return null;
+        }
+        if (handle == 0)
+        {
+            error = string.Format(IllegalHandleMessage, 0);
+            return null;
+        }
+        Entity? match = block.Entities.FirstOrDefault(e => e.Handle == handle);
+        if (match is null)
+        {
+            error = string.Format(BlockNotFoundMessage, handle, block.Name);
+            return null;
+        }
+        return new EditTarget(match, EditOwnerKind.BlockDefinition, BlockName: block.Name);
     }
 
     /// <summary>
@@ -173,6 +208,10 @@ public static class EditTargetResolver
             _ => null
         };
     }
+
+    // 失败文案里的原样参数（缺失/非法形态可复现，不抛）。
+    private static string Raw(JsonElement p, string name) =>
+        p.TryGetProperty(name, out var v) ? v.GetRawText() : "(缺失)";
 
     private static bool HasValue(JsonElement p, string name) =>
         p.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
