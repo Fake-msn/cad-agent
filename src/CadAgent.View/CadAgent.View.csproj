@@ -21,6 +21,8 @@
     <ProjectReference Include="..\CadAgent.Data\CadAgent.Data.csproj" />
     <!-- 视觉接线 T3：vision-scan headless 入口生产路径 OpenAiClient/DpapiKeyProtector（Llm 仅引用 Core，无环） -->
     <ProjectReference Include="..\CadAgent.Llm\CadAgent.Llm.csproj" />
+    <!-- 审图报告导出（View「导出报告」与 CLI report export 共用 ReviewReportExporter） -->
+    <ProjectReference Include="..\CadAgent.Report\CadAgent.Report.csproj" />
   </ItemGroup>
 
   <ItemGroup>

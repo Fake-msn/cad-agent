@@ -12,6 +12,8 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CadAgent.Core;
+using CadAgent.Data.Rules;
+using CadAgent.Report;
 using CadAgent.View.Controls;
 using CadAgent.View.Rendering;
 using CadAgent.View.Services;
@@ -179,6 +181,21 @@ public sealed class MainWindow : Window
     /// <summary>§4.1④ 采纳审计身份（构造期 signoffIdentity 同源：签认/编辑/裁定共用）。</summary>
     private readonly IIdentityProvider? _auditIdentity;
 
+    /// <summary>审图报告导出：与 Issues/编辑/签认共用写审计实例（无第二存储）。</summary>
+    private readonly IAuditStore? _reportAuditStore;
+
+    /// <summary>审图报告导出：签认记录来源（导出前 Load 刷新磁盘态）。</summary>
+    private ReviewSignoffStore? _signoffStore;
+
+    /// <summary>审图报告导出重入闸（结构性，不依赖按钮 IsEnabled——RaiseEvent 可绕过）。</summary>
+    private bool _reportBusy;
+
+    /// <summary>项目目录（报告默认输出 &lt;项目&gt;/reports；报告元数据）。</summary>
+    private readonly string _projectDir;
+
+    /// <summary>会话闸（报告取图纸哈希与编辑/后台读互斥）。</summary>
+    private readonly SemaphoreSlim? _sessionGate;
+
     /// <summary>§4.1④ 零勾选兜底状态栏提示（镜像 _editWarning 机制：OnCanvasInvalidated
     /// 拼接待显文本；checked 路径/新填充动作清除，避免陈旧提示误导）。</summary>
     private string _fillIntentNote = "";
@@ -195,6 +212,7 @@ public sealed class MainWindow : Window
     {
         DataContext = vm;
         _skillDirs = vm.SkillDirs;
+        _projectDir = vm.ProjectDir;
         Title = $"CadAgent — {vm.Title}"; // T10：窗口标题含应用名 + 图纸名
         Width = 1200;
         Height = 800;
@@ -231,6 +249,7 @@ public sealed class MainWindow : Window
         // 共享同一互斥闸——off-thread 读绝不看到被编辑撕扯的 Doc（T6 承接）。
         // T10：可注入（headless 测试持闸制造确定性 in-flight 编辑）。
         sessionGate ??= new SemaphoreSlim(1, 1);
+        _sessionGate = sessionGate;
 
         _baseStatus = $"{vm.Title} — {items.Count} render items";
         var status = new TextBlock { Margin = new Thickness(8, 4), Text = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}" };
@@ -293,11 +312,29 @@ public sealed class MainWindow : Window
         issueList.SelectionChanged += OnIssueSelected;
         IssueList = issueList;
 
+        // 审图报告导出（全量）：与 CLI report export 共用 ReviewReportExporter；
+        // 导出前重评问题清单（留 check-run 审计），成功后追加 report-exported 审计。
+        var exportReport = new Button { Content = "导出报告", Margin = new Thickness(4, 2) };
+        exportReport.Click += OnExportReportClick;
+        ExportReportButton = exportReport;
+        var reportStatus = new TextBlock
+        {
+            Margin = new Thickness(6, 2),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brushes.MediumSeaGreen,
+            IsVisible = false
+        };
+        ReportStatus = reportStatus;
+
         var issuesPanel = new DockPanel { Width = 320 };
         DockPanel.SetDock(issuesHeader, Dock.Top);
         issuesPanel.Children.Add(issuesHeader);
         DockPanel.SetDock(refresh, Dock.Top);
         issuesPanel.Children.Add(refresh);
+        DockPanel.SetDock(exportReport, Dock.Top);
+        issuesPanel.Children.Add(exportReport);
+        DockPanel.SetDock(reportStatus, Dock.Top);
+        issuesPanel.Children.Add(reportStatus);
         DockPanel.SetDock(issuesError, Dock.Top);
         issuesPanel.Children.Add(issuesError);
         issuesPanel.Children.Add(issueList); // LastChildFill
@@ -421,6 +458,7 @@ public sealed class MainWindow : Window
             signoffStore = new ReviewSignoffStore(signoffPath, loadOnConstruct: false);
             stateNotes.Add($"signoffs.json 损坏，签认历史不可用（{ex.Message}）");
         }
+        _signoffStore = signoffStore;
         var signoff = new SignoffViewModel(auditStore, signoffStore,
             signoffIdentity, new RoleChecker(), audit.Transactions);
         Signoff = signoff;
@@ -492,6 +530,7 @@ public sealed class MainWindow : Window
         // §4.1④：采纳审计（rule-adopted）经同一写审计实例 + 同一身份（无第二存储/旁路）。
         _writeAudit = writeAudit;
         _auditIdentity = signoffIdentity;
+        _reportAuditStore = writeAudit; // 报告导出审计同源（审计失败→撤销报告）
 
         // T5：右栏问题清单 VM（in-process check；T10：--skill 目录经 MainViewModel 接线）。
         // 视图闭环 T6：刷新留 check-run 审计（parity CLI check）——写审计复用 T8 存储，
@@ -1045,6 +1084,12 @@ public sealed class MainWindow : Window
     /// <summary>问题清单刷新按钮（T5）。</summary>
     public Button? RefreshIssuesButton { get; }
 
+    /// <summary>审图报告导出按钮（View 入口；与 CLI report export 共用导出器）。</summary>
+    public Button? ExportReportButton { get; }
+
+    /// <summary>报告导出状态/错误文本（成功绿/失败红；null=隐藏）。</summary>
+    public TextBlock? ReportStatus { get; }
+
     /// <summary>问题清单头部（含 mandatory/skipped 计数；跳过原因 tooltip）。</summary>
     public TextBlock? IssuesHeader { get; }
 
@@ -1405,6 +1450,168 @@ public sealed class MainWindow : Window
             IssuesError.Text = Issues.ErrorMessage ?? "";
             IssuesError.IsVisible = Issues.ErrorMessage is not null;
         }
+    }
+
+    /// <summary>审图报告导出按钮（与 CLI report export 共用导出器；异步防重入）。</summary>
+    private async void OnExportReportClick(object? sender, RoutedEventArgs e) => await ExportReportAsync();
+
+    /// <summary>
+    /// 导出审图报告（全量：问题/跳过/裁定/签认/审计验链/当前幅面缩略图）。
+    /// 先 RefreshAsync 重评（与 CLI check 同语义并留 check-run 审计）；评估失败不导出。
+    /// 缩略图渲染失败→报告标注"未生成"（不阻断）。导出成功后追加 report-exported 审计，
+    /// 审计写入失败→删除本次产物（无审计不留产物）。默认落盘 &lt;项目&gt;/reports/。
+    /// </summary>
+    internal async Task ExportReportAsync()
+    {
+        if (_reportBusy || Issues is null || _reportAuditStore is null || _auditIdentity is null) return;
+        _reportBusy = true;
+        if (ExportReportButton is not null) ExportReportButton.IsEnabled = false;
+        SetReportStatus(null, error: false);
+        try
+        {
+            await Issues.RefreshAsync();
+            if (Issues.ErrorMessage is not null)
+            {
+                SetReportStatus($"审查评估失败，未导出: {Issues.ErrorMessage}", error: true);
+                return;
+            }
+            OperatorIdentity op = _auditIdentity.Current;
+            IReadOnlyList<AuditRecord> auditAll = _reportAuditStore.ReadAll();
+            bool chainOk = _reportAuditStore.VerifyChain(out string chainError);
+            var auditSummary = new ReportAuditSummary(auditAll.Count, chainOk,
+                chainOk ? null : chainError,
+                auditAll.Count > 0 ? auditAll[^1].Seq : 0,
+                auditAll.Count > 0 ? auditAll[^1].Hash : null);
+
+            var verifications = new Dictionary<string, string>(StringComparer.Ordinal);
+            string? rulePackVersion = null;
+            try
+            {
+                SkillSet ruleSet = SkillSet.Compose(BuiltinRules.Load(),
+                    _skillDirs.Select(SkillLoader.LoadDirectory).ToList());
+                rulePackVersion = ruleSet.RulePackVersion;
+                foreach (Rule rule in ruleSet.AllRules)
+                    verifications[rule.Id] = rule.Source.Verification;
+            }
+            catch { /* 规则集重载失败：报告缺核对方式/版本字段，不阻断主数据 */ }
+
+            IReadOnlyList<ReportSignoff> signoffs;
+            try
+            {
+                _signoffStore?.Load();
+                signoffs = _signoffStore is null
+                    ? Array.Empty<ReportSignoff>()
+                    : _signoffStore.Items.Select(s => new ReportSignoff(
+                        s.TxId, s.Operator, s.Role.ToString(), s.Approved, s.Comment, s.Ts)).ToList();
+            }
+            catch { signoffs = Array.Empty<ReportSignoff>(); }
+
+            IReadOnlyList<Adjudication> adjudications;
+            string? adjudicationHash = null;
+            try
+            {
+                AdjudicationSet set = AdjudicationSet.Load(
+                    Path.Combine(_projectDir, ".cadagent", "adjudications.json"));
+                adjudications = set.Items;
+                adjudicationHash = set.Fingerprint();
+            }
+            catch { adjudications = Array.Empty<Adjudication>(); }
+
+            byte[]? thumbnail = TryRenderThumbnail();
+            DateTimeOffset issuedAt = DateTimeOffset.Now;
+            string outPath = Path.Combine(_projectDir, "reports",
+                $"{Path.GetFileNameWithoutExtension(_title)}-{issuedAt:yyyyMMdd-HHmmss}-review.pdf");
+
+            string hash = "";
+            if (_sessionGate is not null) _sessionGate.Wait();
+            try { hash = _session.ComputeHash(); }
+            finally { _sessionGate?.Release(); }
+
+            var input = new ReviewReportInput
+            {
+                DrawingPath = _session.SourcePath,
+                ProjectDir = _projectDir,
+                Identity = new ReportIdentity(op.Account, op.Role.ToString()),
+                IssuedAt = issuedAt,
+                DrawingHash = hash,
+                RulePackVersion = rulePackVersion,
+                AdjudicationHash = adjudicationHash,
+                OverlayPresent = Issues.OverlayPresent,
+                Issues = Issues.Issues.Select(ToIssue).ToList(),
+                RulesRun = Issues.RulesRun,
+                RulesSkipped = Issues.RulesSkipped,
+                Skipped = Issues.SkippedReasons,
+                Adjudications = adjudications,
+                Signoffs = signoffs,
+                Audit = auditSummary,
+                ThumbnailPng = thumbnail,
+                RuleVerifications = verifications
+            };
+
+            ReviewReportResult result = await Task.Run(
+                () => ReviewReportExporter.Export(input, outPath));
+
+            try
+            {
+                _reportAuditStore.Append(new AuditEntry(DateTimeOffset.UtcNow,
+                    op.Account, op.Role.ToString(), "view", "view-report", "report-exported",
+                    _session.SourcePath,
+                    JsonSerializer.Serialize(new
+                    {
+                        outPath = result.Path,
+                        issueCount = input.Issues.Count,
+                        mandatoryViolations = Issues.MandatoryCount,
+                        auditChainOk = result.AuditChainOk,
+                        thumbnail = thumbnail is not null
+                    }),
+                    hash, hash, "", ""));
+            }
+            catch (Exception ex)
+            {
+                // 审计先行（spec §9 无审计旁路）：审计失败→撤销本次报告（自家生成文件）
+                try { File.Delete(result.Path); } catch { /* 撤销清理失败不掩盖审计错误 */ }
+                SetReportStatus($"审计写入失败，已撤销报告: {ex.Message}", error: true);
+                return;
+            }
+
+            SetReportStatus($"已导出: {result.Path}", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetReportStatus($"导出失败: {ex.Message}", error: true);
+        }
+        finally
+        {
+            _reportBusy = false;
+            if (ExportReportButton is not null) ExportReportButton.IsEnabled = true;
+        }
+    }
+
+    private static Issue ToIssue(IssueEntry entry) => new(
+        entry.RuleId, entry.Clause, entry.Standard, entry.Excerpt, entry.Force, entry.Severity,
+        entry.Targets, entry.Message, entry.Suggestion, entry.DetectionBasis);
+
+    /// <summary>当前幅面缩略图（离屏 Skia；失败→null，报告如实标注未生成）。</summary>
+    private byte[]? TryRenderThumbnail()
+    {
+        try
+        {
+            SheetRecord sheet = _sheets.FirstOrDefault(s => s.SheetId == _currentSheetId) ?? _sheets[0];
+            var provider = new RenderSnapshotProvider(_session);
+            return provider.RenderPng(sheet.SheetId, sheet.FrameBounds, 640, 480);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void SetReportStatus(string? message, bool error)
+    {
+        if (ReportStatus is null) return;
+        ReportStatus.Text = message ?? "";
+        ReportStatus.IsVisible = message is not null;
+        ReportStatus.Foreground = error ? Brushes.IndianRed : Brushes.MediumSeaGreen;
     }
 
     /// <summary>画布状态变化（选择/图层可见性/视图）→ 状态栏 + 复选框同步。</summary>
