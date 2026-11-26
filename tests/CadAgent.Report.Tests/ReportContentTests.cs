@@ -3,6 +3,7 @@ using CadAgent.Report;
 
 namespace CadAgent.Report.Tests;
 
+[Collection(ReportStaticStateCollection.Name)]
 public sealed class ReportContentTests
 {
     private static Issue MakeIssue(string ruleId, RuleForce force, string message = "m") =>

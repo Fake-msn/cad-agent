@@ -3,6 +3,7 @@ using CadAgent.Report;
 
 namespace CadAgent.Report.Tests;
 
+[Collection(ReportStaticStateCollection.Name)]
 public sealed class ReportSignoffReaderTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "cadagent-signoff-" + Guid.NewGuid().ToString("N"));

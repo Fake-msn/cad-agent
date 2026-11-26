@@ -62,11 +62,11 @@ internal sealed class ReviewReportDocument : IDocument
         if (_input.ThumbnailPng is { Length: > 0 })
             col.Item().AlignCenter().MaxWidth(420).Image(_input.ThumbnailPng).FitWidth();
         else
-            col.Item().Text("（缩略图未生成）").FontColor(Colors.Grey.Medium);
+            col.Item().Text(ReportText.ThumbnailMissing()).FontColor(Colors.Grey.Medium);
         foreach (ReportIssueGroup group in _content.Groups)
             col.Item().Element(c => ComposeGroup(c, group));
         if (_content.Groups.Count == 0)
-            col.Item().Text("未发现问题。").Bold();
+            col.Item().Text(ReportText.NoIssues()).Bold();
         col.Item().Element(ComposeSkips);
         col.Item().Element(ComposeAdjudications);
         col.Item().Element(ComposeSignoffs);
@@ -100,30 +100,10 @@ internal sealed class ReviewReportDocument : IDocument
         container.Background(Colors.Grey.Lighten4).Padding(6).Column(col =>
         {
             col.Spacing(2);
-            col.Item().Text(
-                    $"问题 {_content.Total} 项（必须 {_content.Mandatory}｜应当 {_content.Recommended}｜可 {_content.Informational}）")
-                .Bold();
-            col.Item().Text($"规则执行 {_input.RulesRun} 条，跳过 {_input.RulesSkipped} 条");
-            col.Item().Text(AuditLine());
+            col.Item().Text(ReportText.ProblemLine(_content)).Bold();
+            col.Item().Text(ReportText.RulesLine(_input));
+            col.Item().Text(ReportText.AuditLine(_input.Audit));
         });
-
-    private string AuditLine()
-    {
-        if (_input.Audit is null) return "审计库：不可用（未提供审计数据）";
-        ReportAuditSummary a = _input.Audit;
-        string chain = a.ChainOk ? "验链通过" : $"验链失败（{a.ChainError ?? "未知原因"}）";
-        return $"审计库：{a.RecordCount} 条记录，{chain}，头 seq={a.HeadSeq} hash={ShortHash(a.HeadHash)}";
-    }
-
-    private static string ForceLabel(RuleForce force) => force switch
-    {
-        RuleForce.Mandatory => "必须（Mandatory）",
-        RuleForce.Recommended => "应当（Recommended）",
-        _ => "可（Informational）"
-    };
-
-    private static string ShortHash(string? hash) =>
-        string.IsNullOrEmpty(hash) ? "—" : hash.Length > 16 ? hash[..16] + "…" : hash;
 
     private static string OrDash(string? value) => string.IsNullOrEmpty(value) ? "—" : value;
 
@@ -131,7 +111,7 @@ internal sealed class ReviewReportDocument : IDocument
     {
         col.Spacing(4);
         col.Item().PaddingTop(4)
-            .Text($"{ForceLabel(group.Force)} — {group.Issues.Count} 项")
+            .Text(ReportText.GroupHeader(group.Force, group.Issues.Count))
             .FontSize(11).Bold()
             .FontColor(group.Force switch
             {
@@ -169,10 +149,10 @@ internal sealed class ReviewReportDocument : IDocument
     private void ComposeSkips(IContainer container) => container.Column(col =>
     {
         col.Spacing(2);
-        col.Item().Text($"跳过检查 — {_input.Skipped.Count} 条").Bold();
+        col.Item().Text(ReportText.SectionHeader("跳过检查", _input.Skipped.Count)).Bold();
         if (_input.Skipped.Count == 0)
         {
-            col.Item().Text("无").FontColor(Colors.Grey.Medium);
+            col.Item().Text(ReportText.EmptyMarker()).FontColor(Colors.Grey.Medium);
             return;
         }
         foreach (SkipReason s in _input.Skipped)
@@ -182,10 +162,10 @@ internal sealed class ReviewReportDocument : IDocument
     private void ComposeAdjudications(IContainer container) => container.Column(col =>
     {
         col.Spacing(2);
-        col.Item().Text($"裁定记录 — {_input.Adjudications.Count} 条").Bold();
+        col.Item().Text(ReportText.SectionHeader("裁定记录", _input.Adjudications.Count)).Bold();
         if (_input.Adjudications.Count == 0)
         {
-            col.Item().Text("无").FontColor(Colors.Grey.Medium);
+            col.Item().Text(ReportText.EmptyMarker()).FontColor(Colors.Grey.Medium);
             return;
         }
         foreach (Adjudication a in _input.Adjudications)
@@ -204,10 +184,10 @@ internal sealed class ReviewReportDocument : IDocument
     private void ComposeSignoffs(IContainer container) => container.Column(col =>
     {
         col.Spacing(2);
-        col.Item().Text($"签认记录 — {_input.Signoffs.Count} 条").Bold();
+        col.Item().Text(ReportText.SectionHeader("签认记录", _input.Signoffs.Count)).Bold();
         if (_input.Signoffs.Count == 0)
         {
-            col.Item().Text("无").FontColor(Colors.Grey.Medium);
+            col.Item().Text(ReportText.EmptyMarker()).FontColor(Colors.Grey.Medium);
             return;
         }
         foreach (ReportSignoff s in _input.Signoffs)

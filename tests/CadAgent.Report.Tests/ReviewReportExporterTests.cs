@@ -4,6 +4,7 @@ using CadAgent.Report;
 
 namespace CadAgent.Report.Tests;
 
+[Collection(ReportStaticStateCollection.Name)]
 public sealed class ReviewReportExporterTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "cadagent-report-" + Guid.NewGuid().ToString("N"));
@@ -88,6 +89,21 @@ public sealed class ReviewReportExporterTests : IDisposable
 
         Assert.True(File.Exists(path));
         Assert.True(result.AuditChainOk); // 未提供审计数据 → 不视为断链
+    }
+
+    [Fact]
+    public void Export_WithBrokenChain_ReportsAuditChainOkFalse()
+    {
+        ReviewReportInput input = MakeInput() with
+        {
+            Audit = new ReportAuditSummary(3, false, "broken at seq 2", 3, "H")
+        };
+        string path = Path.Combine(_dir, "broken.pdf");
+
+        var result = ReviewReportExporter.Export(input, path);
+
+        Assert.False(result.AuditChainOk); // 断链必须原样透出，不能被「已生成」掩盖
+        Assert.True(File.Exists(path));
     }
 
     [Fact]

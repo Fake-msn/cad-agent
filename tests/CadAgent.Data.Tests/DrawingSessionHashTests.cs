@@ -154,6 +154,116 @@ public class DrawingSessionHashTests : IDisposable
         Assert.NotEqual(before, s.ComputeHash());
     }
 
+    /// <summary>
+    /// 逐类型投影：每种实体的可见几何都必须进哈希，否则该类实体编辑后 audit 显示假
+    /// "no change"。MText 覆盖值+插入点，多段线覆盖顶点，Arc/Circle 覆盖半径与圆心，Hatch 覆盖实心/环路数。
+    /// </summary>
+    [Fact]
+    public void Hash_Changes_WhenModelSpaceMTextValueOrInsertPointChanges()
+    {
+        var s = NewSession(doc => doc.Entities.Add(
+            new MText { Value = "甲", InsertPoint = new XYZ(1, 2, 0), Height = 3 }));
+        string before = s.ComputeHash();
+
+        var mt = s.Doc.Entities.OfType<MText>().First();
+        mt.Value = "乙";
+        string afterValue = s.ComputeHash();
+        Assert.NotEqual(before, afterValue);
+
+        mt.InsertPoint = new XYZ(5, 2, 0);
+        Assert.NotEqual(afterValue, s.ComputeHash());
+    }
+
+    [Fact]
+    public void Hash_Changes_WhenPaperSpaceMTextMoves()
+    {
+        var s = NewSession(doc =>
+        {
+            var layout = new Layout("布局1");
+            doc.Layouts.Add(layout);
+            layout.AssociatedBlock.Entities.Add(new MText { Value = "说明", InsertPoint = new XYZ(0, 0, 0) });
+        });
+        string before = s.ComputeHash();
+
+        s.Doc.Layouts.First(l => l.Name == "布局1").AssociatedBlock.Entities
+            .OfType<MText>().First().InsertPoint = new XYZ(20, 0, 0);
+        Assert.NotEqual(before, s.ComputeHash());
+    }
+
+    [Fact]
+    public void Hash_Changes_WhenLwPolylineVertexMoves()
+    {
+        var s = NewSession(doc =>
+        {
+            var lw = new LwPolyline();
+            lw.Vertices.Add(new LwPolyline.Vertex { Location = new XY(0, 0) });
+            lw.Vertices.Add(new LwPolyline.Vertex { Location = new XY(10, 0) });
+            doc.Entities.Add(lw);
+        });
+        string before = s.ComputeHash();
+
+        s.Doc.Entities.OfType<LwPolyline>().First().Vertices[1].Location = new XY(10, 5);
+        Assert.NotEqual(before, s.ComputeHash());
+    }
+
+    [Fact]
+    public void Hash_Changes_WhenPolyline2DVertexMoves()
+    {
+        var s = NewSession(doc =>
+        {
+            var p2 = new Polyline2D();
+            p2.Vertices.Add(new Vertex2D { Location = new XYZ(0, 0, 0) });
+            p2.Vertices.Add(new Vertex2D { Location = new XYZ(10, 0, 0) });
+            doc.Entities.Add(p2);
+        });
+        string before = s.ComputeHash();
+
+        s.Doc.Entities.OfType<Polyline2D>().First().Vertices[0].Location = new XYZ(0, 7, 0);
+        Assert.NotEqual(before, s.ComputeHash());
+    }
+
+    [Fact]
+    public void Hash_Changes_WhenArcCenterOrRadiusChanges()
+    {
+        var s = NewSession(doc => doc.Entities.Add(
+            new Arc { Center = new XYZ(0, 0, 0), Radius = 5, StartAngle = 0, EndAngle = Math.PI }));
+        string before = s.ComputeHash();
+
+        var arc = s.Doc.Entities.OfType<Arc>().First();
+        arc.Center = new XYZ(3, 0, 0);
+        string afterCenter = s.ComputeHash();
+        Assert.NotEqual(before, afterCenter);
+
+        arc.Radius = 6;
+        Assert.NotEqual(afterCenter, s.ComputeHash());
+    }
+
+    [Fact]
+    public void Hash_Changes_WhenCircleRadiusChanges()
+    {
+        var s = NewSession(doc => doc.Entities.Add(
+            new Circle { Center = new XYZ(0, 0, 0), Radius = 5 }));
+        string before = s.ComputeHash();
+
+        s.Doc.Entities.OfType<Circle>().First().Radius = 8;
+        Assert.NotEqual(before, s.ComputeHash());
+    }
+
+    [Fact]
+    public void Hash_Changes_WhenHatchSolidityOrPathCountChanges()
+    {
+        var s = NewSession(doc => doc.Entities.Add(new Hatch { IsSolid = true }));
+        string before = s.ComputeHash();
+
+        var hatch = s.Doc.Entities.OfType<Hatch>().First();
+        hatch.IsSolid = false;
+        string afterSolid = s.ComputeHash();
+        Assert.NotEqual(before, afterSolid);
+
+        hatch.Paths.Add(new Hatch.BoundaryPath());
+        Assert.NotEqual(afterSolid, s.ComputeHash());
+    }
+
     [Fact]
     public void Hash_IsStable_AcrossSaveWorkingReload_AndCaptureRestore()
     {
