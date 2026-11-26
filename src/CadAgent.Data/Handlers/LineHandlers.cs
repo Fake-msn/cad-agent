@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ACadSharp;
 using ACadSharp.Entities;
 using ACadSharp.Tables;
 using CadAgent.Core;
@@ -37,26 +38,52 @@ internal static class HandlerHelpers
         return layer;
     }
 
-    public static Entity? Find(DrawingSession s, JsonElement p)
+    /// <summary>块内编辑属 Plan-3：含 block 参数一律拒绝（fail-closed，防静默落到模型顶层）。</summary>
+    public static StepResult? RejectBlockParam(JsonElement p) =>
+        p.TryGetProperty("block", out var v) && v.ValueKind != JsonValueKind.Null
+            ? new StepResult(false, EditTargetResolver.BlockDeferredMessage, "")
+            : null;
+
+    /// <summary>
+    /// 新建实体目标集合：默认模型（历史行为不变）；space:"paper"+layout → 该布局纸面关联块
+    /// 实体集合（layout 必须存在且 IsPaperSpace，否则 fail-closed）。
+    /// </summary>
+    public static bool TryResolveAddCollection(DrawingSession s, JsonElement p,
+        out CadObjectCollection<Entity>? target, out string error)
     {
-        // handle 契约（计划 3a）：JSON 数字或十进制字符串皆可（Summarize 暴露字符串，
-        // LLM 计划编写层可直接回灌）；非法形态→null→"句柄不存在"优雅失败。
-        var hEl = p.GetProperty("handle");
-        ulong handle;
-        switch (hEl.ValueKind)
+        target = null;
+        error = "";
+        bool hasSpace = p.TryGetProperty("space", out var sp) && sp.ValueKind != JsonValueKind.Null;
+        bool hasLayout = p.TryGetProperty("layout", out var ly) && ly.ValueKind != JsonValueKind.Null;
+        if (!hasSpace && !hasLayout)
         {
-            case JsonValueKind.Number:
-                handle = hEl.GetUInt64();
-                break;
-            case JsonValueKind.String:
-                if (!ulong.TryParse(hEl.GetString(), System.Globalization.NumberStyles.Integer,
-                        System.Globalization.CultureInfo.InvariantCulture, out handle))
-                    return null;
-                break;
-            default:
-                return null;
+            target = s.Doc.Entities;
+            return true;
         }
-        return s.Doc.Entities.FirstOrDefault(e => e.Handle == handle);
+        if (hasSpace && !string.Equals(OptString(p, "space"), "paper", StringComparison.OrdinalIgnoreCase))
+        {
+            error = "space 仅支持 \"paper\"";
+            return false;
+        }
+        string? layoutName = OptString(p, "layout");
+        if (string.IsNullOrEmpty(layoutName))
+        {
+            error = "space:\"paper\" 需指定 layout";
+            return false;
+        }
+        var layout = EditTargetResolver.FindLayout(s, layoutName);
+        if (layout is null)
+        {
+            error = $"布局不存在：{layoutName}";
+            return false;
+        }
+        if (!layout.IsPaperSpace || layout.AssociatedBlock is null)
+        {
+            error = $"布局不是纸面空间：{layoutName}";
+            return false;
+        }
+        target = layout.AssociatedBlock.Entities;
+        return true;
     }
 }
 
@@ -66,13 +93,16 @@ public sealed class AddLineHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
+            return new StepResult(false, spaceError, "");
         var line = new Line
         {
             StartPoint = (XYZ)new XY(HandlerHelpers.Req(p, "x1"), HandlerHelpers.Req(p, "y1")),
             EndPoint = (XYZ)new XY(HandlerHelpers.Req(p, "x2"), HandlerHelpers.Req(p, "y2")),
             Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
         };
-        s.Doc.Entities.Add(line);
+        target!.Add(line);
         return new StepResult(true, "", line.Handle.ToString());
     }
 }
@@ -83,6 +113,9 @@ public sealed class AddTextHandler : IStepHandler
     public StepResult Apply(IDrawingSession session, JsonElement p)
     {
         var s = HandlerHelpers.AsDrawing(session);
+        if (HandlerHelpers.RejectBlockParam(p) is { } blockRejected) return blockRejected;
+        if (!HandlerHelpers.TryResolveAddCollection(s, p, out var target, out string spaceError))
+            return new StepResult(false, spaceError, "");
         var text = new TextEntity
         {
             InsertPoint = (XYZ)new XY(HandlerHelpers.Req(p, "x"), HandlerHelpers.Req(p, "y")),
@@ -90,7 +123,7 @@ public sealed class AddTextHandler : IStepHandler
             Height = HandlerHelpers.Req(p, "height"),
             Layer = HandlerHelpers.ResolveLayer(s, HandlerHelpers.OptString(p, "layer"))
         };
-        s.Doc.Entities.Add(text);
+        target!.Add(text);
         return new StepResult(true, "", text.Handle.ToString());
     }
 }
