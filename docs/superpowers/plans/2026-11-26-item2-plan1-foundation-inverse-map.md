@@ -475,6 +475,8 @@ public void Context_TwistRefusesModelMapping_AndPaperRectMatchesViewport()
 - [ ] **Step 3: 实现**
 
 ```csharp
+/// <summary>纸/视高缩放；视高不足 1e-12 → 1（退化快路径）。paperHeight≤0 时返回 0，
+/// 调用方须先经 LayoutViewportContext.IsDegenerate 拒绝（"正逆两向仍互逆"仅在不退化时成立）。</summary>
 public static double ScaleOf(double paperHeight, double viewHeight) =>
     viewHeight > 1e-12 ? paperHeight / viewHeight : 1;
 
@@ -502,14 +504,17 @@ public sealed record LayoutViewportContext(
     public bool IsDegenerate =>
         !(ViewHeight > MinViewHeight) || !(PaperWidth > 0) || !(PaperHeight > 0);
     public double Scale => IsDegenerate ? 1 : ViewportTransform.ScaleOf(PaperHeight, ViewHeight);
-    /// <summary>模型映射可用：非退化且无旋转。非矩形裁剪 ACadSharp 3.8.35 无法识别，不在此判定。</summary>
-    public bool CanMapModel => !IsDegenerate && Math.Abs(TwistRadians) < 1e-9;
+    /// <summary>模型映射可用：非退化且 |Twist| ≤ 1e-9。非矩形裁剪 ACadSharp 3.8.35 无法识别，不在此判定。</summary>
+    public bool CanMapModel => !IsDegenerate && Math.Abs(TwistRadians) <= 1e-9;
     public (double MinX, double MinY, double MaxX, double MaxY) PaperRect => (
         PaperCenter.X - PaperWidth / 2, PaperCenter.Y - PaperHeight / 2,
         PaperCenter.X + PaperWidth / 2, PaperCenter.Y + PaperHeight / 2);
 
+    /// <summary>退化视口不做映射（返回 ViewTarget，有限值）；与 Scale=1 诊断口径自洽。</summary>
     public (double X, double Y) PaperToModel((double X, double Y) paper) =>
-        ViewportTransform.PaperToModel(paper, ViewTarget, ViewHeight, PaperCenter, PaperHeight);
+        IsDegenerate
+            ? ViewTarget
+            : ViewportTransform.PaperToModel(paper, ViewTarget, ViewHeight, PaperCenter, PaperHeight);
 }
 ```
 
@@ -544,6 +549,32 @@ public void Context_TwistBoundary(double twist, bool canMap)
 {
     var ctx = new LayoutViewportContext("1", (500, 350), 1000, 700, 200, (0, 0), twist);
     Assert.Equal(canMap, ctx.CanMapModel);
+}
+
+[Fact]
+public void Context_PaperDimDegenerate_MapsToTargetFinite_ConsistentWithScale()
+{
+    var ctx = new LayoutViewportContext("1", (500, 350), 1000, 0, 200, (7, 8), 0);
+    Assert.True(ctx.IsDegenerate);
+    Assert.Equal(1, ctx.Scale);
+    Assert.Equal((7.0, 8.0), ctx.PaperToModel((500, 350))); // 退化不产 Infinity/NaN
+}
+
+[Fact]
+public void Context_NaNViewHeight_IsDegenerate_NaNTwistRefused()
+{
+    var ctx = new LayoutViewportContext("1", (500, 350), 1000, 700, double.NaN, (0, 0), 0);
+    Assert.True(ctx.IsDegenerate);
+    Assert.False(ctx.CanMapModel);
+    Assert.False(new LayoutViewportContext("1", (500, 350), 1000, 700, 200, (0, 0), double.NaN).CanMapModel);
+}
+
+[Theory]
+[InlineData(1e-12, true)]
+[InlineData(1.0000001e-12, false)]
+public void ScaleOf_Boundary(double viewHeight, bool isOne)
+{
+    Assert.Equal(isOne ? 1 : 700 / viewHeight, ViewportTransform.ScaleOf(700, viewHeight), 6);
 }
 ```
 
