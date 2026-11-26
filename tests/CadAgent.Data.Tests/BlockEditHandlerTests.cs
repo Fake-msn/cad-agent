@@ -129,6 +129,7 @@ public class BlockEditHandlerTests : IDisposable
         Assert.Contains(line, second.Block!.Entities);
         Assert.Equal(1.5, second.Block!.Entities.OfType<Line>().Single().StartPoint.X, 6);
         Assert.Equal(firstPoint.X, first.InsertPoint.X, 6);
+        s.InvalidateHash(); // 处理器直调（绕过引擎）
         Assert.NotEqual(before, s.ComputeHash());
         // 第二实例经同名块再解析到同一实体。
         var again = EditTargetResolver.Resolve(s, P(new { handle = line.Handle.ToString(), block = block.Name }));

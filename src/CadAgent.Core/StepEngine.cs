@@ -190,6 +190,8 @@ public sealed class StepEngine
             try
             {
                 result = handler.Apply(session, step.Params);
+                // 项3 §5：成功步先失效哈希缓存，再算 afterHash（否则缓存吞掉变更）。
+                if (result.Ok) (session as IHashRevision)?.InvalidateHash();
                 afterHash = session.ComputeHash();
             }
             catch (Exception ex) { result = new StepResult(false, ex.Message, ""); }

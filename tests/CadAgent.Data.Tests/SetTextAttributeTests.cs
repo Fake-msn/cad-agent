@@ -99,6 +99,7 @@ public class SetTextAttributeTests : IDisposable
         Assert.True(r.Ok, r.Error);
         Assert.Equal("纸面新字", paperText.Value);
         Assert.Empty(s.Doc.Entities); // 模型空间无写入
+        s.InvalidateHash(); // 处理器直调（绕过引擎）：须显式失效（项3 §5）
         Assert.NotEqual(before, s.ComputeHash()); // P| 行含文字值
     }
 
@@ -115,6 +116,7 @@ public class SetTextAttributeTests : IDisposable
         }));
         Assert.True(r.Ok, r.Error);
         Assert.Equal("纸面属性", attr.Value);
+        s.InvalidateHash(); // 处理器直调（绕过引擎）
         Assert.NotEqual(before, s.ComputeHash()); // P| + A| 行含属性值
     }
 
@@ -303,6 +305,7 @@ public class SetTextAttributeTests : IDisposable
         }));
         Assert.True(r.Ok, r.Error);
         Assert.Equal("纸面值", attr!.Value);
+        s.InvalidateHash(); // 处理器直调（绕过引擎）
         Assert.NotEqual(before, s.ComputeHash());
     }
 

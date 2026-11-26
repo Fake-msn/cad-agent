@@ -8,10 +8,30 @@ using CadAgent.Core;
 
 namespace CadAgent.Data;
 
-public sealed class DrawingSession : IDrawingSession
+public sealed class DrawingSession : IDrawingSession, IHashRevision
 {
     public CadDocument Doc { get; private set; }
     public string SourcePath { get; }
+
+    private long _revision;
+    private string? _hashCache;
+    private int _hashComputeCount;
+
+    /// <summary>项3 §5：内容修订号（0=载入态）；InvalidateHash/Reload/RestoreState 递增。</summary>
+    public long Revision => Interlocked.Read(ref _revision);
+
+    /// <summary>测试 seam：真实哈希计算次数（缓存命中不增）。</summary>
+    internal int HashComputeCount => Volatile.Read(ref _hashComputeCount);
+
+    /// <summary>
+    /// 声明内容已变：递增修订并清缓存。StepEngine 每个成功步自动调用；绕过引擎直接改
+    /// <see cref="Doc"/> 的调用方必须在 ComputeHash 前显式调用，否则得到旧值。
+    /// </summary>
+    public void InvalidateHash()
+    {
+        Interlocked.Increment(ref _revision);
+        _hashCache = null;
+    }
 
     private IReadOnlyList<SheetRecord>? _sheets;
     private string? _sheetsFingerprint;
@@ -160,9 +180,12 @@ public sealed class DrawingSession : IDrawingSession
     /// Excludes volatile header fields ($HANDSEED, Julian-date doubles) so the hash
     /// is stable across no-change SaveWorking/Reload cycles and reflects real
     /// content changes only. Doubles use round-trip "R" format, invariant culture.
+    /// 项3 §5：结果按修订号缓存——重复计算 O(1)；绕过引擎的变更须先 InvalidateHash（见接口契约）。
     /// </summary>
     public string ComputeHash()
     {
+        if (_hashCache is { } cached) return cached;
+        long rev = Revision;
         var sb = new StringBuilder();
         foreach (var layer in Doc.Layers.OrderBy(l => l.Name, StringComparer.Ordinal))
         {
@@ -197,7 +220,11 @@ public sealed class DrawingSession : IDrawingSession
                 ProjectEntity(sb, "B|" + block.Name, e);
             }
         }
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+        Interlocked.Increment(ref _hashComputeCount);
+        // 计算期间有失效（跨线程编辑）→ 不写缓存，避免把旧修订的哈希钉成新值。
+        if (Revision == rev) _hashCache = hash;
+        return hash;
     }
 
     private static void ProjectEntity(StringBuilder sb, string prefix, Entity e)
@@ -284,6 +311,7 @@ public sealed class DrawingSession : IDrawingSession
         Doc = LoadDxf(SourcePath).Doc; // 通知 census 丢弃：census 保持原值（见下注）
         _sheets = null; // 文档整体替换→幅面登记簿缓存失效，下次访问重建
         _sheetsFingerprint = null;
+        InvalidateHash(); // 文档整体替换→哈希缓存失效（项3 §5）
         // Unparsed census 保持原值：working DXF 无 TCH 对象/通知，重读不产生新证据（首载或 sidecar 值仍有效）。
     }
 
@@ -303,6 +331,7 @@ public sealed class DrawingSession : IDrawingSession
         Doc = reader.Read();
         _sheets = null; // undo 恢复整体替换文档→幅面登记簿缓存失效
         _sheetsFingerprint = null;
+        InvalidateHash(); // 文档整体替换→哈希缓存失效（项3 §5）
         // Unparsed census 保持原值：内存 DXF 无 TCH（undo 不改变源图未解析对象事实）。
     }
 

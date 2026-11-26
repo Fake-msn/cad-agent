@@ -43,6 +43,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
         var line = s.Doc.Layouts.First(l => l.Name == "布局1").AssociatedBlock.Entities.OfType<Line>().First();
         line.StartPoint = new XYZ(5, 0, 0);
+        s.InvalidateHash(); // 直接改 Doc：须显式失效（项3 §5）
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -58,6 +59,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
         s.Doc.BlockRecords.First(b => b.Name == "图框").Entities.OfType<Line>().First()
             .StartPoint = new XYZ(1, 1, 0);
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -74,6 +76,7 @@ public class DrawingSessionHashTests : IDisposable
         });
         string before = s.ComputeHash();
         s.Doc.Entities.OfType<Insert>().First().Attributes.First().Value = "B";
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -90,6 +93,7 @@ public class DrawingSessionHashTests : IDisposable
         });
         string before = s.ComputeHash();
         s.Doc.Entities.OfType<Insert>().First().Attributes.First().InsertPoint = new XYZ(5, 5, 0);
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -109,6 +113,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
         s.Doc.Layouts.First(l => l.Name == "布局1").AssociatedBlock.Entities
             .OfType<Insert>().First().Attributes.First().Value = "B";
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -128,9 +133,11 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
         var adef = s.Doc.BlockRecords.First(b => b.Name == "图框").Entities.OfType<AttributeDefinition>().First();
         adef.Value = "新默认";
+        s.InvalidateHash();
         string afterValue = s.ComputeHash();
         Assert.NotEqual(before, afterValue);
         adef.Height = 3.5;
+        s.InvalidateHash();
         Assert.NotEqual(afterValue, s.ComputeHash());
     }
 
@@ -151,6 +158,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
         s.Doc.BlockRecords.First(b => b.Name == "图框").Entities
             .OfType<Insert>().First().Attributes.First().Value = "B";
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -167,10 +175,12 @@ public class DrawingSessionHashTests : IDisposable
 
         var mt = s.Doc.Entities.OfType<MText>().First();
         mt.Value = "乙";
+        s.InvalidateHash();
         string afterValue = s.ComputeHash();
         Assert.NotEqual(before, afterValue);
 
         mt.InsertPoint = new XYZ(5, 2, 0);
+        s.InvalidateHash();
         Assert.NotEqual(afterValue, s.ComputeHash());
     }
 
@@ -187,6 +197,7 @@ public class DrawingSessionHashTests : IDisposable
 
         s.Doc.Layouts.First(l => l.Name == "布局1").AssociatedBlock.Entities
             .OfType<MText>().First().InsertPoint = new XYZ(20, 0, 0);
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -203,6 +214,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
 
         s.Doc.Entities.OfType<LwPolyline>().First().Vertices[1].Location = new XY(10, 5);
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -219,6 +231,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
 
         s.Doc.Entities.OfType<Polyline2D>().First().Vertices[0].Location = new XYZ(0, 7, 0);
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -231,10 +244,12 @@ public class DrawingSessionHashTests : IDisposable
 
         var arc = s.Doc.Entities.OfType<Arc>().First();
         arc.Center = new XYZ(3, 0, 0);
+        s.InvalidateHash();
         string afterCenter = s.ComputeHash();
         Assert.NotEqual(before, afterCenter);
 
         arc.Radius = 6;
+        s.InvalidateHash();
         Assert.NotEqual(afterCenter, s.ComputeHash());
     }
 
@@ -246,6 +261,7 @@ public class DrawingSessionHashTests : IDisposable
         string before = s.ComputeHash();
 
         s.Doc.Entities.OfType<Circle>().First().Radius = 8;
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -257,10 +273,12 @@ public class DrawingSessionHashTests : IDisposable
 
         var hatch = s.Doc.Entities.OfType<Hatch>().First();
         hatch.IsSolid = false;
+        s.InvalidateHash();
         string afterSolid = s.ComputeHash();
         Assert.NotEqual(before, afterSolid);
 
         hatch.Paths.Add(new Hatch.BoundaryPath());
+        s.InvalidateHash();
         Assert.NotEqual(afterSolid, s.ComputeHash());
     }
 
