@@ -160,7 +160,7 @@ public static class RenderModelBuilder
         if (layout?.AssociatedBlock is null) return Array.Empty<RenderItem>();
         var items = new List<RenderItem>();
         int skipped = 0;
-        var ctx = new EmitContext(RenderSpace.PaperSpace, null, null, null, null);
+        var ctx = new EmitContext(RenderSpace.PaperSpace, null, null, null);
         foreach (Entity e in layout.AssociatedBlock.Entities)
         {
             if (e is Viewport) continue;
@@ -172,7 +172,7 @@ public static class RenderModelBuilder
 
     /// <summary>
     /// 锁定视口框（项2 F）：视口纸面 bounds 的 4 条边线（底/右/顶/左顺序），
-    /// Space=PaperSpace、Locked=true（将来编辑锁定位：框线不可选/不可拖）、
+    /// Space=PaperSpace、Locked=true（框线**可选中**但编辑被拒——Route Locked 守卫）、
     /// Handle=SourceHandle=视口句柄（溯源到视口实体）。
     /// </summary>
     public static IReadOnlyList<RenderItem> BuildViewportFrame(Viewport vp)
@@ -321,18 +321,19 @@ public static class RenderModelBuilder
 
     /// <summary>
     /// Append 来源上下文（项2 F）：空间 + 来源句柄（不含子索引后缀，溯源用）+
-    /// 块展开路径（最内层块名 / Insert 句柄链）+ 属性标签。null=顶层实体（模型空间、无块路径）。
+    /// 块展开路径（最内层块名 / Insert 句柄链）。null=顶层实体（模型空间、无块路径）。
+    /// 属性标签不进上下文：ATTRIB 图元在 EmitAttribute 内直接携带自身上下文。
     /// </summary>
     private readonly record struct EmitContext(
         RenderSpace Space, string? SourceHandle, string? BlockName,
-        IReadOnlyList<string>? InsertChain, string? AttributeTag);
+        IReadOnlyList<string>? InsertChain);
 
     private static void Append(
         Entity e, List<RenderItem> items, ref int skipped,
         Affine t, double rotationDeg, double heightScale, uint? byBlockColor, int depth,
         string? handle = null, EmitContext? ctx = null)
     {
-        EmitContext c = ctx ?? new EmitContext(RenderSpace.ModelSpace, null, null, null, null);
+        EmitContext c = ctx ?? new EmitContext(RenderSpace.ModelSpace, null, null, null);
         // 本次调用新增图元的起点：switch 之后统一戳记（子递归已自带来源，仅补空间）。
         int startIndex = items.Count;
         string layer = e.Layer?.Name ?? "0";
@@ -479,7 +480,7 @@ public static class RenderModelBuilder
                     Append(child, items, ref skipped, composed, rot, hs, color, depth + 1,
                         handle + ":" + childIndex.ToString(CultureInfo.InvariantCulture),
                         new EmitContext(c.Space, child.Handle.ToString(CultureInfo.InvariantCulture),
-                            insert.Block.Name, chain, null));
+                            insert.Block.Name, chain));
                     childIndex++;
                 }
                 // 属性（ATTRIB）为 Insert 自身附属文本，非块内容：Handle 取 "{insert}:attr:{tag}"、
@@ -508,7 +509,7 @@ public static class RenderModelBuilder
                     Append(child, items, ref skipped, t, rotationDeg, heightScale, byBlockColor, depth + 1,
                         handle + ":" + childIndex++.ToString(CultureInfo.InvariantCulture),
                         new EmitContext(c.Space, child.Handle.ToString(CultureInfo.InvariantCulture),
-                            dim.Block.Name, chain, null));
+                            dim.Block.Name, chain));
                 break;
             }
 
@@ -550,7 +551,7 @@ public static class RenderModelBuilder
                 SourceHandle = c.SourceHandle ?? it.Handle,
                 BlockName = it.BlockName ?? c.BlockName,
                 ParentInsertChain = it.ParentInsertChain ?? c.InsertChain,
-                AttributeTag = it.AttributeTag ?? c.AttributeTag,
+                AttributeTag = it.AttributeTag,
             };
         }
     }

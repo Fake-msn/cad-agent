@@ -258,6 +258,34 @@ public class SheetSelectorHeadlessTests
     }
 
     /// <summary>
+    /// Important I2：跨空间两击——首击视口内（=模型锚点，pending 已设）、次击视口外纸面：
+    /// 不得混空间成线；pending 清除 + 行内「纸面编辑」拒绝 + 零 tx + 图元数不变。
+    /// </summary>
+    [AvaloniaFact]
+    public void LayoutSheet_LineToolCrossSpaceTwoClicks_ClearsPending_NoTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(LayoutDxf(),
+            new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
+        try
+        {
+            window.SheetSelector!.SelectedIndex = 1;
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(5, window.Canvas!.Items.Count);
+            ToolButton(window, "Line").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 500, 350); // 视口内 → 预览锚点
+            Assert.NotNull(window.Canvas.PendingPoint);
+            ClickCanvasAtWorld(window, 1200, 350); // 视口外纸面 → 次击拒绝
+            Assert.Null(window.Canvas.PendingPoint);
+            Assert.True(window.EditError!.IsVisible);
+            Assert.Contains("纸面编辑", window.EditError.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            Assert.Equal(5, window.Canvas.Items.Count); // 无新实体
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    /// <summary>
     /// Important 1：Move 增量 ÷ 视口比例（s=700/200=3.5）。纸面 (500,350) 命中视口内模型线
     /// （选中、基准=映射线首点），纸面空点 (850,350) → dx=350/3.5=+100 模型单位（模型线短，
     /// 目标点不在全长映射线上）；落盘回验 + 纸面显示位置 (850,350)-(1025,350) 回验。

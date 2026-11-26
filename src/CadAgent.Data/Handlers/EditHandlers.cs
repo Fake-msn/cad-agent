@@ -67,6 +67,13 @@ public sealed class MoveEntityHandler : IStepHandler
             {
                 var (odx, ody) = OcsDelta(insert.Normal, dx, dy);
                 insert.InsertPoint = new XYZ(insert.InsertPoint.X + odx, insert.InsertPoint.Y + ody, insert.InsertPoint.Z);
+                // ATTRIB 坐标为"已放置"坐标（父 INSERT 的 OCS 空间，项2 F 据此渲染）：
+                // 父移动而属性不动会在图面留下孤悬文字——同施父增量（Z 高程保持）。
+                foreach (AttributeEntity attr in insert.Attributes)
+                {
+                    attr.InsertPoint = new XYZ(attr.InsertPoint.X + odx, attr.InsertPoint.Y + ody, attr.InsertPoint.Z);
+                    attr.AlignmentPoint = new XYZ(attr.AlignmentPoint.X + odx, attr.AlignmentPoint.Y + ody, attr.AlignmentPoint.Z);
+                }
                 break;
             }
             case LwPolyline lw:

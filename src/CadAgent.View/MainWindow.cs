@@ -105,9 +105,6 @@ public sealed class MainWindow : Window
     /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
     private const double PickTolerancePixels = 5;
 
-    /// <summary>项2 A：锁定视口边框编辑拒绝文案（Route Locked 意图）。</summary>
-    private const string LockedFrameMessage = "视口边框只读（布图保护）";
-
     /// <summary>项2 A：Plan-1 纸面编辑未启用的行内拒绝文案（Route Paper 意图）。</summary>
     private static string PaperEditMessage(string action) =>
         $"纸面编辑将在后续切片提供；当前仅视口内可编辑模型（动作: {action}）";
@@ -2118,7 +2115,8 @@ public sealed class MainWindow : Window
         switch (route.Intent)
         {
             case EditSpaceIntent.Locked:
-                SetEditError(LockedFrameMessage);
+                // 文案单一来源 EditRouting（"视口边框只读"）；Locked 路由恒带 Reason（EditRoute 契约）。
+                SetEditError(route.Reason ?? PaperEditMessage(action));
                 return false;
             case EditSpaceIntent.Paper:
             case EditSpaceIntent.BlockChild when item.Space == RenderSpace.PaperSpace:
@@ -2417,8 +2415,8 @@ public sealed class MainWindow : Window
         }
         ACadSharp.Entities.Viewport? candidate = FindViewport(_doc, sheet.TitleAttributes.GetValueOrDefault("viewportHandle"));
         viewport = candidate is null ? null : EditRouting.ContextFrom(candidate);
-        ACadSharp.Entities.Viewport? vp = viewport is null ? null : candidate;
-        return RenderModelBuilder.ComposeLayout(_doc, sheet.LayoutName, vp);
+        // 上下文非空 ⇒ candidate 非空；退化/纸边界视口（上下文 null）不传视口给渲染（诚实降级）。
+        return RenderModelBuilder.ComposeLayout(_doc, sheet.LayoutName, viewport is null ? null : candidate);
     }
 
     /// <summary>T5：按句柄在纸空间布局关联块中查找视口实体。</summary>
