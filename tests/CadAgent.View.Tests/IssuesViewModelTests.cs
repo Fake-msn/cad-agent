@@ -665,6 +665,7 @@ public class IssuesViewModelTests
 
             // 编辑 E1 在持闸期间落地（评估之前）：被评估状态含 E1。
             f.Session.Doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            f.Session.InvalidateHash(); // 直接改 Doc：须显式失效（项3 §5）
             string hashAtEval = f.Session.ComputeHash();
             gate.Release(); // Evaluate 取闸→评估(含 E1)→同闸段取哈希→释闸→续延入队
 
@@ -674,6 +675,7 @@ public class IssuesViewModelTests
             // 编辑 E2 在评估释闸后、审计分支执行前落地（模拟并发编辑）：
             // 审计哈希必须仍为被评估状态 hashAtEval，而非 E2 之后的状态。
             f.Session.Doc.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(2, 0, 0) });
+            f.Session.InvalidateHash();
             string hashAfterEdit = f.Session.ComputeHash();
             Assert.NotEqual(hashAtEval, hashAfterEdit);
 

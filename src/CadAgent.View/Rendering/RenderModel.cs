@@ -8,6 +8,13 @@ using CSMath;
 
 namespace CadAgent.View.Rendering;
 
+/// <summary>渲染几何估算常量（绘制/命中/索引/画布叠加共用，避免多处字面量漂移）。</summary>
+public static class RenderMetrics
+{
+    /// <summary>文本宽度估算：每字符 0.6×字高（等宽近似，无字形度量；命中盒/简化条/删除线同源）。</summary>
+    public const double TextWidthPerHeight = 0.6;
+}
+
 /// <summary>Flat render primitive kinds produced by <see cref="RenderModelBuilder"/>.</summary>
 public enum RenderKind { Line, Circle, Arc, Polyline, Text, Hatch }
 

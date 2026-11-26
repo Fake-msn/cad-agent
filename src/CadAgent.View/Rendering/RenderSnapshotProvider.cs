@@ -1,11 +1,11 @@
 using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Themes.Fluent;
 using CadAgent.Data;
 using CadAgent.Data.Vision;
-using CadAgent.View.Controls;
-using CadAgent.View.ViewModels;
 
 namespace CadAgent.View.Rendering;
 
@@ -16,6 +16,9 @@ namespace CadAgent.View.Rendering;
 /// R1 平台守卫：会话已初始化平台（View.Tests headless / 生产窗口模式 Application.Current）
 /// → 复用现有平台跳过 SetupWithoutStarting；仅未初始化时（生产 headless 入口进程）才建平台。
 /// 窗口模式不受影响——守卫仅 provider 调用触发。
+/// 项3 T4：绘制不再经 DrawingCanvas（无位图缓存/计时器/交互状态），改由
+/// <see cref="SnapshotControl"/> 以 <see cref="CanvasProjection.FitView"/> + Refined 绘制器直出；
+/// 快照纯函数（同输入同像素），须 UI 线程调用（Avalonia 平台约束）。
 /// </summary>
 public sealed class RenderSnapshotProvider : IRenderSnapshot
 {
@@ -33,6 +36,41 @@ public sealed class RenderSnapshotProvider : IRenderSnapshot
     private sealed class SnapshotApp : Application
     {
         public override void Initialize() => Styles.Add(new FluentTheme());
+    }
+
+    /// <summary>
+    /// 快照专用离屏控件（项3 T4）：深色背景 + Refined 档全量绘制。
+    /// 刻意不含位图交互缓存/静止计时器/选中高亮/中心线等叠加——确定性输出。
+    /// </summary>
+    private sealed class SnapshotControl : Control
+    {
+        private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
+
+        private readonly IReadOnlyList<RenderItem> _items;
+        private readonly CanvasProjection _projection;
+        private readonly RenderItemDrawer _drawer = new();
+        private readonly PenResolver _pens = new();
+        private readonly TextCache _texts = new();
+
+        public SnapshotControl(IReadOnlyList<RenderItem> items, CanvasProjection projection)
+        {
+            _items = items;
+            _projection = projection;
+            ClipToBounds = true;
+        }
+
+        protected override Size MeasureOverride(Size availableSize) => availableSize;
+
+        public override void Render(DrawingContext context)
+        {
+            base.Render(context);
+            context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
+            _drawer.BeginFrame();
+            // 图元已按 rect 裁剪（锚点/几何相交），快照无需再 cull；无选中/高亮。
+            _drawer.Draw(context, _projection, _items, indices: null, RenderQuality.Refined,
+                _pens, _texts, selected: null, highlighted: null,
+                selectionBudgetExceeded: false, cull: false);
+        }
     }
 
     private static void EnsurePlatform()
@@ -86,14 +124,12 @@ public sealed class RenderSnapshotProvider : IRenderSnapshot
         IReadOnlyList<RenderItem> items = rect == sheet.FrameBounds
             ? RenderModelBuilder.CropToFrame(source, rect)
             : RenderModelBuilder.CropToFrameIntersect(source, rect);
-        var vm = new CanvasViewModel(items);
-        var control = new DrawingCanvas(vm);
+
+        // 投影以请求 rect 为准（世界/纸面矩形→w×h 像素，Fit 同口径：0.9 留白+居中）。
+        CanvasProjection projection = CanvasProjection.FitView(rect, w, h);
+        var control = new SnapshotControl(items, projection);
         control.Measure(new Size(w, h));
         control.Arrange(new Rect(0, 0, w, h));
-        // Fit 必须在 Arrange 之后：DrawingCanvas.OnSizeChanged 在 Arrange 期间会按图元
-        // 包围盒重 Fit（窗口交互口径），若先 Fit(rect) 会被覆盖——瓦片 rect 映射语义
-        // （世界/纸面矩形→w×h 像素）要求最终 VM 变换以请求 rect 为准（测试钉住）。
-        vm.Fit(rect, w, h);
         // R11③：using 确定性释放——RenderTargetBitmap 非托管像素面（约 19.6MB/瓦×82 瓦级）
         // 不得靠终结器延迟回收（内存峰值面）；Save 完毕即 Dispose。
         using var rtb = new RenderTargetBitmap(new PixelSize(w, h));

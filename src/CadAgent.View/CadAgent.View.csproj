@@ -27,6 +27,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="CadAgent.View.Tests" />
+    <!-- 项3 T7 性能工具（手工基线）：只读消费 SetQualityForTests/BaseRenderCount 等既有 internal seam
+         以实测「交互档失效重建」；不开新 public seam，产品可见性不变。 -->
+    <InternalsVisibleTo Include="CadAgent.PerfBaseline" />
   </ItemGroup>
 
 </Project>

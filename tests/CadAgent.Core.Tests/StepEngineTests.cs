@@ -196,4 +196,67 @@ public class StepEngineTests : IDisposable
         Assert.Equal("rollback-failed", _audit.ReadAll()[^1].Entry.Kind);
         Assert.True(_audit.VerifyChain(out _));
     }
+
+    // ---------- 项3 §5：IHashRevision 可选能力（非实现者行为逐字不变） ----------
+
+    private sealed class MutatingOkHandler : IStepHandler
+    {
+        public string Kind => "mutate";
+        public StepResult Apply(IDrawingSession s, JsonElement p)
+        {
+            ((HashCachingSession)s).Content = "v1";
+            return new(true, "", "h1");
+        }
+    }
+
+    private sealed class HashCachingSession : IDrawingSession, IHashRevision
+    {
+        private string? _cache;
+        public HashCachingSession(string path)
+        {
+            SourcePath = path;
+            File.WriteAllText(path, "v0");
+        }
+        public string Content { get; set; } = "v0";
+        public int ComputeCount { get; private set; }
+        public long Revision { get; private set; }
+        public string SourcePath { get; }
+        public void InvalidateHash() { Revision++; _cache = null; }
+        public string ComputeHash()
+        {
+            if (_cache is null) { ComputeCount++; _cache = Content; }
+            return _cache;
+        }
+        public void SaveWorking() { }
+        public void Reload() { }
+        public byte[] CaptureState() => Array.Empty<byte>();
+        public void RestoreState(byte[] state) { }
+    }
+
+    [Fact]
+    public void Run_IHashRevisionSession_InvalidatesBeforeAfterHash()
+    {
+        var session = new HashCachingSession(Path.Combine(_dir, "hash-session.dxf"));
+        var engine = new StepEngine(_audit, _snapshots,
+            new FixedIdentity(new OperatorIdentity("TEST\\drawer", Role.Draw)), new RoleChecker(),
+            new IStepHandler[] { new MutatingOkHandler() });
+
+        var result = engine.Run(Plan("mutate"), session, "s1");
+
+        Assert.True(result.Ok);
+        Assert.Equal(1, session.Revision); // 仅成功步失效一次
+        var step = Assert.Single(_audit.ReadAll(), r => r.Entry.Kind == "step");
+        Assert.Equal("v0", step.Entry.BeforeHash);
+        Assert.Equal("v1", step.Entry.AfterHash); // 失效先于 afterHash，缓存不吞变更
+    }
+
+    [Fact]
+    public void Run_NonIHashRevisionFake_Unaffected()
+    {
+        // FakeSession 未实现 IHashRevision → 引擎 cast 为 null；无缓存/无失效点，行为不变。
+        var result = _engine.Run(Plan("add-line"), _session, "s1");
+        Assert.True(result.Ok);
+        Assert.IsNotAssignableFrom<IHashRevision>(_session);
+        Assert.Equal(3, _audit.ReadAll().Count); // tx-start + step + tx-commit
+    }
 }

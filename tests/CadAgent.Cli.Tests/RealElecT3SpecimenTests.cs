@@ -17,7 +17,7 @@ namespace CadAgent.Cli.Tests;
 /// unsupported [] / unparsed 键缺如（census 0 → null → WhenWritingNull 省略）。
 ///
 /// 断言稳健口径（镜像 RealT3SpecimenTests fix wave 先例）：不赌精确总数/类数——
-/// Green 面钉 exit 0 + unsupported 0 + census 键缺如 + sidecar 不落；
+/// Green 面钉 exit 0 + unsupported 0 + census 键缺如 + sidecar 已验证空（项3 T5 起落盘）；
 /// Yellow 面钉 exit 2 + census&gt;0 + TCH_ 类存在 + TCH_EQUIPMENT 存在（电气设备类特征，
 /// 残留类整体为天正建筑专业类——跨专业根因实证，非电气专业 TCH 类）。
 ///
@@ -81,9 +81,12 @@ public class RealElecT3SpecimenTests : IDisposable
         var summary = doc.RootElement.GetProperty("summary");
         Assert.True(summary.GetProperty("Entities").GetArrayLength() > 0); // 炸开 plain 实体（实测 2565，不赌精确值）
         Assert.Equal(0, summary.GetProperty("Unknowns").GetArrayLength()); // 对象图盲区 0
-        // Green 不落 census sidecar（LoadWithCensus 仅 TotalCount>0 回写）；Load 诚实 Empty。
-        Assert.False(File.Exists(Path.Combine(_project, ".cadagent", "unparsed.json")));
-        Assert.Equal(0, UnparsedCensusStore.Load(_project, specimen).TotalCount);
+        // 项3 T5（行为变更披露）：Green 现在落 sidecar（VerifiedEmpty=true + 源 size/mtime/hash）——
+        // 此前空 census 不回写。二次打开同图信任 Empty，不重读源 DWG（R9 语义扩展）。
+        string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+        Assert.True(File.Exists(sidecar));
+        Assert.Equal(0, UnparsedCensusStore.LoadTrusted(_project, specimen, out bool verifiedEmpty).TotalCount);
+        Assert.True(verifiedEmpty); // 已验证空（信任命中）
         // 标本只读：副本字节前后一致（intake 不改源 .dwg）。
         Assert.Equal(sourceBefore, File.ReadAllBytes(specimen));
     }

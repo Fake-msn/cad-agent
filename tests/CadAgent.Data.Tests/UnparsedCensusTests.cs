@@ -50,6 +50,59 @@ public class UnparsedCensusTests
     }
 
     [Fact]
+    public void Save_TargetLocked_ReturnsFalse_NoThrow_ExistingSidecarIntact()
+    {
+        // 终审 Important 1：只读项目/目标被占用时 Save 必须尽力写（返回 false，不抛），
+        // 否则每次 Green/已验证空载入后的回写会阻断打开项目。
+        string dir = Path.Combine(Path.GetTempPath(), "census-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            var census = UnparsedCensus.FromNotifications(new[]
+            {
+                "Unlisted object with DXF name TCH_WALL has been read as an UnknownEntity",
+            });
+            Assert.True(UnparsedCensusStore.Save(dir, src, census));
+            Assert.Equal(1, UnparsedCensusStore.Load(dir, src).TotalCount);
+
+            string sidecar = Path.Combine(dir, ".cadagent", "unparsed.json");
+            using (new FileStream(sidecar, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                // 占用中：Move 抛 IOException → 吞掉并返回 false（不得冒泡阻断加载）。
+                Assert.False(UnparsedCensusStore.Save(dir, src, census));
+                // Load 同样 fail-closed 降级 Empty（损坏/不可读 sidecar 的既有语义），但仍可用。
+                Assert.Equal(0, UnparsedCensusStore.Load(dir, src).TotalCount);
+            }
+
+            // 解锁后复原：既有 sidecar 未被半截写破坏，新 Save 成功。
+            Assert.Equal(1, UnparsedCensusStore.Load(dir, src).TotalCount);
+            Assert.True(UnparsedCensusStore.Save(dir, src, census));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Save_ProjectDirUnwritable_ReturnsFalse_NoThrow()
+    {
+        // 模拟只读项目目录：<project>/.cadagent 被同名文件占据 → CreateDirectory 抛 IOException。
+        string dir = Path.Combine(Path.GetTempPath(), "census-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            File.WriteAllText(Path.Combine(dir, ".cadagent"), "occupied"); // 目录名被文件占用
+            Assert.False(UnparsedCensusStore.Save(dir, src, UnparsedCensus.Empty));
+            // 失败后仍可按源正常载入（census 不可持久化 ≠ 不能打开）。
+            Assert.Equal(0, UnparsedCensusStore.Load(dir, src).TotalCount);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+
+    [Fact]
     public void Summarize_IncludesUnparsedBriefs_SeparateFromGraphUnknowns()
     {
         // 合成 session（ctor census 参）：空 doc + census TCH_WALL×2 → Summarize().Unparsed 2 条 UnknownBrief(Handle="")

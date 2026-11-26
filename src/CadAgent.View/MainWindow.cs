@@ -267,11 +267,13 @@ public sealed class MainWindow : Window
 
         // T5：全模型渲染 + 幅面登记簿；默认首幅面（R4 sanctioned：模型幅面按框内锚点裁剪，
         // 布局幅面经 BuildViewport 纸面映射）。单幅面/无布局图纸 bounds=ModelBounds → 全保留（legacy 无感）。
+        // 项3 终审：Items/Sheets 由 MainViewModel 在加载期（LoadAsync 后台线程）构建，
+        // 此处直接消费，不在 UI 线程重复 Build。
         _title = vm.Title;
         _doc = vm.Session.Doc;
         _session = vm.Session;
-        _fullModelItems = RenderModelBuilder.Build(vm.Session);
-        _sheets = vm.Session.Sheets;
+        _fullModelItems = vm.Items;
+        _sheets = vm.Sheets;
         SheetRecord firstSheet = _sheets[0];
         _currentSheetId = firstSheet.SheetId;
         _currentSheetName = firstSheet.Name;
@@ -1099,6 +1101,10 @@ public sealed class MainWindow : Window
         Content = dock;
 
         Canvas.RenderInvalidated += OnCanvasInvalidated;
+        // 项3 T5：画布注记在 Render 末尾才产出（RenderInvalidated 早于渲染）——改由注记事件驱动
+        // 状态栏文本刷新；只改 Status 文本，绝不再触发画布重绘。窗口关闭时解绑（防事件滞留）。
+        _canvasControl.RenderNoteChanged += OnCanvasRenderNoteChanged;
+        Closed += OnWindowClosed;
         UpdateIssuesPanel();
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
@@ -1344,6 +1350,13 @@ public sealed class MainWindow : Window
 
     /// <summary>计划错误/引导文本（视图闭环 T10：ErrorMessage/填充引导，可见时非空）。</summary>
     internal TextBlock? PlanError { get; }
+
+    /// <summary>全模型渲染图元（终审 seam：应即 <see cref="MainViewModel.Items"/> 同一实例——
+    /// 证明 MainWindow 不再于 UI 线程调用 RenderModelBuilder.Build）。</summary>
+    internal IReadOnlyList<RenderItem> FullModelItemsForTests => _fullModelItems;
+
+    /// <summary>幅面登记簿（终审 seam：应即 <see cref="MainViewModel.Sheets"/> 同一实例）。</summary>
+    internal IReadOnlyList<SheetRecord> SheetsForTests => _sheets;
 
     /// <summary>
     /// 行模板：复选框（仅勾选框本体，可见性）+ 色样 + 名称（计数）。Click → Toggle。
@@ -1686,6 +1699,19 @@ public sealed class MainWindow : Window
         ReportStatus.Foreground = error ? Brushes.IndianRed : Brushes.MediumSeaGreen;
     }
 
+    /// <summary>
+    /// 画布注记变化（Render 末尾）→ 仅刷新状态栏文本（OnCanvasInvalidated 不含重绘）。
+    /// 事件在渲染过程中抛出，直接改 Text 会「render pass 内失效可视化」——编组到下一轮 UI 队列。
+    /// </summary>
+    private void OnCanvasRenderNoteChanged() => Dispatcher.UIThread.Post(OnCanvasInvalidated);
+
+    private void OnWindowClosed(object? sender, EventArgs e)
+    {
+        if (_canvasControl is not null)
+            _canvasControl.RenderNoteChanged -= OnCanvasRenderNoteChanged;
+        Closed -= OnWindowClosed;
+    }
+
     /// <summary>画布状态变化（选择/图层可见性/视图）→ 状态栏 + 复选框同步。</summary>
     private void OnCanvasInvalidated()
     {
@@ -1719,6 +1745,8 @@ public sealed class MainWindow : Window
             if (_fillIntentNote.Length > 0) status += $" | {_fillIntentNote}";
             // 天读证据：行点击定位失败提示（下一次成功定位/选中接管时清除）。
             if (_deepReadLocateNote.Length > 0) status += $" | {_deepReadLocateNote}";
+            // 项3 T5：画布状态注记（「概览」/「高亮为包围盒（图元过密）」）——LOD 降级诚实披露。
+            if (_canvasControl?.LastRenderNote is { Length: > 0 } renderNote) status += $" | {renderNote}";
             Status.Text = status;
         }
         if (LayerList is not null)

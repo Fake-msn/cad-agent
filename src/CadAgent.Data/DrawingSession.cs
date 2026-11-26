@@ -8,10 +8,37 @@ using CadAgent.Core;
 
 namespace CadAgent.Data;
 
-public sealed class DrawingSession : IDrawingSession
+public sealed class DrawingSession : IDrawingSession, IHashRevision
 {
     public CadDocument Doc { get; private set; }
     public string SourcePath { get; }
+
+    private long _revision;
+    private HashCacheEntry? _hashCache;
+    private int _hashComputeCount;
+
+    /// <summary>哈希缓存条目：不可变，带计算时捕获的修订号（命中须与当前修订相等）。</summary>
+    private sealed record HashCacheEntry(long Revision, string Hash);
+
+    /// <summary>项3 §5：内容修订号（0=载入态）；InvalidateHash/Reload/RestoreState 递增。</summary>
+    public long Revision => Interlocked.Read(ref _revision);
+
+    /// <summary>测试 seam：真实哈希计算次数（缓存命中不增）。</summary>
+    internal int HashComputeCount => Volatile.Read(ref _hashComputeCount);
+
+    /// <summary>测试 seam：写入指定修订号的缓存条目（验证陈旧条目不会被命中）。</summary>
+    internal void SeedHashCacheForTests(long revision, string hash) =>
+        Volatile.Write(ref _hashCache, new HashCacheEntry(revision, hash));
+
+    /// <summary>
+    /// 声明内容已变：递增修订并清缓存。StepEngine 每个成功步自动调用；绕过引擎直接改
+    /// <see cref="Doc"/> 的调用方必须在 ComputeHash 前显式调用，否则得到旧值。
+    /// </summary>
+    public void InvalidateHash()
+    {
+        Interlocked.Increment(ref _revision);
+        Volatile.Write(ref _hashCache, null);
+    }
 
     private IReadOnlyList<SheetRecord>? _sheets;
     private string? _sheetsFingerprint;
@@ -70,15 +97,18 @@ public sealed class DrawingSession : IDrawingSession
 
     /// <summary>
     /// 加载图纸。.dwg 首载经 DWG 通知通道重建 census；working 分支内存 DXF 无 TCH 通知，
-    /// census 优先用 <paramref name="persisted"/>（sidecar UnparsedCensusStore.Load）。
+    /// census 优先用 <paramref name="persisted"/>（sidecar UnparsedCensusStore.LoadTrusted/Load）。
     /// R9（陈旧 working 假 Green 旁路闭合）：persisted Empty/缺 + 源 .dwg 存在 → 从源 DWG
     /// 通知一次性重建 census（只取 census，doc 丢弃，working 不重写）；源缺失 → 拒绝
     /// （InvalidOperationException，无法核验完整性，不得假 Green 放行）。
     /// T3：persisted 对 .dxf 源同样生效（sidecar 注入/恢复 census；null→Empty，无 census 行为逐字不变）。
     /// R11：.dxf 源经 LoadDxf 通知通道重建 census（用户 DXF 含 TCH 防假 Green）；通知 census 非空
     /// 优先于 persisted，无通知（plain/working DXF）回退 persisted——sidecar/LoadWithCensus 自然生效。
+    /// 项3 §5.1（R9 语义扩展）：<paramref name="trustEmptySource"/>=true 表示调用方已用 sidecar v2
+    /// 验证过「源指纹未变且 census 为空」（UnparsedCensusStore.LoadTrusted）——working 分支直接信任
+    /// Empty、不重读源 DWG（源缺失亦放行）；false/缺省 → 既有 R9 fail-closed 重读源。
     /// </summary>
-    public static DrawingSession Load(string path, UnparsedCensus? persisted = null)
+    public static DrawingSession Load(string path, UnparsedCensus? persisted = null, bool trustEmptySource = false)
     {
         string ext = Path.GetExtension(path).ToLowerInvariant();
         if (ext == ".dwg")
@@ -93,6 +123,10 @@ public sealed class DrawingSession : IDrawingSession
                 var (workingDoc, _) = LoadDxf(workingPath);
                 if (persisted is { TotalCount: > 0 })
                     return new DrawingSession(workingPath, workingDoc, persisted);
+                // 项3 §5.1：sidecar v2 已验证空 census（源哈希/size/mtime 全匹配）→ 信任 Empty，
+                // 不重读源 DWG（二次打开 Green 图免 6–12s 源解析；源缺失也合法——指纹已核验过）。
+                if (trustEmptySource)
+                    return new DrawingSession(workingPath, workingDoc, UnparsedCensus.Empty);
                 // R9：persisted Empty/缺（切片前物化的陈旧 working + 新项目无 sidecar）——
                 // 此前直接 Empty 放行 = 假 Green 旁路（intake exit 0 + run tx-commit）。
                 if (!File.Exists(path))
@@ -153,9 +187,14 @@ public sealed class DrawingSession : IDrawingSession
     /// Excludes volatile header fields ($HANDSEED, Julian-date doubles) so the hash
     /// is stable across no-change SaveWorking/Reload cycles and reflects real
     /// content changes only. Doubles use round-trip "R" format, invariant culture.
+    /// 项3 §5：结果按修订号缓存——命中须条目修订 == 当前修订，重复计算 O(1)；
+    /// 绕过引擎的变更须先 InvalidateHash（见接口契约）。缓存非同步原语：正确性来自
+    /// 修订标签（计算先捕获 rev，失效后当前 rev 已变 → 陈旧条目不命中），良性竞态永不返回旧值。
     /// </summary>
     public string ComputeHash()
     {
+        long rev = Revision;
+        if (Volatile.Read(ref _hashCache) is { } cached && cached.Revision == rev) return cached.Hash;
         var sb = new StringBuilder();
         foreach (var layer in Doc.Layers.OrderBy(l => l.Name, StringComparer.Ordinal))
         {
@@ -190,7 +229,11 @@ public sealed class DrawingSession : IDrawingSession
                 ProjectEntity(sb, "B|" + block.Name, e);
             }
         }
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+        Interlocked.Increment(ref _hashComputeCount);
+        // 条目按投影前捕获的 rev 打标：若写入与失效竞态，当前 rev 已前进 → 该条目永不被命中。
+        Volatile.Write(ref _hashCache, new HashCacheEntry(rev, hash));
+        return hash;
     }
 
     private static void ProjectEntity(StringBuilder sb, string prefix, Entity e)
@@ -277,6 +320,7 @@ public sealed class DrawingSession : IDrawingSession
         Doc = LoadDxf(SourcePath).Doc; // 通知 census 丢弃：census 保持原值（见下注）
         _sheets = null; // 文档整体替换→幅面登记簿缓存失效，下次访问重建
         _sheetsFingerprint = null;
+        InvalidateHash(); // 文档整体替换→哈希缓存失效（项3 §5）
         // Unparsed census 保持原值：working DXF 无 TCH 对象/通知，重读不产生新证据（首载或 sidecar 值仍有效）。
     }
 
@@ -296,6 +340,7 @@ public sealed class DrawingSession : IDrawingSession
         Doc = reader.Read();
         _sheets = null; // undo 恢复整体替换文档→幅面登记簿缓存失效
         _sheetsFingerprint = null;
+        InvalidateHash(); // 文档整体替换→哈希缓存失效（项3 §5）
         // Unparsed census 保持原值：内存 DXF 无 TCH（undo 不改变源图未解析对象事实）。
     }
 

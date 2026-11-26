@@ -529,6 +529,89 @@ public class UnparsedGateCliTests : IDisposable
     }
 
     [Fact]
+    public void Intake_GreenSecondRun_TrustedEmptyCensus_NoSourceRereadNoSidecarRewrite()
+    {
+        // 项3 T5：首载落「已验证空」sidecar（VerifiedEmpty + 源 size/mtime/hash）；二次 intake
+        // 信任 Empty → 不重读源 DWG（R9 语义扩展），且不重写 sidecar（信任命中免写）。
+        // 可观测性：sidecar mtime 回溯 1h——若退回 R9（源重读后 Save）会把 mtime 刷新为当前。
+        string dwg = CreateProjectDwg("green-trust.dwg");
+        var (firstCode, firstOut, _) = Run("intake", dwg);
+        Assert.Equal(0, firstCode); // 合成源无 TCH → Green，working 已物化
+        string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+        Assert.True(File.Exists(sidecar));
+        Assert.Equal(0, UnparsedCensusStore.LoadTrusted(_project, dwg, out bool verifiedEmpty).TotalCount);
+        Assert.True(verifiedEmpty);
+        DateTime stamp = DateTime.UtcNow.AddHours(-1);
+        File.SetLastWriteTimeUtc(sidecar, stamp);
+        byte[] before = File.ReadAllBytes(sidecar);
+
+        var (secondCode, secondOut, secondErr) = Run("intake", dwg);
+
+        Assert.Equal(0, secondCode);
+        Assert.Equal("", secondErr);
+        Assert.Equal(firstOut, secondOut); // Green 输出逐字一致
+        Assert.Equal(before, File.ReadAllBytes(sidecar));
+        // 信任空 → 未重写（固定时间戳；容忍文件系统取整，且不允许被刷新为「现在」）。
+        DateTime after = File.GetLastWriteTimeUtc(sidecar);
+        Assert.True(after >= stamp && after < stamp.AddSeconds(2), $"sidecar mtime={after:O}");
+    }
+
+    [Fact]
+    public void Intake_VerifiedEmptySourceTouched_TrustInvalidated_SidecarRewrittenByR9()
+    {
+        // 项3 T5：调用层源变更失效——已验证空 sidecar + 源 mtime 变 → LoadTrusted 不信任
+        // → intake 走 R9（源存在：重读源重建 census）→ 回写 sidecar（mtime 刷新，证明走了 R9 路径）；
+        // 合成源无 TCH → census 仍空，输出仍 Green。
+        string dwg = CreateProjectDwg("trust-stale.dwg");
+        var (firstCode, firstOut, _) = Run("intake", dwg);
+        Assert.Equal(0, firstCode);
+        string sidecar = Path.Combine(_project, ".cadagent", "unparsed.json");
+        Assert.True(UnparsedCensusStore.LoadTrusted(_project, dwg, out bool trusted) is { TotalCount: 0 } && trusted);
+        DateTime stamp = DateTime.UtcNow.AddHours(-1);
+        File.SetLastWriteTimeUtc(sidecar, stamp);
+        byte[] before = File.ReadAllBytes(sidecar);
+
+        File.SetLastWriteTimeUtc(dwg, File.GetLastWriteTimeUtc(dwg).AddMinutes(1)); // 源指纹变化
+        Assert.Equal(0, UnparsedCensusStore.LoadTrusted(_project, dwg, out bool afterTouch).TotalCount);
+        Assert.False(afterTouch); // 指纹不符 → 不信任
+
+        var (secondCode, secondOut, secondErr) = Run("intake", dwg);
+
+        Assert.Equal(0, secondCode);
+        Assert.Equal("", secondErr);
+        Assert.Equal(firstOut, secondOut); // census 仍空 → Green 输出逐字一致
+        Assert.NotEqual(stamp, File.GetLastWriteTimeUtc(sidecar)); // 回写发生（R9 路径已执行）
+        Assert.NotEqual(before, File.ReadAllBytes(sidecar)); // 新指纹（mtime）落盘
+        Assert.True(UnparsedCensusStore.LoadTrusted(_project, dwg, out bool retrusted) is { TotalCount: 0 } && retrusted);
+    }
+
+    [SkippableFact]
+    public void Intake_VerifiedEmptyThenRealYellowSourceSwap_TrustInvalidated_Yellow()
+    {
+        // 真实 TCH-DWG 换源（可选实证；未提供标本时跳过）：已验证空 sidecar 对上 plain 源，
+        // 同路径换入真实天正 Yellow 源（size/mtime/hash 全变）→ 信任失效 → R9 重读源 → Yellow。
+        // 合成 TCH DWG 写入器不支持，故本用例依赖环境变量 CADAGENT_YELLOW_DWG（如法院 Yellow 标本）。
+        string? specimen = Environment.GetEnvironmentVariable("CADAGENT_YELLOW_DWG");
+        Skip.If(string.IsNullOrWhiteSpace(specimen) || !File.Exists(specimen),
+            "未设置 CADAGENT_YELLOW_DWG（真实天正 Yellow .dwg 路径）→ 跳过");
+        byte[] specimenBefore = File.ReadAllBytes(specimen!);
+        string dwg = CreateProjectDwg("swap.dwg");
+        var (plainCode, _, _) = Run("intake", dwg);
+        Assert.Equal(0, plainCode);
+        Assert.True(UnparsedCensusStore.LoadTrusted(_project, dwg, out bool trusted) is { TotalCount: 0 } && trusted);
+
+        File.Copy(specimen!, dwg, overwrite: true); // 同路径换入真实 Yellow 源
+
+        Assert.Equal(0, UnparsedCensusStore.LoadTrusted(_project, dwg, out bool afterSwap).TotalCount);
+        Assert.False(afterSwap); // 指纹不符 → 不得信任
+        var (code, stdout, _) = Run("intake", dwg);
+        Assert.Equal(2, code);
+        using var doc = JsonDocument.Parse(stdout);
+        Assert.Equal("Yellow", doc.RootElement.GetProperty("level").GetString());
+        Assert.Equal(specimenBefore, File.ReadAllBytes(specimen!)); // 标本只读（副本侧换源）
+    }
+
+    [Fact]
     public void Rollback_ValidSidecarCensus_DoesNotRereadSource()
     {
         // R10 Minor#2：rollback 裸 Load → LoadWithCensus——sidecar 有效（路径+源哈希匹配）

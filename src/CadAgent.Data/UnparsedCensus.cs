@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -43,12 +44,28 @@ public sealed record UnparsedCensus(IReadOnlyList<UnparsedClassBrief> Classes)
 
 /// <summary>
 /// census sidecar（.cadagent/unparsed.json）：working copy 丢失 TCH 对象后二次加载仍可见。
+/// v2（项3 §5.1）：增 SourceSize/SourceMtimeUtc/VerifiedEmpty——空 census 的「已验证」
+/// 指纹（源哈希+大小+mtime 全匹配才信任），命中的 working 载入不重读源 DWG（R9 语义扩展）。
+/// 旧 JSON 缺新字段 → 默认 false/0 → 不信任（安全回退 R9）。
 /// 已知限制（单文件多源互斥）：一个项目仅一份 sidecar——第二源 Save 覆盖第一源，
 /// Load 靠 SourcePath+SourceHash 匹配诚实返回 Empty；多源场景 census 仅最近源有效。
+/// <para>
+/// <b>安全边界（明示）</b>：sidecar 是本地普通文件，任何本地进程均可改写；「已验证空」
+/// 只是免重读源的性能捷径，<b>不是</b>安全边界——伪造它（含 Producer/指纹）会让 Yellow
+/// 源冒充 Green。引擎/版本号（sidecar 的 Producer 字段）亦未签名，仅作可观测线索。
+/// 完整校验仍需源 DWG 解析（R9）或外部可信存证。
+/// </para>
 /// </summary>
 public static class UnparsedCensusStore
 {
-    private sealed record Sidecar(string SourcePath, string SourceHash, IReadOnlyList<UnparsedClassBrief> Classes);
+    private sealed record Sidecar(string SourcePath, string SourceHash, IReadOnlyList<UnparsedClassBrief> Classes,
+        long SourceSize = 0, DateTime SourceMtimeUtc = default, bool VerifiedEmpty = false, string? Producer = null);
+
+    /// <summary>写入侧车标（"CadAgent/&lt;版本&gt;"）：仅可观测；载入忽略，不参与信任判定。</summary>
+    private static readonly string ProducerId =
+        "CadAgent/" + (typeof(UnparsedCensusStore).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(UnparsedCensusStore).Assembly.GetName().Version?.ToString() ?? "unknown");
 
     private static string SidecarPath(string projectDir) =>
         Path.Combine(projectDir, ".cadagent", "unparsed.json");
@@ -76,15 +93,95 @@ public static class UnparsedCensusStore
         catch { return UnparsedCensus.Empty; } // 损坏 sidecar 降级 Empty（闸口另有图内 Unknowns 兜底）
     }
 
-    public static void Save(string projectDir, string sourcePath, UnparsedCensus census)
+    /// <summary>
+    /// 信任载入（v2）：路径 + 源哈希 + size + mtime 全匹配才算命中；<paramref name="verifiedEmpty"/>
+    /// 仅在 VerifiedEmpty=true 且 census 为空且全匹配时为 true（调用方据此跳过源 DWG 重读）。
+    /// 损坏/不匹配 → Empty + false（既有 fail-closed 语义：调用方回退 R9 重建）。
+    /// 旧 v1 sidecar（无 size/mtime）hash 匹配仍返回其 census（Load 行为不变），但不构成「已验证空」。
+    /// Producer 仅记录、载入忽略（不参与信任判定）。
+    /// </summary>
+    public static UnparsedCensus LoadTrusted(string projectDir, string sourcePath, out bool verifiedEmpty)
     {
+        verifiedEmpty = false;
         string p = SidecarPath(projectDir);
-        Directory.CreateDirectory(Path.GetDirectoryName(p)!);
-        var sc = new Sidecar(Path.GetFullPath(sourcePath), HashOf(sourcePath), census.Classes);
-        // 原子写（T3 闭合 T1 deferred minor，对齐 SaveWorking 约定）：先写 tmp 再 Move——
-        // 写中途崩溃不损既有 sidecar（census 证据不因半截 JSON 降级 Empty）。
-        string tmp = p + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(sc));
-        File.Move(tmp, p, overwrite: true);
+        if (!File.Exists(p) || !File.Exists(sourcePath)) return UnparsedCensus.Empty;
+        try
+        {
+            var sc = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(p));
+            if (sc == null || sc.SourcePath != Path.GetFullPath(sourcePath)) return UnparsedCensus.Empty;
+
+            var fi = new FileInfo(sourcePath);
+            bool sizeMtimeMatch = sc.SourceSize == fi.Length && sc.SourceMtimeUtc == fi.LastWriteTimeUtc;
+            // 空 census + 指纹不符：信任必失败，无需付源哈希成本（调用方回退 R9 重读源）。
+            if (!sizeMtimeMatch && (sc.Classes is null || sc.Classes.Count == 0)) return UnparsedCensus.Empty;
+
+            if (sc.SourceHash != HashOf(sourcePath) || sc.Classes == null || sc.Classes.Any(c => c.Count < 0))
+                return UnparsedCensus.Empty;
+            var census = new UnparsedCensus(sc.Classes);
+            verifiedEmpty = sc.VerifiedEmpty && census.TotalCount == 0 && sizeMtimeMatch;
+            return census;
+        }
+        catch { return UnparsedCensus.Empty; } // 损坏 sidecar 降级 Empty（闸口另有图内 Unknowns 兜底）
+    }
+
+    /// <summary>
+    /// 写 sidecar（幂等复写）：VerifiedEmpty = 本次 census 来自源且为空。
+    /// <para>
+    /// <b>尽力写（best-effort）</b>：调用方在每次 Green/已验证空载入后回写，若项目目录只读、
+    /// sidecar 被占用或路径不支持 → 返回 false 且不抛出（sidecar 只是性能证据，不得阻断
+    /// 打开只读项目；本次会话内 census 仍由 <see cref="UnparsedCensus"/> 正常使用）。
+    /// 仅吞 IO 类异常（IOException/UnauthorizedAccessException/NotSupportedException）；
+    /// OutOfMemory 等非 IO 异常照常传播。
+    /// </para>
+    /// 已知窗口（明示不闭合）：size/mtime/hash 取自本次 Save 时刻的源文件，而 census 来自
+    /// 之前的 Load——源若恰在两者之间被换图，旧 census 会挂到新指纹上；窗口极短，彻底闭合
+    /// 需 Load 回传载入时指纹（超出本切片）。
+    /// </summary>
+    /// <returns>true=已落盘；false=尽力写失败（权限/占用/不支持），sidecar 保持原状。</returns>
+    public static bool Save(string projectDir, string sourcePath, UnparsedCensus census)
+    {
+        try
+        {
+            string p = SidecarPath(projectDir);
+            string dir = Path.GetDirectoryName(p)!;
+            Directory.CreateDirectory(dir);
+            CleanupOrphanTemps(dir);
+            // 指纹一次取得（同一次 Save 内 size/mtime/hash 不各读一遍源）。
+            var fi = new FileInfo(sourcePath);
+            long size = fi.Length;
+            DateTime mtime = fi.LastWriteTimeUtc;
+            string hash = HashOf(sourcePath);
+            // VerifiedEmpty = 本次 census 来自源（首载或 R9 重建）并为空 → 下次载入可信任 Empty。
+            var sc = new Sidecar(Path.GetFullPath(sourcePath), hash, census.Classes, size, mtime,
+                census.TotalCount == 0, ProducerId);
+            // 原子写（T3 闭合 T1 deferred minor，对齐 SaveWorking 约定）：先写 tmp 再 Move——
+            // 写中途崩溃不损既有 sidecar（census 证据不因半截 JSON 降级 Empty）。
+            // tmp 名唯一：并发写同一项目（测试并行/多进程）不互踩临时文件。
+            string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(sc));
+            File.Move(tmp, p, overwrite: true);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            // 只读项目/文件被占用/路径不支持：sidecar 不可写不是加载失败（R9 信任语义不变，
+            // 下次打开仍会 LoadTrusted 失配 → 回退重读源）。OOM 等不在此列。
+            return false;
+        }
+    }
+
+    /// <summary>尽力清理崩溃遗留的写临时文件（&gt;1 天）：失败不影响保存。</summary>
+    private static void CleanupOrphanTemps(string dir)
+    {
+        try
+        {
+            DateTime cutoff = DateTime.UtcNow.AddDays(-1);
+            foreach (string orphan in Directory.EnumerateFiles(dir, "unparsed.json.*.tmp"))
+                if (File.GetLastWriteTimeUtc(orphan) < cutoff) File.Delete(orphan);
+        }
+        catch
+        {
+            // 清理属尽力而为（权限/占用/枚举竞态）：不得因清理失败阻断 sidecar 写入。
+        }
     }
 }

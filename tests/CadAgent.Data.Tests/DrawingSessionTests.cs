@@ -65,6 +65,7 @@ public class DrawingSessionTests : IDisposable
         var session = DrawingSession.Load(_path);
         string before = session.ComputeHash();
         session.Doc.Entities.Add(new Line { StartPoint = (XYZ)new XY(9, 9), EndPoint = (XYZ)new XY(10, 10) });
+        session.InvalidateHash(); // 直接改 Doc：须显式失效（项3 §5）
         Assert.NotEqual(before, session.ComputeHash());
     }
 

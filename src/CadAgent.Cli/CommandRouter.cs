@@ -100,9 +100,10 @@ public static partial class CommandRouter
     /// <summary>
     /// 统一读图 + census sidecar 接线（防假 Green T3）：intake/run/skill run/agent/repl/export
     /// 修改消费点 + rollback/check/review 只读/撤回消费点共用（T5 顺手修②等价一致性）。
-    /// persisted=Store.Load → DrawingSession.Load(path, persisted) → census 非空回写（原子写）。
+    /// persisted=Store.LoadTrusted → DrawingSession.Load(path, persisted, verifiedEmpty) →
+    /// 未信任且源在 → 总是回写（含空 census：VerifiedEmpty/size/mtime，二次打开免重读源 DWG）。
     /// R9：persisted Empty/缺 + 源 .dwg 在 → Load 从源通知重建 census（此处回写 sidecar）；
-    /// 源缺失 → Load 抛 InvalidOperationException（各消费点既有 catch/LoadOrReject 留痕拒绝）。
+    /// 源缺失且未信任 → Load 抛 InvalidOperationException（各消费点既有 catch/LoadOrReject 留痕拒绝）。
     /// agentDir 约定 = project/.cadagent（Run 唯一装配点），sidecar 以 projectDir 键控。
     /// 已知限制（T1 单文件多源互斥）：第二源 Save 覆盖第一源，Load 靠 SourcePath 匹配诚实
     /// Empty——多源场景 census 仅最近源有效（见 UnparsedCensusStore 注释）。
@@ -110,10 +111,12 @@ public static partial class CommandRouter
     private static DrawingSession LoadWithCensus(string drawingPath, string agentDir)
     {
         string projectDir = Path.GetDirectoryName(Path.GetFullPath(agentDir))!;
-        var persisted = UnparsedCensusStore.Load(projectDir, drawingPath);
-        var session = DrawingSession.Load(drawingPath, persisted);
-        if (session.Unparsed.TotalCount > 0)
-            UnparsedCensusStore.Save(projectDir, drawingPath, session.Unparsed);
+        var persisted = UnparsedCensusStore.LoadTrusted(projectDir, drawingPath, out bool verifiedEmpty);
+        var session = DrawingSession.Load(drawingPath, persisted, verifiedEmpty);
+        // 已信任空 → 不重写（指纹未变，避免每命令重写 sidecar）；否则源在即回写（含空 census）。
+        // 尽力写：只读项目目录 → Save 返回 false（不抛），本次会话 census 仍可用。
+        if (!verifiedEmpty && File.Exists(drawingPath))
+            _ = UnparsedCensusStore.Save(projectDir, drawingPath, session.Unparsed);
         return session;
     }
 

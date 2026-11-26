@@ -30,6 +30,7 @@ public class InsertHashProjectionTests : IDisposable
         var s = DrawingSession.Load(_path);
         string before = s.ComputeHash();
         FirstInsert(s).InsertPoint = (XYZ)new XY(200, 100);
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
     }
 
@@ -40,9 +41,11 @@ public class InsertHashProjectionTests : IDisposable
         string before = s.ComputeHash();
         var ins = FirstInsert(s);
         ins.XScale = 2.0;
+        s.InvalidateHash();
         Assert.NotEqual(before, s.ComputeHash());
         string mid = s.ComputeHash();
         ins.Rotation = Math.PI / 4;
+        s.InvalidateHash();
         Assert.NotEqual(mid, s.ComputeHash());
     }
 
