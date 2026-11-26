@@ -15,7 +15,8 @@ namespace CadAgent.View.Controls;
 /// 变换/命中全部委托 VM（WorldToScreen/ScreenToWorld/HitTest）。
 /// 项3 T3 渲染顺序：基元（命中缓存 → blit 缓存位图；否则重建）→ 中心线/预览等只读叠加；
 /// 选中/高亮叠加实时绘制（不烘焙，受 §3.2 预算）；diff 模式直绘并绕过缓存。
-/// 交互期（滚轮/中键拖动）Quality=Interactive，静止 150ms 后 Refined 重建缓存（两阶段）。
+/// 交互期（滚轮/中键拖动/编辑工具点击）Quality=Interactive，静止 150ms 后 Refined 重建缓存（两阶段）；
+/// 交互期缩放复用旧位图（按比例变换），平移在 128px 外扩内只做 blit，越界/失效重建。
 /// 指针：滚轮→ZoomAt（光标锚点）；中键拖拽→PanBy（屏幕增量）；左键→ScreenToWorld
 /// →T9 工具拦截（ToolClickHandler，MainWindow 按 ActiveTool 路由）→未消费则
 /// HitTest（5px 容差换算世界单位）→Select。选中图元黄色 2px 高亮（文本黄色加粗）。
@@ -32,8 +33,8 @@ public sealed class DrawingCanvas : Control
     /// <summary>位图缓存四周外扩（DIP；平移超出即重建）。</summary>
     private const double CacheMargin = 128;
 
-    /// <summary>交互静止多久后回到 Refined 精绘（毫秒）。</summary>
-    private const double IdleRefineMs = 150;
+    /// <summary>交互静止多久后回到 Refined 精绘（毫秒；可经 <see cref="IdleRefineMs"/> 覆盖）。</summary>
+    private const int DefaultIdleRefineMs = 150;
 
     private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
 
@@ -75,10 +76,12 @@ public sealed class DrawingCanvas : Control
     private double _cacheDpi = 1;
     private int _cacheHiddenHash;
     private RenderQuality _cacheQuality = RenderQuality.Refined;
+    private (double MinX, double MinY, double OffsetX, double OffsetY) _cacheOrigin;
 
     // 两阶段交互：交互标记 + 静止计时器（150ms 后 Refined 重建缓存）。
+    // 截止时刻用 Environment.TickCount64（单调钟；墙钟回拨不会提前/推迟精绘）。
     private bool _interacting;
-    private DateTime _interactionDeadline;
+    private long _interactionUntil;
     private DispatcherTimer? _idleTimer;
 
     /// <summary>T9：光标屏幕位置（仅 PendingPoint 存在时跟踪，预览橡皮筋用）。</summary>
@@ -107,7 +110,10 @@ public sealed class DrawingCanvas : Control
     {
         ViewModel.RenderInvalidated -= InvalidateVisual;
         StopIdleTimer();
+        // 单缓存：脱离即释放位图与锚点（不跨树/跨快照复用陈旧位图），重挂后按需重建。
         DisposeCache();
+        _interacting = false;
+        Quality = RenderQuality.Refined;
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -135,6 +141,18 @@ public sealed class DrawingCanvas : Control
 
     /// <summary>测试 seam：同步走「静止 → Refined 重建缓存」路径（与计时器到点同一实现）。</summary>
     internal void ForceRefinedForTests() => RefineNow();
+
+    /// <summary>静止精绘延迟（毫秒）；测试置 0 → 不装真实计时器（交互行为仍可验）。</summary>
+    internal int IdleRefineMs { get; set; } = DefaultIdleRefineMs;
+
+    /// <summary>测试 seam：静止计时器是否在跑（RefineNow/detach/Close 后须为 false）。</summary>
+    internal bool HasIdleTimer => _idleTimer is not null;
+
+    /// <summary>测试 seam：是否驻留缓存位图（未挂树/直绘/diff 路径须为 false）。</summary>
+    internal bool HasCacheBitmap => _cacheBitmap is not null;
+
+    /// <summary>测试 seam：覆盖渲染缩放（headless 无 DPI 控制）；null → 平台值。</summary>
+    internal double? RenderScalingForTests { get; set; }
 
     public override void Render(DrawingContext context)
     {
@@ -274,7 +292,8 @@ public sealed class DrawingCanvas : Control
         && Bounds.Width > 0 && Bounds.Height > 0
         && projection.ViewportW > 0 && projection.ViewportH > 0;
 
-    private double CurrentRenderScaling => TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
+    private double CurrentRenderScaling =>
+        RenderScalingForTests ?? TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
 
     /// <summary>
     /// 缓存路径：结构键（items 引用/尺寸/DPI/隐藏层）→ 平移复用；缩放变化在交互期缩放旧图；
@@ -296,7 +315,8 @@ public sealed class DrawingCanvas : Control
         {
             // 交互期质量档变化不重建（沿用已烘焙的 Refined 位图）；静止后按质量档重建。
             bool qualitySame = _cacheQuality == Quality;
-            if ((qualitySame || _interacting) && Math.Abs(dx) <= CacheMargin && Math.Abs(dy) <= CacheMargin)
+            if ((qualitySame || _interacting)
+                && Math.Abs(dx) <= CacheMargin + 1e-6 && Math.Abs(dy) <= CacheMargin + 1e-6)
             {
                 BlitCache(context, projection, scaled: false);
                 return true;
@@ -319,7 +339,9 @@ public sealed class DrawingCanvas : Control
         && _cacheBounds == new Size(Bounds.Width, Bounds.Height)
         && _cacheViewport == new Size(projection.ViewportW, projection.ViewportH)
         && Math.Abs(_cacheDpi - CurrentRenderScaling) <= 1e-9
-        && _cacheHiddenHash == HiddenHash();
+        && _cacheHiddenHash == HiddenHash()
+        // 原点（世界 min + 视口固定偏移）同属缓存 key：Fit/偏移变化即失效；Pan 另以锚点复用。
+        && _cacheOrigin == (projection.MinX, projection.MinY, projection.OffsetX, projection.OffsetY);
 
     /// <summary>隐藏层集合的内容哈希（排序后聚合，集合增删即失效）。</summary>
     private int HiddenHash()
@@ -353,10 +375,12 @@ public sealed class DrawingCanvas : Control
         layer.Measure(logical);
         layer.Arrange(new Rect(logical));
 
+        // 先释放旧位图再渲染新层：任一时刻只驻留一份缓存（峰值仍为 2×：Skia 渲染目标内部
+        // 可能再分配同尺寸表面；DPI=2 时缓存像素约为单屏设备像素的 200%）。
+        DisposeCache();
         var bitmap = new RenderTargetBitmap(pixelSize, new Vector(96 * dpi, 96 * dpi));
         bitmap.Render(layer);
 
-        _cacheBitmap?.Dispose(); // 单缓存：重建即替换
         _cacheBitmap = bitmap;
         _cacheItems = ViewModel.Items;
         _cacheScale = projection.Scale;
@@ -367,6 +391,7 @@ public sealed class DrawingCanvas : Control
         _cacheDpi = dpi;
         _cacheHiddenHash = HiddenHash();
         _cacheQuality = Quality;
+        _cacheOrigin = (projection.MinX, projection.MinY, projection.OffsetX, projection.OffsetY);
         BaseRenderCount++;
     }
 
@@ -377,10 +402,12 @@ public sealed class DrawingCanvas : Control
     private void BlitCache(DrawingContext context, CanvasProjection projection, bool scaled)
     {
         if (_cacheBitmap is null) return;
-        double a = projection.ViewportH - projection.OffsetY;
         double f = scaled ? projection.Scale / _cacheScale : 1;
-        double tx = projection.PanX + projection.OffsetX - f * (CacheMargin + _cachePan.X + projection.OffsetX);
-        double ty = a - f * (a + CacheMargin - _cachePan.Y) - projection.PanY;
+        // 源项取重建时刻的原点/锚点（位图 0,0 的世界→屏幕基准），目标用当前平移/缩放。
+        double sourceX = CacheMargin + _cachePan.X + _cacheOrigin.OffsetX;
+        double sourceY = _cacheViewport.Height - _cacheOrigin.OffsetY + CacheMargin - _cachePan.Y;
+        double tx = projection.PanX + projection.OffsetX - f * sourceX;
+        double ty = projection.ViewportH - projection.OffsetY - projection.PanY - f * sourceY;
         var dest = new Rect(0, 0, _cacheLogicalSize.Width, _cacheLogicalSize.Height);
         var options = new RenderOptions
         {
@@ -406,7 +433,8 @@ public sealed class DrawingCanvas : Control
     {
         _interacting = true;
         Quality = RenderQuality.Interactive;
-        _interactionDeadline = DateTime.UtcNow.AddMilliseconds(IdleRefineMs);
+        _interactionUntil = Environment.TickCount64 + IdleRefineMs;
+        if (IdleRefineMs <= 0) return; // 测试：不装真实计时器（ForceRefinedForTests 驱动精绘）
         if (_idleTimer is null)
         {
             _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(IdleRefineMs) };
@@ -419,21 +447,22 @@ public sealed class DrawingCanvas : Control
 
     private void OnIdleTick(object? sender, EventArgs e)
     {
-        TimeSpan remaining = _interactionDeadline - DateTime.UtcNow;
-        if (remaining > TimeSpan.Zero)
+        long remaining = _interactionUntil - Environment.TickCount64;
+        if (remaining > 0)
         {
             _idleTimer!.Stop();
-            _idleTimer.Interval = remaining; // 计时器早触发 → 补足剩余静止时间
+            _idleTimer.Interval = TimeSpan.FromMilliseconds(remaining); // 提前触发 → 补足静止时间
             _idleTimer.Start();
             return;
         }
-        _idleTimer!.Stop();
+        StopIdleTimer();
         RefineNow();
     }
 
-    /// <summary>静止精绘：回 Refined、立即重建缓存（不等待下一帧）、请求重绘。</summary>
+    /// <summary>静止精绘：先停表（不得再触发一次精绘）、回 Refined、立即重建缓存并请求重绘。</summary>
     private void RefineNow()
     {
+        StopIdleTimer();
         _interacting = false;
         Quality = RenderQuality.Refined;
         if (_cacheBitmap is not null && Bounds.Width > 0 && Bounds.Height > 0)
@@ -559,6 +588,9 @@ public sealed class DrawingCanvas : Control
         }
         else if (point.Properties.IsLeftButtonPressed)
         {
+            // 编辑工具点击同属交互（brief：滚轮/中键拖动/工具点击触发）——先切交互档，
+            // 避免点击瞬间同步重建整幅基元缓存；静止 150ms 后精绘。
+            if (ViewModel.ToolClickHandler is not null) BeginInteraction();
             (double wx, double wy) = ViewModel.ScreenToWorld(point.Position.X, point.Position.Y);
             // T9：工具点击拦截（MainWindow 按 ActiveTool 路由）；未消费 → 默认选择。
             if (ViewModel.ToolClickHandler is not { } handler || !handler(wx, wy))

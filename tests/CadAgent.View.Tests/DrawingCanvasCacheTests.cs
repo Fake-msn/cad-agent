@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
@@ -15,7 +16,7 @@ namespace CadAgent.View.Tests;
 /// <summary>
 /// 项3 Task 3 headless coverage: 位图平移缓存 + 两阶段精绘。
 /// 真实 Skia 帧（UseHeadlessDrawing=false）像素对比；计数 seam 判定缓存是否复用；
-/// 交互计时器不依赖真实 150ms（ForceRefinedForTests 同步走同一路径）。
+/// 交互计时器不依赖真实 150ms（ForceRefinedForTests 同步走同一路径；缩放测试置 IdleRefineMs=0）。
 /// </summary>
 public class DrawingCanvasCacheTests
 {
@@ -83,6 +84,23 @@ public class DrawingCanvasCacheTests
                 int g = Read(frame, fb, x + dx, y + dy, 1);
                 int b = Read(frame, fb, x + dx, y + dy, 2);
                 best = Math.Max(best, Math.Min(r, g) - b);
+            }
+        return best;
+    }
+
+    /// <summary>青色得分 = max(5×5 内 min(G,B) - R)：中心线青 ≈229，白/灰/深色 ≈0。</summary>
+    private static int CyanScore(WriteableBitmap frame, int x, int y, int radius = 2)
+    {
+        using ILockedFramebuffer fb = frame.Lock();
+        int best = int.MinValue;
+        for (int dy = -radius; dy <= radius; dy++)
+            for (int dx = -radius; dx <= radius; dx++)
+            {
+                if (!InBounds(fb, x + dx, y + dy)) continue;
+                int r = Read(frame, fb, x + dx, y + dy, 0);
+                int g = Read(frame, fb, x + dx, y + dy, 1);
+                int b = Read(frame, fb, x + dx, y + dy, 2);
+                best = Math.Max(best, Math.Min(g, b) - r);
             }
         return best;
     }
@@ -212,12 +230,59 @@ public class DrawingCanvasCacheTests
         finally { window.Close(); }
     }
 
+    [AvaloniaFact]
+    public void Cache_PanAtMarginBoundary_128Reuses_129Rebuilds()
+    {
+        var line = Line(0, 0, 10, 0);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { line }, 200, 200);
+        try
+        {
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+
+            vm.PanBy(0, 128); // 恰好等于外扩边距 → 仍在缓存内
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+
+            vm.PanBy(0, 1); // 129 > 128 → 越界重建
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.True(canvas.BaseRenderCount > baseline, "超出 128px 外扩 1px 即须重建");
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 3a. DPI 变化失效 ----
+
+    [AvaloniaFact]
+    public void Cache_RenderScalingChange_Rebuilds()
+    {
+        (Window window, DrawingCanvas canvas, _) = Show(NormalItems());
+        try
+        {
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+            Assert.True(canvas.HasCacheBitmap, "首帧须驻留缓存位图");
+
+            canvas.RenderScalingForTests = 2; // headless 无 DPI 控制 → seam 模拟缩放比变化
+            canvas.InvalidateVisual();
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+
+            Assert.True(canvas.BaseRenderCount > baseline, "DPI 变化须重建缓存");
+        }
+        finally { window.Close(); }
+    }
+
+
     // ---- 3. 两阶段：交互缩放旧图 → 静止精绘 ----
 
     [AvaloniaFact]
     public void Cache_ZoomDuringInteraction_ScalesOldBitmap_ThenForceRefinedRebuilds()
     {
         (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(NormalItems());
+        canvas.IdleRefineMs = 0; // 不装真实墙钟计时器：交互期行为由 ForceRefinedForTests 收尾
         try
         {
             WriteableBitmap initial = Capture(window);
@@ -229,6 +294,7 @@ public class DrawingCanvasCacheTests
 
             Assert.Equal(RenderQuality.Interactive, canvas.Quality);
             Assert.Equal("概览", canvas.LastRenderNote);
+            Assert.False(canvas.HasIdleTimer);
             Assert.Equal(baseline, canvas.BaseRenderCount); // 交互期只缩放旧位图
 
             vm.ZoomAt(3, 120, 100); // 继续放大 → 旧位图更明显的插值差
@@ -241,6 +307,7 @@ public class DrawingCanvasCacheTests
             WriteableBitmap refined = Capture(window);
 
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasIdleTimer);
             Assert.Equal(baseline + 1, canvas.BaseRenderCount);
             Assert.Null(canvas.LastRenderNote);
             Assert.True(DifferingPixels(scaledMore, refined, 8) > 0, "精绘帧须与旧图缩放帧不同");
@@ -283,23 +350,40 @@ public class DrawingCanvasCacheTests
             Dispatcher.UIThread.RunJobs();
             Capture(window);
             Assert.True(canvas.BaseRenderCount > baseline, "隐藏层集合变化须重建");
+
+            int hidden = canvas.BaseRenderCount;
+            vm.HiddenLayers.Remove("L2"); // 反向增删同样失效（哈希按集合内容）
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.True(canvas.BaseRenderCount > hidden, "隐藏层移除须重建");
+            Assert.Null(canvas.LastRenderNote);
         }
         finally { window.Close(); }
     }
 
     [AvaloniaFact]
-    public void Cache_DiffOverlaySet_BypassesCache()
+    public void Cache_DiffOverlaySet_BypassesCache_ThenClearedRebuilds()
     {
         (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(NormalItems());
         try
         {
             Capture(window);
             int baseline = canvas.BaseRenderCount;
+            Assert.True(canvas.HasCacheBitmap);
 
             vm.SetDiffOverlay(new DiffOverlay(NormalItems(), new[] { "L1" }, Array.Empty<string>()));
             Dispatcher.UIThread.RunJobs();
             Capture(window);
             Assert.True(canvas.BaseRenderCount > baseline, "diff 模式直绘（不进缓存）须计一次基元层");
+            Assert.False(canvas.HasCacheBitmap, "diff 模式须释放缓存位图");
+
+            int withDiff = canvas.BaseRenderCount;
+            vm.SetDiffOverlay(null);
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.True(canvas.BaseRenderCount > withDiff, "关 diff 后须重建缓存");
+            Assert.True(canvas.HasCacheBitmap);
         }
         finally { window.Close(); }
     }
@@ -384,28 +468,158 @@ public class DrawingCanvasCacheTests
         finally { window.Close(); }
     }
 
-    // ---- 7. 计时器 seam 与 detach 安全 ----
+    // ---- 6a. 只读叠加（中心线/预览）不烘焙 ----
 
     [AvaloniaFact]
-    public void ForceRefinedForTests_SynchronousRefine_AndTimerDisposedOnClose()
+    public void Overlays_CenterlineAndPreview_NotBaked_NoRebuild()
     {
-        (Window window, DrawingCanvas canvas, _) = Show(NormalItems());
+        var line = Line(0, 0, 10, 10);
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { line }, 200, 200);
         try
         {
             Capture(window);
-            window.MouseWheel(new Point(120, 100), new Vector(0, 1)); // 启动 150ms 静止计时器
+            int baseline = canvas.BaseRenderCount;
+
+            vm.SetCenterlines(new[] { new CenterlineSeg("H", 0, 5, 10, 5) });
+            vm.ShowCenterlines = true;
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap withCenterline = Capture(window);
+            (double cx, double cy) = vm.WorldToScreen(5, 5);
+            Assert.True(CyanScore(withCenterline, (int)Math.Round(cx), (int)Math.Round(cy)) > 100,
+                "中心线须实时叠加青色");
+            Assert.Equal(baseline, canvas.BaseRenderCount); // 叠加不进位图
+
+            vm.ShowCenterlines = false;
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap without = Capture(window);
+            Assert.True(CyanScore(without, (int)Math.Round(cx), (int)Math.Round(cy)) < 60,
+                "关闭中心线后青色须消失（未烘焙）");
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+
+            vm.SetPendingPoint((5, 5)); // 预览十字 + 橡皮筋（无光标时只画十字）
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 6b. 未挂树（离屏快照路径）不驻留缓存 ----
+
+    [AvaloniaFact]
+    public void Cache_UnattachedCanvas_DrawsDirect_NoResidentBitmap()
+    {
+        var vm = new CanvasViewModel(NormalItems());
+        var canvas = new DrawingCanvas(vm);
+        canvas.Measure(new Size(200, 200));
+        canvas.Arrange(new Rect(0, 0, 200, 200));
+        vm.Fit(RenderModelBuilder.Bounds(vm.Items), 200, 200);
+
+        using var rtb = new RenderTargetBitmap(new PixelSize(200, 200));
+        rtb.Render(canvas);
+
+        Assert.False(canvas.HasCacheBitmap, "未挂树（离屏快照）不得驻留缓存位图");
+        Assert.Equal(1, canvas.BaseRenderCount); // 直绘一帧计一次
+
+        rtb.Render(canvas);
+        Assert.False(canvas.HasCacheBitmap);
+        Assert.Equal(2, canvas.BaseRenderCount); // 每帧直绘，无缓存复用
+    }
+
+    // ---- 7. 计时器 seam 与 detach 安全 ----
+
+    [AvaloniaFact]
+    public void ForceRefinedForTests_StopsIdleTimer_TimerDisposedOnClose()
+    {
+        (Window window, DrawingCanvas canvas, _) = Show(NormalItems());
+        canvas.IdleRefineMs = 5_000; // 真实计时器但不至在测试内到点（避免依赖墙钟）
+        try
+        {
+            Capture(window);
+            window.MouseWheel(new Point(120, 100), new Vector(0, 1)); // 启动静止计时器
             Dispatcher.UIThread.RunJobs();
             Assert.Equal(RenderQuality.Interactive, canvas.Quality);
+            Assert.True(canvas.HasIdleTimer, "交互期须已装静止计时器");
 
             canvas.ForceRefinedForTests(); // 同步生效（不等计时器）
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasIdleTimer, "ForceRefined 须先停表：不得 150ms 后再精绘一次");
+
+            int refined = canvas.BaseRenderCount;
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.Null(canvas.LastRenderNote);
+            Assert.Equal(refined, canvas.BaseRenderCount); // 无二次重建
+        }
+        finally { window.Close(); }
+
+        Assert.False(canvas.HasIdleTimer, "Close/detach 后计时器须已释放");
+        canvas.ForceRefinedForTests(); // detach 后位图已释放：不得抛异常
+        Assert.Equal(RenderQuality.Refined, canvas.Quality);
+    }
+
+    [AvaloniaFact]
+    public void Cache_DetachMidInteraction_ResetsState_ReattachRebuilds()
+    {
+        (Window window, DrawingCanvas canvas, _) = Show(NormalItems());
+        canvas.IdleRefineMs = 10_000; // 真实计时器但不至在测试内到点
+        try
+        {
+            Capture(window);
+            window.MouseWheel(new Point(120, 100), new Vector(0, 1));
+            Dispatcher.UIThread.RunJobs();
+            Assert.True(canvas.HasIdleTimer);
+            Assert.Equal(RenderQuality.Interactive, canvas.Quality);
+
+            int baseline = canvas.BaseRenderCount;
+            window.Content = null; // 交互中途脱离可视树
+            Dispatcher.UIThread.RunJobs();
+            Assert.False(canvas.HasIdleTimer, "detach 须停表");
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.False(canvas.HasCacheBitmap, "detach 须释放缓存位图（不跨树复用）");
+
+            window.Content = canvas; // 重新挂载 → 按 Refined 重建
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            Assert.True(canvas.HasCacheBitmap);
+            Assert.True(canvas.BaseRenderCount > baseline, "重挂后须重建缓存");
+            Assert.Null(canvas.LastRenderNote);
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 8. 编辑工具点击触发交互档 ----
+
+    [AvaloniaFact]
+    public void ToolClick_StartsInteraction_NoImmediateRebuild_ForceRefinedRestores()
+    {
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(NormalItems());
+        canvas.IdleRefineMs = 0; // 不装真实计时器
+        try
+        {
+            int routed = 0;
+            // 模拟 Line 工具第一击：消费点击并置预览锚点（触发重绘）
+            vm.ToolClickHandler = (x, y) => { routed++; vm.SetPendingPoint((x, y)); return true; };
+            Capture(window);
+            int baseline = canvas.BaseRenderCount;
+
+            window.MouseDown(new Point(120, 100), MouseButton.Left);
+            window.MouseUp(new Point(120, 100), MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+
+            Assert.Equal(1, routed);
+            Assert.Equal(RenderQuality.Interactive, canvas.Quality);
+            Assert.Equal("概览", canvas.LastRenderNote);
+            Assert.Equal(baseline, canvas.BaseRenderCount); // 工具点击不触发整幅重建
+
+            canvas.ForceRefinedForTests();
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
             Dispatcher.UIThread.RunJobs();
             Capture(window);
             Assert.Null(canvas.LastRenderNote);
+            Assert.Equal(baseline + 1, canvas.BaseRenderCount);
         }
         finally { window.Close(); }
-
-        canvas.ForceRefinedForTests(); // detach 后计时器已停/位图已释放：不得抛异常
-        Assert.Equal(RenderQuality.Refined, canvas.Quality);
     }
 }
