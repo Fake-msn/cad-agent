@@ -55,7 +55,7 @@ record RenderItem(..., string Handle, bool Closed = false,
 ### 2.3 纸→模型逆映射（`src/CadAgent.Core/SheetModel.cs`）
 - `ViewportTransform.PaperToModel(paper, viewTarget, viewHeight, paperCenter, paperHeight)` = `ModelToPaper` 精确逆（s=paperHeight/viewHeight）。
 - View 每幅面持 `LayoutViewportContext { ViewportHandle, PaperRect, Scale, ViewTarget, Center, CanMapModel }`。
-- `|TwistAngle|>1e-9` → `CanMapModel=false`：模型编辑拒绝（「视口带旋转，纸→模型映射未支持；纸面编辑仍可用」），纸面编辑不受影响。
+- `|TwistAngle|>1e-9` → `CanMapModel=false`：模型编辑拒绝（文案见 §3.4 Plan-1 过渡口径；B 落地后纸面编辑不受影响）。
 - **非矩形视口裁剪**：ACadSharp 3.8.35 未暴露可检裁剪边界——不做检测、不假装检测（注记；若未来 API 暴露再补拒绝）。
 - 单测：往返恒等（1e-9）、twist 拒绝、视口内外判定。
 
