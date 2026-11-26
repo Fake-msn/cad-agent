@@ -2115,8 +2115,8 @@ public sealed class MainWindow : Window
         switch (route.Intent)
         {
             case EditSpaceIntent.Locked:
-                // 文案单一来源 EditRouting（"视口边框只读"）；Locked 路由恒带 Reason（EditRoute 契约）。
-                SetEditError(route.Reason ?? PaperEditMessage(action));
+                // 文案单一来源 EditRouting（"视口边框只读"）；契约违约兜底不得复用纸面文案。
+                SetEditError(route.Reason ?? "视口边框只读");
                 return false;
             case EditSpaceIntent.Paper:
             case EditSpaceIntent.BlockChild when item.Space == RenderSpace.PaperSpace:

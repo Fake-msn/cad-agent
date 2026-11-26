@@ -551,7 +551,6 @@ public static class RenderModelBuilder
                 SourceHandle = c.SourceHandle ?? it.Handle,
                 BlockName = it.BlockName ?? c.BlockName,
                 ParentInsertChain = it.ParentInsertChain ?? c.InsertChain,
-                AttributeTag = it.AttributeTag,
             };
         }
     }
