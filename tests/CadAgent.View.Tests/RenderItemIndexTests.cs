@@ -81,6 +81,26 @@ public class RenderItemIndexTests
     }
 
     [Fact]
+    public void NonFiniteVertex_ItemIsExcludedAndGridStaysFinite()
+    {
+        // ±Infinity 与 NaN 一样不是坐标：跳过（部分有限 → 剩余顶点成盒；全非有限 → 不入索引），
+        // 且不得把网格撑成无限 extent（否则 cell 退化为 1）。
+        var items = new[]
+        {
+            Line(0, 0, 10, 0),
+            Polyline("0", "2", (double.PositiveInfinity, 5), (10, 5)),
+            Polyline("0", "3", (double.NegativeInfinity, 2e6), (double.PositiveInfinity, 2e6)),
+        };
+        var index = new RenderItemIndex(items, minCellsPerAxis: 4, maxCellsPerAxis: 8);
+
+        AssertBounds(index.BoundsOf(1), 10, 5, 10, 5);
+        AssertNaNBox(index.BoundsOf(2));
+        Assert.Equal(new[] { 0, 1 }, index.Query((-1e9, -1e9, 1e9, 1e9)));
+        Assert.Empty(index.Query((1.9e6, 1.9e6, 2.1e6, 2.1e6))); // 全非有限项永不候选
+        Assert.Equal(new[] { 1 }, index.Query((9.5, 4.5, 10.5, 5.5)));
+    }
+
+    [Fact]
     public void BoundsOf_DegenerateItems_AreSafe()
     {
         var items = new[]
@@ -93,12 +113,25 @@ public class RenderItemIndexTests
         };
         var index = new RenderItemIndex(items);
 
-        // 无坐标 → 退化零盒（不参与查询，见 Query_... 测试）
-        AssertBounds(index.BoundsOf(0), 0, 0, 0, 0);
+        // 无坐标 → NaN 角（文档约定；不参与查询，见 Query_... 测试）
+        AssertNaNBox(index.BoundsOf(0));
         AssertBounds(index.BoundsOf(1), 3, 4, 3, 4);
         AssertBounds(index.BoundsOf(2), 2, 2, 2, 2);
         AssertBounds(index.BoundsOf(3), 7, 7, 7, 7);
-        AssertBounds(index.BoundsOf(4), 0, 0, 0, 0);
+        AssertNaNBox(index.BoundsOf(4));
+    }
+
+    [Fact]
+    public void BoundsOf_IndexOutOfRange_Throws()
+    {
+        var index = new RenderItemIndex(new[] { Line(0, 0, 10, 0) });
+        Assert.Throws<ArgumentOutOfRangeException>(() => index.BoundsOf(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => index.BoundsOf(1));
+    }
+
+    private static void AssertNaNBox((double MinX, double MinY, double MaxX, double MaxY) b)
+    {
+        Assert.True(double.IsNaN(b.MinX) && double.IsNaN(b.MinY) && double.IsNaN(b.MaxX) && double.IsNaN(b.MaxY));
     }
 
     // ---- Query ----
@@ -109,12 +142,12 @@ public class RenderItemIndexTests
         var items = new List<RenderItem>();
         for (int i = 0; i < 500; i++) items.Add(Line(i * 10, 0, i * 10 + 1, 0));
         int longIndex = items.Count;
-        items.Add(Line(-100, 0, 100000, 0)); // 跨越整幅 → overflow 候选
+        items.Add(Line(-100, 0, 100000, 0)); // 跨越整幅（默认预算：共 32 格，按格登记；bbox 相交即候选）
         int hatchIndex = items.Count;
         items.Add(Hatch(new[] { 2000.0, 2010, 2010, 2000 }, new[] { 500.0, 500, 510, 510 }));
         var index = new RenderItemIndex(items);
 
-        // 远处小矩形：只命中第 3 项 + 长线（overflow，bbox 相交）
+        // 远处小矩形：只命中第 3 项 + 长线（bbox 相交）
         var near = index.Query((29, -5, 32, 5));
         Assert.Equal(new[] { 3, longIndex }, near);
 
@@ -143,6 +176,22 @@ public class RenderItemIndexTests
         Assert.Empty(index.Query((-100, -100, -50, -50)));
         // overflow 项即使查询矩形不覆盖其格，也按 bbox 过滤后参与
         Assert.Equal(new[] { longIndex }, index.Query((3590, -1, 3595, 1)));
+    }
+
+    [Fact]
+    public void Query_RectFarBeyondIntRange_StillCoversWholeGrid()
+    {
+        // 矩形座标距格网 > int.MaxValue 格：数学夹取（double 域）后再转 int，不得回绕成 int.MinValue。
+        var items = new[]
+        {
+            Line(0, 0, 1, 0),
+            Line(1000, 1000, 1001, 1000),
+        };
+        var index = new RenderItemIndex(items, minCellsPerAxis: 4, maxCellsPerAxis: 8);
+
+        Assert.Equal(new[] { 0, 1 }, index.Query((-1e300, -1e300, 1e300, 1e300)));
+        Assert.Equal(new[] { 0 }, index.Query((-1e300, -1e300, 1, 1)));
+        Assert.Equal(new[] { 1 }, index.Query((999, 999, 1e300, 1e300)));
     }
 
     [Fact]
@@ -181,8 +230,9 @@ public class RenderItemIndexTests
     public void Query_ReturnsAscendingUniqueIndices_ForItemsSpanningManyCells()
     {
         var items = new List<RenderItem>();
-        for (int i = 0; i < 30; i++) items.Add(Line(i, i, 300 - i, 300 - i)); // 全幅斜线，跨多格
-        items.Add(Line(0, 150, 300, 150));
+        for (int i = 0; i < 30; i++) items.Add(Line(i, i, 300 - i, 300 - i)); // 全幅斜线：32×32 格 → 溢出
+        items.Add(Line(0, 150, 300, 150)); // 横向跨全部 32 列、1 行：按格登记（32 ≤ 64）
+        items.Add(Line(0, 0, 300, 300));   // 单条全幅对角线：确定走溢出表
         var index = new RenderItemIndex(items);
 
         var result = index.Query((0, 0, 300, 300));
@@ -245,6 +295,24 @@ public class RenderItemIndexTests
             // 等价不只靠"都 miss"：每套 fixture 必须有足量真实命中
             Assert.True(hits > 100, $"fixture too sparse: hits={hits}");
         }
+    }
+
+    [Fact]
+    public void FirstHit_FindsItemRegisteredOnlyInOverflow()
+    {
+        // 单项覆盖格数 > 2 → 只进溢出表、不登记任何格子；命中必须仍能找到它。
+        var items = new[]
+        {
+            Line(0, 0, 1, 0),
+            Line(1000, 0, 1000.5, 0),
+            Line(500, 0, 500.001, 0),
+            Line(0, 100, 1000, 100), // 跨 4 格 → overflow-only
+        };
+        var index = new RenderItemIndex(items, minCellsPerAxis: 4, maxCellsPerAxis: 8, maxCellsPerItem: 2);
+
+        Assert.Equal(new[] { 3 }, index.Query((499, 99.5, 501, 100.5)));
+        Assert.Equal(3, index.FirstHit(500, 100, 0.01));
+        Assert.Null(index.FirstHit(500, 50, 0.01)); // 空白处（近旁小线均在 y=0）
     }
 
     [Fact]
@@ -536,7 +604,7 @@ public class RenderItemIndexTests
                 default: items.Add(TextItem(new string('A', rnd.Next(1, 6)), x, y, NextRange(rnd, 0.5, 3), layer, i.ToString())); break;
             }
         }
-        items.Add(Line(-1000, 10, 1000, 10)); // overflow
+        items.Add(Line(-1000, 10, 1000, 10)); // 跨全部 32 列（默认预算：按格登记，非溢出）
         items.Add(TextItem("CENTER", 9, 9, 4, "D1"));
         return items;
     }

@@ -6,6 +6,7 @@ namespace CadAgent.View.Rendering;
 /// 命中语义与旧 <c>CanvasViewModel.HitTest</c> 完全一致：候选按 Items 序升序，再调用
 /// 同一套精确判定 <see cref="Hits"/>；索引只做候选裁剪，不改判定数学。
 /// 纯 C#（无 Avalonia 依赖），可 headless 单测。
+/// 查询复用内部候选缓冲与去重戳，<b>非线程安全</b>（仅 UI 线程调用）。
 /// </summary>
 public sealed class RenderItemIndex
 {
@@ -31,6 +32,11 @@ public sealed class RenderItemIndex
     private readonly double _gridMinX, _gridMinY, _gridMaxX, _gridMaxY, _cellSize;
     private readonly List<int>?[] _cells;
     private readonly int[] _overflow;
+    /// <summary>去重戳（长度=Items.Count）：每查询自增，免去对重复登记项排序。</summary>
+    private readonly int[] _stamp;
+    private int _stampCounter;
+    /// <summary>候选缓冲（每实例复用；查询结果另拷出）。</summary>
+    private readonly List<int> _scratch = new();
 
     /// <param name="minCellsPerAxis">期望单轴最少格数（内容退化轴自动降为 1）。</param>
     /// <param name="maxCellsPerAxis">单轴格数上限（cell 由内容尺寸/√n 推出后仍受此夹取）。</param>
@@ -43,6 +49,7 @@ public sealed class RenderItemIndex
     {
         _items = items.ToArray();
         _boxes = new Box[_items.Length];
+        _stamp = new int[_items.Length];
         var overflow = new List<int>();
         int maxCells = Math.Max(1, maxCellsPerItem);
 
@@ -116,35 +123,8 @@ public sealed class RenderItemIndex
         (double MinX, double MinY, double MaxX, double MaxY) rect,
         IReadOnlySet<string>? hiddenLayers = null)
     {
-        if (!IsValidRect(rect) || _items.Length == 0) return Array.Empty<int>();
-
-        var candidates = new List<int>();
-        bool gridOverlap = rect.MaxX >= _gridMinX && rect.MinX <= _gridMaxX
-            && rect.MaxY >= _gridMinY && rect.MinY <= _gridMaxY;
-        if (gridOverlap && _cells.Length > 0)
-        {
-            int x0 = CellOfX(rect.MinX), x1 = CellOfX(rect.MaxX);
-            int y0 = CellOfY(rect.MinY), y1 = CellOfY(rect.MaxY);
-            for (int cy = y0; cy <= y1; cy++)
-                for (int cx = x0; cx <= x1; cx++)
-                    if (_cells[cy * _cellsX + cx] is { } bucket) candidates.AddRange(bucket);
-        }
-        candidates.AddRange(_overflow);
-        if (candidates.Count == 0) return Array.Empty<int>();
-
-        candidates.Sort();
-        var result = new List<int>(candidates.Count);
-        int last = -1;
-        foreach (int i in candidates)
-        {
-            if (i == last) continue; // 跨多格重复登记
-            last = i;
-            if (hiddenLayers is not null && hiddenLayers.Contains(_items[i].Layer)) continue;
-            Box b = _boxes[i];
-            if (b.MaxX < rect.MinX || b.MinX > rect.MaxX || b.MaxY < rect.MinY || b.MinY > rect.MaxY) continue;
-            result.Add(i);
-        }
-        return result;
+        List<int> unique = Collect(rect, hiddenLayers);
+        return unique.Count == 0 ? Array.Empty<int>() : unique.ToArray(); // 新数组：调用方可安全持有
     }
 
     /// <summary>
@@ -155,16 +135,63 @@ public sealed class RenderItemIndex
     {
         double tol = Math.Max(0, tolerance);
         if (!double.IsFinite(x) || !double.IsFinite(y)) return null;
-        foreach (int i in Query((x - tol, y - tol, x + tol, y + tol), hiddenLayers))
+        foreach (int i in Collect((x - tol, y - tol, x + tol, y + tol), hiddenLayers))
             if (Hits(_items[i], x, y, tol)) return i;
         return null;
     }
 
-    /// <summary>图元包围盒；无有效坐标（空点/无点圆）→ 退化零盒 (0,0,0,0)。</summary>
+    /// <summary>升序去重候选（复用 <see cref="_scratch"/>）；stamp 只用于跨格重复登记。</summary>
+    private List<int> Collect(
+        (double MinX, double MinY, double MaxX, double MaxY) rect,
+        IReadOnlySet<string>? hiddenLayers)
+    {
+        _scratch.Clear();
+        if (!IsValidRect(rect) || _items.Length == 0) return _scratch;
+
+        int stamp = NextStamp();
+        bool gridOverlap = rect.MaxX >= _gridMinX && rect.MinX <= _gridMaxX
+            && rect.MaxY >= _gridMinY && rect.MinY <= _gridMaxY;
+        if (gridOverlap && _cells.Length > 0)
+        {
+            int x0 = CellOfX(rect.MinX), x1 = CellOfX(rect.MaxX);
+            int y0 = CellOfY(rect.MinY), y1 = CellOfY(rect.MaxY);
+            for (int cy = y0; cy <= y1; cy++)
+                for (int cx = x0; cx <= x1; cx++)
+                    if (_cells[cy * _cellsX + cx] is { } bucket)
+                        foreach (int i in bucket) AddCandidate(i, stamp, rect, hiddenLayers);
+        }
+        foreach (int i in _overflow) AddCandidate(i, stamp, rect, hiddenLayers);
+        _scratch.Sort(); // 只对去重后的候选排序
+        return _scratch;
+    }
+
+    private void AddCandidate(int i, int stamp,
+        (double MinX, double MinY, double MaxX, double MaxY) rect,
+        IReadOnlySet<string>? hiddenLayers)
+    {
+        if (_stamp[i] == stamp) return; // 同一图元跨多格重复登记
+        _stamp[i] = stamp;
+        if (hiddenLayers is not null && hiddenLayers.Contains(_items[i].Layer)) return;
+        Box b = _boxes[i];
+        if (b.MaxX < rect.MinX || b.MinX > rect.MaxX || b.MaxY < rect.MinY || b.MinY > rect.MaxY) return;
+        _scratch.Add(i);
+    }
+
+    private int NextStamp()
+    {
+        if (_stampCounter == int.MaxValue) { Array.Clear(_stamp); _stampCounter = 0; }
+        return ++_stampCounter;
+    }
+
+    /// <summary>
+    /// 图元包围盒；无有效坐标（空点/无点圆/含非有限坐标）→ NaN 角 (NaN,NaN,NaN,NaN)。
+    /// 索引越界 → <see cref="ArgumentOutOfRangeException"/>。
+    /// </summary>
     public (double MinX, double MinY, double MaxX, double MaxY) BoundsOf(int index)
     {
+        if ((uint)index >= (uint)_boxes.Length) throw new ArgumentOutOfRangeException(nameof(index));
         Box b = _boxes[index];
-        return b.Has ? (b.MinX, b.MinY, b.MaxX, b.MaxY) : (0, 0, 0, 0);
+        return b.Has ? (b.MinX, b.MinY, b.MaxX, b.MaxY) : (double.NaN, double.NaN, double.NaN, double.NaN);
     }
 
     /// <summary>
@@ -232,8 +259,8 @@ public sealed class RenderItemIndex
     }
 
     /// <summary>
-    /// 单图元包围盒：Line/Polyline/Hatch 顶点极值（跳过 NaN 路径分隔符）；Circle/Arc
-    /// 圆心±半径（弧保守取整圆）；Text 插入点 + 字盒（宽=len×h×0.6，负尺寸归一）。
+    /// 单图元包围盒：Line/Polyline/Hatch 顶点极值（跳过 NaN 路径分隔符与 ±Infinity）；
+    /// Circle/Arc 圆心±半径（弧保守取整圆）；Text 插入点 + 字盒（宽=len×h×0.6，负尺寸归一）。
     /// 无有效坐标 → false（退化，不入索引）。
     /// </summary>
     private static bool TryBox(RenderItem item, out Box box)
@@ -254,6 +281,8 @@ public sealed class RenderItemIndex
 
             case RenderKind.Text:
             {
+                // 索引盒 = 逻辑字盒。Task 2 文本剔除若复用该盒，需另留字形上升边距（绘制约 1.2×h）；
+                // 此处不改索引语义。
                 if (item.Points.Count < 1) return false;
                 (double ix, double iy) = item.Points[0];
                 if (!IsFinite(ix) || !IsFinite(iy)) return false;
@@ -272,7 +301,7 @@ public sealed class RenderItemIndex
                 bool any = false;
                 foreach ((double x, double y) in item.Points)
                 {
-                    if (double.IsNaN(x) || double.IsNaN(y)) continue; // Hatch 路径分隔符
+                    if (!IsFinite(x) || !IsFinite(y)) continue; // NaN 路径分隔符 / ±Infinity
                     any = true;
                     if (x < minX) minX = x;
                     if (y < minY) minY = y;
@@ -299,11 +328,13 @@ public sealed class RenderItemIndex
         return (int)Math.Clamp(c, 1, maxCells);
     }
 
+    /// <summary>x → 列号；先在 double 域夹取再转 int（极远坐标直接转 int 会回绕成 int.MinValue）。</summary>
     private int CellOfX(double x) =>
-        _cellsX <= 1 ? 0 : Math.Clamp((int)Math.Floor((x - _gridMinX) / _cellSize), 0, _cellsX - 1);
+        _cellsX <= 1 ? 0 : (int)Math.Clamp(Math.Floor((x - _gridMinX) / _cellSize), 0.0, _cellsX - 1.0);
 
+    /// <summary>y → 行号；双域夹取同 <see cref="CellOfX"/>。</summary>
     private int CellOfY(double y) =>
-        _cellsY <= 1 ? 0 : Math.Clamp((int)Math.Floor((y - _gridMinY) / _cellSize), 0, _cellsY - 1);
+        _cellsY <= 1 ? 0 : (int)Math.Clamp(Math.Floor((y - _gridMinY) / _cellSize), 0.0, _cellsY - 1.0);
 
     private static double Dist(double x, double y, (double X, double Y) p)
     {
