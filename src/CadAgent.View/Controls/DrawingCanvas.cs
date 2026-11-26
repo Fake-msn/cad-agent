@@ -74,7 +74,8 @@ public sealed class DrawingCanvas : Control
     private Size _cacheViewport;
     private Size _cacheLogicalSize;
     private double _cacheDpi = 1;
-    private int _cacheHiddenHash;
+    /// <summary>缓存 key 的隐藏层集合（OrderIgnoreCase 集合相等比较，与枚举顺序无关）。</summary>
+    private HashSet<string> _cacheHidden = new(StringComparer.OrdinalIgnoreCase);
     private RenderQuality _cacheQuality = RenderQuality.Refined;
     private (double MinX, double MinY, double OffsetX, double OffsetY) _cacheOrigin;
 
@@ -144,6 +145,9 @@ public sealed class DrawingCanvas : Control
 
     /// <summary>基元层从零绘制的次数（缓存重建/直绘）；平移复用缓存时不变（测试 seam）。</summary>
     internal int BaseRenderCount { get; private set; }
+
+    /// <summary>测试 seam：本帧绘制器实际绘制（通过包围盒）的图元数；裁剪后小于 Items.Count。</summary>
+    internal int LastDrawnItemCount => _drawer.LastDrawnItemCount;
 
     /// <summary>测试 seam：同步走「静止 → Refined 重建缓存」路径（与计时器到点同一实现）。</summary>
     internal void ForceRefinedForTests() => RefineNow();
@@ -271,7 +275,8 @@ public sealed class DrawingCanvas : Control
             // 超预算 → 包围盒 +2px 描边，与缓存路径的选中降级同像素语义。
             if ((highlight || added) && RenderItemDrawer.IsOverBudget(projection, item))
             {
-                _drawer.TryDrawBudgetBox(context, projection, item, pen);
+                if (_drawer.TryDrawBudgetBox(context, projection, item, pen))
+                    _drawer.MarkSelectionDowngraded(); // diff 路径与缓存路径同注记语义
                 continue;
             }
             _drawer.DrawOne(context, projection, item, pen, Quality);
@@ -361,20 +366,16 @@ public sealed class DrawingCanvas : Control
         && _cacheBounds == new Size(Bounds.Width, Bounds.Height)
         && _cacheViewport == new Size(projection.ViewportW, projection.ViewportH)
         && Math.Abs(_cacheDpi - CurrentRenderScaling) <= 1e-9
-        && _cacheHiddenHash == HiddenHash()
+        && _cacheHidden.SetEquals(ViewModel.HiddenLayers)
         // 原点（世界 min + 视口固定偏移）同属缓存 key：Fit/偏移变化即失效；Pan 另以锚点复用。
         && _cacheOrigin == (projection.MinX, projection.MinY, projection.OffsetX, projection.OffsetY);
 
-    /// <summary>隐藏层集合的内容哈希（排序后聚合，集合增删即失效）。</summary>
-    private int HiddenHash()
-    {
-        if (ViewModel.HiddenLayers.Count == 0) return 0;
-        string[] names = ViewModel.HiddenLayers.ToArray();
-        Array.Sort(names, StringComparer.OrdinalIgnoreCase);
-        var hash = new HashCode();
-        foreach (string name in names) hash.Add(name, StringComparer.OrdinalIgnoreCase);
-        return hash.ToHashCode();
-    }
+    /// <summary>
+    /// 隐藏层集合的缓存 key 快照（独立 HashSet；<see cref="HashSet{T}.SetEquals"/> 与枚举顺序无关）。
+    /// 旧 HashCode 聚合存在碰撞可能（碰撞会复用错误位图），改为集合相等。
+    /// </summary>
+    private static HashSet<string> SnapshotHidden(IEnumerable<string> layers) =>
+        new(layers, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 重建缓存位图（UI 线程）：私有缓存层以「背景 + 基元」绘制到 RenderTargetBitmap，
@@ -411,7 +412,7 @@ public sealed class DrawingCanvas : Control
         _cacheViewport = new Size(projection.ViewportW, projection.ViewportH);
         _cacheLogicalSize = logical;
         _cacheDpi = dpi;
-        _cacheHiddenHash = HiddenHash();
+        _cacheHidden = SnapshotHidden(ViewModel.HiddenLayers);
         _cacheQuality = Quality;
         _cacheOrigin = (projection.MinX, projection.MinY, projection.OffsetX, projection.OffsetY);
         BaseRenderCount++;

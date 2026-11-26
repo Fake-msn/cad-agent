@@ -169,6 +169,9 @@ public sealed class RenderItemDrawer
     /// <summary>本帧是否有选中/高亮被降级为 bbox（测试/状态栏注记）。</summary>
     internal bool LastSelectionDowngraded { get; private set; }
 
+    /// <summary>本帧实际进入绘制路径的图元数（BeginFrame 清零；裁剪后小于 Items.Count）。</summary>
+    internal int LastDrawnItemCount { get; private set; }
+
     // ---- LOD 决策（阈值唯一来源）----
 
     /// <summary>文本：Refined &lt;2 跳过 / 2–6 简化条 / ≥6 字形；Interactive &lt;4 / 4–10 / ≥10。</summary>
@@ -337,6 +340,11 @@ public sealed class RenderItemDrawer
     }
 
     /// <summary>
+    /// 标记本帧发生选中/高亮包围盒降级（diff 直绘路径与 DrawSelection 共用状态栏注记语义）。
+    /// </summary>
+    internal void MarkSelectionDowngraded() => LastSelectionDowngraded = true;
+
+    /// <summary>
     /// 单图元绘制（diff before 层/删除线等复用）：无调用方画笔/文本缓存，
     /// 虚线笔走实例内部解析器（与旧画布逐图元等价）。帧计数由调用方 BeginFrame 管理。
     /// </summary>
@@ -345,7 +353,7 @@ public sealed class RenderItemDrawer
         DrawItemCore(ctx, projection, item, pen, quality, _fallbackPens, texts: null, bold: false);
     }
 
-    /// <summary>帧开始：清零本帧 LOD 计数（DrawingCanvas 每帧调用一次；Draw/DrawOne 不重置）。</summary>
+    /// <summary>帧开始：清零本帧 LOD/绘制计数（DrawingCanvas 每帧调用一次；Draw/DrawOne 不重置）。</summary>
     public void BeginFrame() => ResetCounters();
 
     private void ResetCounters()
@@ -353,6 +361,7 @@ public sealed class RenderItemDrawer
         LastTextSkipped = 0;
         LastHatchDowngraded = 0;
         LastSelectionDowngraded = false;
+        LastDrawnItemCount = 0;
     }
 
     private void DrawItemCore(
@@ -360,6 +369,7 @@ public sealed class RenderItemDrawer
         RenderQuality quality, PenResolver pens, TextCache? texts, bool bold)
     {
         if (!TryScreenBounds(p, item, out ScreenBox box)) return; // 无有效坐标（NaN 角）
+        LastDrawnItemCount++; // 已通过包围盒（含裁剪后索引路径）；Draw/DrawOne 共用
         pen = pens.ForItem(item, pen, p.Scale);
         double extent = Math.Max(box.MaxX - box.MinX, box.MaxY - box.MinY);
 

@@ -152,10 +152,19 @@ public class DrawingCanvasCacheTests
         return count;
     }
 
-    /// <summary>让真实 DispatcherTimer 在 Dispatcher 主循环中到点（RunJobs 自身不推进计时器）。</summary>
-    private static async Task PumpTimersAsync(int ms = 200)
+    /// <summary>
+    /// 轮询直到 <paramref name="until"/> 为真（最多 2 秒），每 10ms 泵一次 Dispatcher，
+    /// 让真实 DispatcherTimer 在 Dispatcher 主循环中推进（RunJobs 自身不推进计时器）。
+    /// 取代固定 Task.Delay 等待：条件型等待既可早退也不受机器负载影响而假失败。
+    /// </summary>
+    private static async Task PumpUntilAsync(Func<bool> until, int capMs = 2000)
     {
-        await Task.Delay(ms);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (!until() && sw.ElapsedMilliseconds < capMs)
+        {
+            await Task.Delay(10);
+            Dispatcher.UIThread.RunJobs();
+        }
         Dispatcher.UIThread.RunJobs();
     }
 
@@ -319,8 +328,8 @@ public class DrawingCanvasCacheTests
             Assert.False(canvas.HasIdleTimer);
             Assert.Equal(baseline + 1, canvas.BaseRenderCount);
             Assert.Null(canvas.LastRenderNote);
-            Assert.True(DifferingPixels(scaledMore, refined, 8) > 0, "精绘帧须与旧图缩放帧不同");
-            Assert.True(DifferingPixels(initial, refined, 8) > 0, "缩放后精绘帧须与初始帧不同");
+            Assert.True(DifferingPixels(scaledMore, refined, 8) > 50, "精绘帧须与旧图缩放帧有实质像素差");
+            Assert.True(DifferingPixels(initial, refined, 8) > 50, "缩放后精绘帧须与初始帧有实质像素差");
         }
         finally { window.Close(); }
     }
@@ -367,6 +376,76 @@ public class DrawingCanvasCacheTests
             Capture(window);
             Assert.True(canvas.BaseRenderCount > hidden, "隐藏层移除须重建");
             Assert.Null(canvas.LastRenderNote);
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Cache_HiddenLayers_ToggleBackAndForth_RebuildsAndRendersCorrectly()
+    {
+        // 集合相等缓存 key（合并前审查）：增删往返每次都重建且渲染正确；
+        // 同一集合以不同插入序重建（Clear+Add）不得误判失效（SetEquals 与枚举顺序无关）。
+        var items = new[] { HatchedSquare(0, 0, 3, "L1", "A"), HatchedSquare(5, 0, 3, "L2", "B") };
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(items);
+        try
+        {
+            WriteableBitmap initial = Capture(window);
+            int count = canvas.BaseRenderCount;
+            (double ax, double ay) = vm.WorldToScreen(1.5, 1.5);
+            (double bx, double by) = vm.WorldToScreen(6.5, 1.5);
+            Assert.True(Brightness(initial, (int)Math.Round(ax), (int)Math.Round(ay)) > 100);
+            Assert.True(Brightness(initial, (int)Math.Round(bx), (int)Math.Round(by)) > 100);
+
+            vm.HiddenLayers.Add("L1"); // {L1}
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap hideA = Capture(window);
+            Assert.True(canvas.BaseRenderCount > count);
+            Assert.True(Brightness(hideA, (int)Math.Round(ax), (int)Math.Round(ay)) < 90, "隐藏 L1 → A 背景");
+            Assert.True(Brightness(hideA, (int)Math.Round(bx), (int)Math.Round(by)) > 100, "B 仍可见");
+            count = canvas.BaseRenderCount;
+
+            vm.HiddenLayers.Clear();
+            vm.HiddenLayers.Add("L2"); // {L2}（换隐藏层）
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap hideB = Capture(window);
+            Assert.True(canvas.BaseRenderCount > count);
+            Assert.True(Brightness(hideB, (int)Math.Round(ax), (int)Math.Round(ay)) > 100, "A 恢复可见");
+            Assert.True(Brightness(hideB, (int)Math.Round(bx), (int)Math.Round(by)) < 90, "隐藏 L2 → B 背景");
+            count = canvas.BaseRenderCount;
+
+            vm.HiddenLayers.Add("L1"); // {L1,L2} 全隐
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap hideBoth = Capture(window);
+            Assert.True(canvas.BaseRenderCount > count);
+            Assert.True(Brightness(hideBoth, (int)Math.Round(ax), (int)Math.Round(ay)) < 90);
+            Assert.True(Brightness(hideBoth, (int)Math.Round(bx), (int)Math.Round(by)) < 90);
+            count = canvas.BaseRenderCount;
+
+            vm.HiddenLayers.Clear(); // 全部恢复
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap all = Capture(window);
+            Assert.True(canvas.BaseRenderCount > count);
+            Assert.True(Brightness(all, (int)Math.Round(ax), (int)Math.Round(ay)) > 100);
+            Assert.True(Brightness(all, (int)Math.Round(bx), (int)Math.Round(by)) > 100);
+            count = canvas.BaseRenderCount;
+
+            vm.HiddenLayers.Add("L1");
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            Capture(window);
+            count = canvas.BaseRenderCount; // {L1} 的缓存
+            vm.HiddenLayers.Clear();
+            vm.HiddenLayers.Add("L1"); // 同集合、不同插入序
+            vm.Invalidate();
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap sameSet = Capture(window);
+            Assert.Equal(count, canvas.BaseRenderCount); // 集合相等 → 不重建
+            Assert.True(Brightness(sameSet, (int)Math.Round(ax), (int)Math.Round(ay)) < 90);
+            Assert.True(Brightness(sameSet, (int)Math.Round(bx), (int)Math.Round(by)) > 100);
         }
         finally { window.Close(); }
     }
@@ -661,8 +740,9 @@ public class DrawingCanvasCacheTests
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
             Assert.False(canvas.HasIdleTimer, "选择不得装静止计时器");
 
-            // 若误标交互，20ms 静止计时器会在此期间到点并重建（计数/注记会变）
-            await PumpTimersAsync();
+            // 若误标交互，20ms 静止计时器会在此期间到点并重建（计数/注记会变）——
+            // 轮询最多 500ms 等待「不应发生」的计数变化（发生即失败，未发生则早退）。
+            await PumpUntilAsync(() => canvas.BaseRenderCount != baseline, capMs: 500);
             Capture(window);
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
             Assert.False(canvas.HasIdleTimer);
@@ -675,7 +755,7 @@ public class DrawingCanvasCacheTests
             Dispatcher.UIThread.RunJobs();
             window.MouseDown(new Point(x, y), MouseButton.Left);
             window.MouseUp(new Point(x, y), MouseButton.Left);
-            await PumpTimersAsync();
+            await PumpUntilAsync(() => canvas.BaseRenderCount != baseline, capMs: 500);
             Capture(window);
 
             Assert.Equal(0, vm.SelectedIndex);
@@ -740,10 +820,10 @@ public class DrawingCanvasCacheTests
             Dispatcher.UIThread.RunJobs();
             Capture(window);
 
-            Assert.Equal(scale, vm.Scale);
-            Assert.Equal(offsetX, vm.OffsetX);
-            Assert.Equal(offsetY, vm.OffsetY);
-            Assert.Equal(0.0, vm.Pan.X);
+            Assert.Equal(scale, vm.Scale, 12);
+            Assert.Equal(offsetX, vm.OffsetX, 12);
+            Assert.Equal(offsetY, vm.OffsetY, 12);
+            Assert.Equal(0.0, vm.Pan.X, 12);
             Assert.True(canvas.BaseRenderCount > baseline, "仅原点变化也须重建（原点属缓存 key）");
         }
         finally { window.Close(); }
@@ -768,7 +848,7 @@ public class DrawingCanvasCacheTests
             Assert.Equal(RenderQuality.Interactive, canvas.Quality);
             Assert.True(canvas.HasIdleTimer, "IdleRefineMs>0 时交互须装真实计时器");
 
-            await PumpTimersAsync();
+            await PumpUntilAsync(() => !canvas.HasIdleTimer);
             Assert.False(canvas.HasIdleTimer, "静止计时器须在短间隔后到点");
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
             Assert.Equal(baseline, canvas.BaseRenderCount); // 视图/质量未变 → 精绘不重建

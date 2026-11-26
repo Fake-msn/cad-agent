@@ -428,6 +428,73 @@ public class RenderItemDrawerTests
         Assert.False(RenderItemDrawer.IsOverBudget(Projection(10), withSeparators));
     }
 
+    // ---- IsOverBudget 视口分支（合并前审查）：24% vs 26% 包围盒；点数少但盒大 ----
+
+    private static RenderItem Poly(uint rgb, params (double X, double Y)[] pts) =>
+        new(RenderKind.Polyline, pts, "0", rgb, null, 0, 0, "P");
+
+    [Fact]
+    public void IsOverBudget_ViewportFraction_24PercentNotOver_26PercentOver()
+    {
+        // 投影 200×200 视口 = 40000px²，25% 阈值 = 10000px²；scale=1 世界=屏幕。
+        CanvasProjection p = Projection(scale: 1);
+        RenderItem at24 = Poly(0xFFFFFF, (0, 0), (100, 0), (100, 96), (0, 96));   // 9600 = 24%
+        RenderItem at26 = Poly(0xFFFFFF, (0, 0), (104, 0), (104, 100), (0, 100)); // 10400 = 26%
+        Assert.False(RenderItemDrawer.IsOverBudget(p, at24));
+        Assert.True(RenderItemDrawer.IsOverBudget(p, at26));
+
+        // Hatch 同口径（≤2000 点，仅包围盒决定）。
+        RenderItem hatch24 = Hatch(0xFFFFFF, false, (0, 0), (100, 0), (100, 96), (0, 96));
+        RenderItem hatch26 = Hatch(0xFFFFFF, false, (0, 0), (104, 0), (104, 100), (0, 100));
+        Assert.False(RenderItemDrawer.IsOverBudget(p, hatch24));
+        Assert.True(RenderItemDrawer.IsOverBudget(p, hatch26));
+    }
+
+    [Fact]
+    public void IsOverBudget_LowAreaAndPointCases_NotOver()
+    {
+        CanvasProjection p = Projection(scale: 1);
+        // 单点退化（零面积）、短线段、100 点聚合在同一小盒、微小文本。
+        Assert.False(RenderItemDrawer.IsOverBudget(p, Poly(0xFFFFFF, (5, 5))));
+        Assert.False(RenderItemDrawer.IsOverBudget(p, Poly(0xFFFFFF, (1, 1), (9, 9))));
+        Assert.False(RenderItemDrawer.IsOverBudget(p, HatchMany(0xFFFFFF, true, 100,
+            new[] { (1.0, 1.0), (2.0, 1.0), (2.0, 2.0), (1.0, 2.0) })));
+        Assert.False(RenderItemDrawer.IsOverBudget(p, Text("W", 10, 10, 2)));
+        // 无有效坐标（NaN 角）→ 预算判定不抛、不视为超预算。
+        Assert.False(RenderItemDrawer.IsOverBudget(p,
+            new RenderItem(RenderKind.Polyline, new[] { (double.NaN, double.NaN) }, "0", 0xFFFFFF, null, 0, 0, "X")));
+    }
+
+    [AvaloniaFact]
+    public void LastDrawnItemCount_CullWithIndices_CountsOnlyDrawn_AndBeginFrameResets()
+    {
+        RenderItem a = Line(1, 10, 3, 10, 0xFFFFFF, "A");
+        RenderItem b = Line(15, 10, 17, 10, 0xFFFFFF, "B");
+        var items = new[] { a, b };
+        var drawer = new RenderItemDrawer();
+        var pens = new PenResolver();
+
+        PixelBuffer culled = RenderPixels(ctx =>
+        {
+            drawer.BeginFrame();
+            drawer.Draw(ctx, Projection(10), items, new[] { 1 }, RenderQuality.Refined, pens, null, null, null);
+        });
+        Assert.Equal(1, drawer.LastDrawnItemCount);
+        Assert.True(culled.MaxBrightness((int)Projection(10).WorldToScreen(16, 10).X,
+            (int)Projection(10).WorldToScreen(16, 10).Y) > 100);
+
+        PixelBuffer full = RenderPixels(ctx =>
+        {
+            drawer.BeginFrame();
+            drawer.Draw(ctx, Projection(10), items, null, RenderQuality.Refined, pens, null, null, null);
+        });
+        Assert.Equal(2, drawer.LastDrawnItemCount);
+        Assert.NotNull(full);
+
+        drawer.BeginFrame();
+        Assert.Equal(0, drawer.LastDrawnItemCount); // 帧开始清零
+    }
+
     [AvaloniaFact]
     public void DrawerDirect_MatchesDrawingCanvas_OnMixedFixture()
     {

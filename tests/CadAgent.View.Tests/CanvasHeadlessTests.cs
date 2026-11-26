@@ -396,6 +396,105 @@ public class CanvasHeadlessTests
         finally { window.Close(); }
     }
 
+    // ---- 合并前审查：裁剪判别性 E2E / 文本剔除边距 / diff 预算降级 ----
+
+    [AvaloniaFact]
+    public void Canvas_ZoomCulling_DrawnItemCountDrops_FullViewDrawsAll()
+    {
+        // 判别性：直接绘制路径（关缓存）下，全图帧绘制全部图元；放大到 A 后
+        // 仅视口内相交项进入绘制器（LastDrawnItemCount < Items.Count）。
+        // 若视口裁剪失效（indices=null 全量），放大帧计数仍为 2 → 本测试失败。
+        RenderItem a = HatchSquare(0, 0, 2, "0", "A");
+        RenderItem c = HatchSquare(12, 0, 2, "0", "C");
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { a, c }, 200, 200);
+        canvas.DisableCacheForTests = true;
+        canvas.InvalidateVisual();
+        Dispatcher.UIThread.RunJobs();
+        try
+        {
+            window.CaptureRenderedFrame();
+            window.CaptureRenderedFrame();
+            Assert.Equal(vm.Items.Count, canvas.LastDrawnItemCount); // 全图：全部可见项
+
+            (double ax, double ay) = vm.WorldToScreen(1, 1);
+            vm.ZoomAt(8, ax, ay); // C 完全出屏，A 部分可见
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+            Assert.True(canvas.LastDrawnItemCount < vm.Items.Count,
+                $"放大后仅视口内图元应绘制（实际 {canvas.LastDrawnItemCount}/{vm.Items.Count}）");
+            Assert.Equal(1, canvas.LastDrawnItemCount);
+            Assert.True(NeighborhoodBrightness(frame!,
+                (int)Math.Round(vm.WorldToScreen(1.5, 1).X),
+                (int)Math.Round(vm.WorldToScreen(1.5, 1).Y)) > 150);
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_TextCullingBottomMargin_ItemJustBelowViewportStillDrawn()
+    {
+        // 文本逻辑字盒完全在视口下缘之外（基线屏 y≈220 > 200），但字形上升区可能
+        // 触达视口（QueryWorld 的 ascent 边距 = 1.2×最大字高）。裁剪边距若缺失 →
+        // 该文本被剔除（LastDrawnItemCount 少 1）——本测试判别结果。
+        var text = new RenderItem(RenderKind.Text, new[] { (5.0, 0.0) }, "0", 0xFFFFFF, "MMMM", 1.0, 0, "T1");
+        RenderItem line = Line(0, 10, 10, 10, "L1"); // 撑起内容包围盒，令 Fit 缩放=18px/世界单位
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { text, line }, 200, 200);
+        canvas.DisableCacheForTests = true;
+        canvas.InvalidateVisual();
+        Dispatcher.UIThread.RunJobs();
+        try
+        {
+            vm.PanBy(0, 30); // 内容整体下移 30px：文本基线屏 y≈220（字盒 [202,220]）
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            window.CaptureRenderedFrame();
+
+            (double tx, double ty) = vm.WorldToScreen(5, 0);
+            Assert.True(ty > canvas.Bounds.Height, "前提：文本基线须在视口下缘之外");
+            Assert.True(ty - 1.0 * vm.Scale > canvas.Bounds.Height, "前提：逻辑字盒完全在视口外");
+            Assert.Equal(2, canvas.LastDrawnItemCount); // 线 + 边距内文本
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Canvas_DiffOverBudgetSelection_RendersBbox_AndSetsDowngradeNote()
+    {
+        // diff 直绘路径的超预算选中项：包围盒 + 2px 黄描边，且 LastSelectionDowngraded
+        // 置位（状态栏注记与缓存路径同语义）。旧实现漏置位 → 注记为 null。
+        const int points = 2500;
+        var diagonal = new (double X, double Y)[points];
+        for (int i = 0; i < points; i++)
+        {
+            double t = 10.0 * i / (points - 1);
+            diagonal[i] = (t, t);
+        }
+        var hatch = new RenderItem(RenderKind.Hatch, diagonal, "0", 0xFFFFFF, null, 0, 0, "DENSE");
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(new[] { hatch }, 200, 200);
+        try
+        {
+            vm.Select(0);
+            vm.SetDiffOverlay(new DiffOverlay(Array.Empty<RenderItem>(),
+                Array.Empty<string>(), Array.Empty<string>()));
+            Dispatcher.UIThread.RunJobs();
+            window.CaptureRenderedFrame();
+            WriteableBitmap? frame = window.CaptureRenderedFrame();
+            Assert.NotNull(frame);
+
+            Assert.Contains("包围盒", canvas.LastRenderNote);
+            (double ex, double ey) = vm.WorldToScreen(5, 10); // bbox 上边中点
+            (double ix, double iy) = vm.WorldToScreen(2, 8);  // bbox 内部（远离对角线）
+            int px = (int)Math.Round(ex), py = (int)Math.Round(ey);
+            Assert.True(NeighborhoodBrightness(frame!, px, py) > 150, "降级选中须画 bbox 描边");
+            Assert.True(MinChannelInNeighborhood(frame!, px, py) < 90, "描边须为选中黄（非白）");
+            Assert.True(NeighborhoodBrightness(frame!, (int)Math.Round(ix), (int)Math.Round(iy)) < 90,
+                "内部不得填充选中色（只画包围盒）");
+        }
+        finally { window.Close(); }
+    }
+
     /// <summary>Max RGB channel in a 5x5 neighborhood (anti-aliased 1px stroke may
     /// not fully cover the exact mathematical point), bounds-checked.</summary>
     private static int NeighborhoodBrightness(WriteableBitmap frame, int x, int y)
@@ -414,6 +513,24 @@ public class CanvasHeadlessTests
                 max = Math.Max(max, Math.Max(r, Math.Max(g, b)));
             }
         return max;
+    }
+
+    /// <summary>Min channel value over a 5x5 neighborhood (yellow ≈0 blue; white/background ≈high).</summary>
+    private static int MinChannelInNeighborhood(WriteableBitmap frame, int x, int y)
+    {
+        using ILockedFramebuffer fb = frame.Lock();
+        int min = 255;
+        for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++)
+            {
+                int px = x + dx, py = y + dy;
+                if (px < 0 || py < 0 || px >= fb.Size.Width || py >= fb.Size.Height) continue;
+                int offset = py * fb.RowBytes + px * 4;
+                int pixelMin = Math.Min(Marshal.ReadByte(fb.Address, offset),
+                    Math.Min(Marshal.ReadByte(fb.Address, offset + 1), Marshal.ReadByte(fb.Address, offset + 2)));
+                min = Math.Min(min, pixelMin);
+            }
+        return min;
     }
 
     /// <summary>Max of one RGBA channel (0=R,1=G,2=B; headless frames are Rgba8888)
