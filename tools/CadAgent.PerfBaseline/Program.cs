@@ -260,6 +260,9 @@ internal static class Program
 
         IReadOnlyList<RenderItem> items = null!;
         m.BuildMs = Ms(() => items = RenderModelBuilder.Build(session));
+        // 索引构建（CanvasViewModel ctor → RenderItemIndex）单列：与 RenderModelBuilder.Build
+        // 分开计量（加载后首帧前的一次性成本；MainWindow 构造期在 UI 线程发生，列为信息项）。
+        m.IndexBuildMs = Ms(() => _ = new CanvasViewModel(items));
         m.ItemCount = items.Count;
         m.HatchPoints = items.Where(i => i.Kind == RenderKind.Hatch).Sum(i => i.Points.Count);
         m.TextItems = items.Count(i => i.Kind == RenderKind.Text);
@@ -327,9 +330,10 @@ internal static class Program
     /// 手动 Measure/Arrange 而不泵消息——计时首帧即「真冷 Refined 全量绘制 + 缓存位图重建」
     /// （冷文字缓存 + RTB 分配，与生产首帧同路径）；随后 PanBy(32,0) 三次再渲染 = 平移 blit
     /// （真实交互路径，128px 外扩内不重绘；3 次取中位，单次方差见明细）。
-    /// 末段为「交互档失效重建」（spec §8）：暖缓存已存在时强制 Interactive + 缩放令结构失效，
-    /// 下一次渲染走 RebuildCache（全量交互档栅格化 + blit）——与上一行 Refined 暖重建同口径，
-    /// 仅质量档不同；BaseRenderCount 增量可证明确为重建而非 blit。
+    /// 末段为「模拟重建」（spec §8 目标；同一 RebuildCache 例程的模拟触发）：暖缓存已存在时
+    /// 强制 Interactive + 缩放令结构失效，下一次渲染走 RebuildCache（全量交互档栅格化 + blit）
+    /// ——与上一行 Refined 暖重建同口径，仅质量档不同；生产触发点为交互期越界/编辑点击。
+    /// BaseRenderCount 增量可证明确为重建而非 blit。
     /// 帧计时不含 PNG 编码；refined 另列编码耗时（旧基线 frame 含编码）。
     /// </summary>
     private static void BenchFrames(Metrics m, IReadOnlyList<RenderItem> items,
@@ -381,7 +385,7 @@ internal static class Program
             Dispatcher.UIThread.RunJobs();
             m.RefinedWarmMs = Ms(() => rtb.Render(canvas));
 
-            // 交互档失效重建：暖缓存已存在；强制 Interactive 并以同幅缩放令缓存结构失效，
+            // 模拟重建（非生产交互触发）：暖缓存已存在；强制 Interactive 并以同幅缩放令缓存结构失效，
             // 每次样本 = 一次完整渲染（RebuildCache[Interactive] + blit）。
             canvas.SetQualityForTests(RenderQuality.Interactive);
             var rebuildSamples = new List<double>(FrameSamples);
@@ -418,19 +422,20 @@ internal static class Program
         Preamble.Add("");
         Preamble.Add($"> 运行：{DateTime.Now:yyyy-MM-dd HH:mm:ss} · {RuntimeInformation.FrameworkDescription}" +
                      $" · {RuntimeInformation.OSDescription} · CPU={Environment.ProcessorCount} · headless Skia（软件渲染）");
-        Preamble.Add($"> 阈值（不 hard fail）：交互帧与交互档失效重建 <{InteractiveTargetMs:0}ms、命中 <{HitTargetMs:0}ms/次、" +
+        Preamble.Add($"> 阈值（不 hard fail）：交互帧与模拟重建 <{InteractiveTargetMs:0}ms、命中 <{HitTargetMs:0}ms/次、" +
                      $"Refined 帧/快照 <{RefinedTargetMs:0}ms；合成仅 200k 计入交互/命中目标（spec §7）。");
         Preamble.Add($"> 帧：{FrameWidth}×{FrameHeight} headless 窗口内同一 DrawingCanvas；Refined=真冷首帧（Refined 全量+缓存位图重建，不含 PNG 编码），" +
                      $"平移交互=PanBy(32,0) 后 blit 复用缓存（{FrameSamples} 次取中位）。");
-        Preamble.Add("> 交互档失效重建=暖缓存后切 Interactive + 缩放失效 → 一次全量重建+blit（spec §8「越界/失效重建（交互档 <50ms）」，" +
-                     $"{FrameSamples} 次取中位）；命中同为 {FrameSamples} 次×{HitIterations} 取中位。");
+        Preamble.Add("> 模拟重建=暖缓存后切质量档 Interactive + 缩放失效 → 一次全量重建+blit（与生产同一 RebuildCache 例程，" +
+                     $"非生产交互期真实触发；生产触发点为交互期越界/编辑点击。spec §8 目标 <50ms），{FrameSamples} 次取中位；" +
+                     $"命中同为 {FrameSamples} 次×{HitIterations} 取中位。");
         Preamble.Add("> 快照=RenderPng（渲染 + PNG 编码；编码量级见同行 refined 的 +enc 列）；snapshot warm 为重复 2 次取最小值。" +
                      "load src=源 DWG 首载（%TEMP% 同字节副本，OS 文件缓存已暖，非磁盘冷载）；load working=二开（working+侧车）。");
         Preamble.Add("");
-        Preamble.Add("| case | load src | load working | build | hash cold | hash repeat | snapshot | refined frame (+enc) " +
-                     "| pan frame med (min-max, n=" + FrameSamples + ") | interactive rebuild med (first/min) " +
+        Preamble.Add("| case | load src | load working | build | index build | hash cold | hash repeat | snapshot | refined frame (+enc) " +
+                     "| pan frame med (min-max, n=" + FrameSamples + ") | simulated rebuild med (first/min) " +
                      "| hit x" + HitIterations + " med (count) | per hit | managed | status |");
-        Preamble.Add("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+        Preamble.Add("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     }
 
     private static string Compose()
@@ -449,7 +454,8 @@ internal static class Program
         m.Targets = requireTargets;
         string status = Status(m);
         Rows.Add($"| {m.Name} | {Num(m.LoadSourceMs)} | {Num(m.LoadWorkingMs)} | " +
-                 $"{m.BuildMs:0}ms -> {m.ItemCount} items | {m.HashColdMs:0.#}ms | {m.HashRepeatMs:0.###}ms | " +
+                 $"{m.BuildMs:0}ms -> {m.ItemCount} items | {m.IndexBuildMs:0}ms | " +
+                 $"{m.HashColdMs:0.#}ms | {m.HashRepeatMs:0.###}ms | " +
                  $"{m.SnapshotMs:0}ms ({m.SnapshotKb}KB, warm min2 {m.SnapshotWarmMs:0}ms) | " +
                  $"{m.RefinedFrameMs:0.#}ms (+{m.RefinedEncodeMs:0.#}ms enc, warm {m.RefinedWarmMs:0.#}ms) | " +
                  $"{m.InteractiveFrameMs:0.##}ms ({m.InteractiveFrameMinMs:0.##}-{m.InteractiveFrameMaxMs:0.##}) | " +
@@ -459,7 +465,8 @@ internal static class Program
 
         // 明细：表后输出（每案一段，前置空行，列表不与表格相邻）。
         Details.Add("");
-        Details.Add($"- {m.Name}: entities={m.TopEntities} items={m.ItemCount} text={m.TextItems} " +
+        Details.Add($"- {m.Name}: build={m.BuildMs:0}ms indexBuild={m.IndexBuildMs:0}ms " +
+                    $"entities={m.TopEntities} items={m.ItemCount} text={m.TextItems} " +
                     $"hatchPts={m.HatchPoints} census={m.CensusState} unparsed={m.UnparsedCount} " +
                     $"hashEqual={m.HashEqual}");
         if (m.Kind == "drawing")
@@ -481,7 +488,7 @@ internal static class Program
                     $"perHit median={m.HitMedianPerCallMs:0.###}ms");
 
         Console.WriteLine(Ascii($"[{m.Name}] loadSrc={Num(m.LoadSourceMs)} loadWorking={Num(m.LoadWorkingMs)} " +
-                                $"build={m.BuildMs:0}ms items={m.ItemCount} hashCold={m.HashColdMs:0.#}ms " +
+                                $"build={m.BuildMs:0}ms index={m.IndexBuildMs:0}ms items={m.ItemCount} hashCold={m.HashColdMs:0.#}ms " +
                                 $"hashRepeat={m.HashRepeatMs:0.###}ms snapshot={m.SnapshotMs:0}ms(warm {m.SnapshotWarmMs:0}) " +
                                 $"refined={m.RefinedFrameMs:0.#}ms(+{m.RefinedEncodeMs:0.#}) " +
                                 $"panMed={m.InteractiveFrameMs:0.##}ms rebuildMed={m.InteractiveRebuildMedianMs:0.#}ms " +
@@ -655,6 +662,7 @@ internal static class Program
         public int UnparsedCount = -1;
         public int TopEntities;
         public double BuildMs;
+        public double IndexBuildMs;
         public int ItemCount;
         public int HatchPoints;
         public int TextItems;

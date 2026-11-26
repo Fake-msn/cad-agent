@@ -98,7 +98,7 @@
      源 DWG 解析（R9）或外部可信存证。
    - 写入窗口（明示）：Save 的 size/mtime/hash 取自 Save 时刻的源，census 来自此前的 Load；
      源在两者之间被换图会把旧 census 挂上新指纹（窗口极短，不闭合）。
-2. **Async 加载（View）**：新增 `MainViewModel.LoadAsync(drawingPath, projectDir, skillDirs)`（后台线程 Load+Build；失败以 ErrorMessage 返回）与同步构造并存（既有测试/CLI 零改动）；启动入口改用异步路径并显示进度/骨架屏，失败语义不变。
+2. **Async 加载（View）**：新增 `MainViewModel.LoadAsync(drawingPath, projectDir, skillDirs)`（后台线程 **Load + RenderModelBuilder.Build + 幅面登记簿（Sheets）**；失败以 ErrorMessage 返回）与同步构造并存（既有测试/CLI 零改动，同步构造同样产出 Items/Sheets）；启动入口改用异步路径并显示进度/骨架屏，失败语义不变。MainWindow 直接消费 `MainViewModel.Items`/`Sheets`，不在 UI 线程重建。
 3. **不改工作副本格式**：working 仍为 `.working.dxf`；DWG 首载物化与 census 行为保持正确性。若真实图 working 解析仍 >5s，记 tracked（可选后续：AC1027 working 或二进制缓存，需另立切片）。
 4. 目标：两次打开同一 Green 图的第二次不重读源 DWG（当前冷载 6–12s → working 载 2.9–4.9s 或更低）；UI 不阻塞。
 
@@ -129,8 +129,9 @@
 
 - 不改 GPU/渲染后端；headless 软件渲染为验收口径，真机 GPU 可能更快。
 - LOD 为视觉降级：概览态文字/填充/细图元可能不显示或简化；Refined 恢复；导出/快照使用 Refined。
-- 交互期缩放复用旧位图（按比例变换），静止 150ms 精绘；越界/失效重建为全量重绘
-  （实测交互档 77.6/120.4ms，未达 <50ms——见 §12.2 注与 §12.6；<50ms 仅缓存复用路径）。
+- 交互期缩放复用旧位图（按比例变换），静止 150ms 精绘；越界/失效重建为全量重绘。
+  模拟重建（质量档+缩放失效；与生产同一 RebuildCache 例程），**77.6/120.4ms，TARGET 未达**
+  <50ms——生产触发点为交互期越界/编辑点击；<50ms 仅缓存复用路径（见 §12.2 注与 §12.6）。
 - 加载绝对读速受 ACadSharp 限制；本切片只做异步与空 census 信任，工作副本格式不改。
 - **空 census 信任非安全边界**：sidecar 可被任何本地进程改写，伪造 `verifiedEmpty`/指纹可使
   Yellow 源显示为 Green；`Producer` 仅可观测、未签名。防篡改需外部可信存证（不在本切片）。
@@ -171,7 +172,7 @@
 | 指标 | 接地图 before → after | 强电图 before → after | 目标 |
 |---|---|---|---|
 | 交互帧（blit 复用缓存，3 次中位） | 488 → **1.95ms**（1.36–2.35） | 313 → **2.44ms**（2.26–3.71） | <50ms PASS |
-| 交互档失效重建（暖缓存 + Interactive + 缩放失效，全量重建+blit，3 次中位） | — → **77.6ms**（79.3/77.6/77.0） | — → **120.4ms**（125.7/120.4/117.1） | <50ms **TARGET 未达** |
+| 模拟重建（质量档+缩放失效；与生产同一 RebuildCache 例程，全量重建+blit，3 次中位） | — → **77.6ms**（79.3/77.6/77.0） | — → **120.4ms**（125.7/120.4/117.1） | <50ms **TARGET 未达** |
 | 命中 2000 次总 / 每次（3 次中位） | 5567ms / 2.78ms → **10ms / 0.005ms** | 8101ms / 4.05ms → **12ms / 0.006ms** | <2ms/次 PASS |
 | Refined 冷首帧（渲染） | 488（含编码）→ **88.6ms**（+65.9ms 编码） | 313（含编码）→ **119.9ms**（+56.2ms 编码） | <150ms 渲染 PASS |
 | Refined 冷首帧（含编码，与旧基线同口径） | 488 → **154.5ms** | 313 → **176.1ms** | <150ms **TARGET** |
@@ -180,6 +181,7 @@
 | 二开（working + 侧车 census） | 4908 → **4230ms** | 2879 → **2089ms** | 不重读源（PASS） |
 | ComputeHash 冷 / 重复 | 524ms / — → **333.5ms / 0.060ms** | 194ms / — → **346.6ms / 0.002ms** | 重复 O(1) PASS |
 | 构建 items | 310 → 218ms（54,929） | 938 → 981ms（76,589） | — |
+| 索引构建（CanvasViewModel ctor / RenderItemIndex，终审新增单列） | — → **21ms** | — → **12ms** | —（信息项） |
 | 托管内存（单文档） | 489 → **494MB** | 342 → **248MB** | — |
 | 二开源未动 / 源移走可再载 | — → **True / True**（4729ms） | — → **True / True**（1931ms） | PASS |
 
@@ -192,16 +194,23 @@
   +43%/+32%，跨运行波动大，二者均未达）。扣编码后的 116/135ms 是**派生估算**（重复快照减 refined
   编码，非独立实测，不改变判据）；判据仍为冷首帧，**150ms 未达**。快照仍较基线 895/340ms 改善
   约 2.1×/1.8×，瓶颈为软件光栅 55k–77k 基元的描边/轮廓成本。
-- **交互档失效重建**（spec §8 的「越界/失效重建（交互档 <50ms）」实测）：暖缓存存在时
+- **模拟重建**（spec §8 越界/失效重建目标 <50ms 的实测口径）：暖缓存存在时
   `SetQualityForTests(Interactive)` + 缩放令缓存结构失效，下一次渲染走 `RebuildCache(Interactive)`
   + blit；每样本 `BaseRenderCount` 递增（`rebuilt=True`，见 after-real.md 明细），3 次中位
-  **77.6/120.4ms → TARGET 未达**。同状态 Refined 暖重建 82/138ms，即交互档 LOD 仅省
-  ~5%/13%：失效重建的成本是软件光栅全量基元（约 55k/77k）+ 9.3MB 缓存位图重分配，LOD
-  降不了线条主体。**<50ms 只在缓存命中/复用路径成立**（平移 blit 1.95/2.44ms、交互缩放仿射）。
-  残留见 §12.6。
-- 合成 200k：平移交互 **2.04ms**（1.77–3.13）、命中 **0.194ms/次**；失效重建 200.7ms、
-  Refined 冷 272.7 / 暖 198.3ms、快照 751ms（重复 535）。对应「合成 200k 交互 <50ms、
+  **77.6/120.4ms → TARGET 未达**。触发为**模拟**（质量档+缩放失效），与生产同一
+  `RebuildCache` 例程但非生产交互期真实触发——生产触发点为交互期越界/编辑点击。同状态
+  Refined 暖重建 82/138ms，即交互档 LOD 仅省 ~5%/13%：重建成本是软件光栅全量基元
+  （约 55k/77k）+ 9.3MB 缓存位图重分配，LOD 降不了线条主体。**<50ms 只在缓存命中/复用路径
+  成立**（平移 blit 1.95/2.44ms、交互缩放仿射）。残留见 §12.6。
+- 合成 200k：平移交互 **2.04ms**（1.77–3.13）、命中 **0.194ms/次**；模拟重建 200.7ms、
+  索引构建 **418ms**（RenderModelBuilder.Build 216ms，终审复测）、Refined 冷 272.7 / 暖
+  198.3ms、快照 751ms（重复 535）。对应「合成 200k 交互 <50ms、
   命中 <2ms」PASS；重建/Refined/快照仅记录（spec §7 对合成只设交互/命中目标）。
+- **终审复测（2026-11-27，新增 `index build` 单列）**：RenderModelBuilder.Build 240/1126ms
+  与索引构建 21/12ms（synth 200k：Build 216ms / 索引 418ms，200k 索引成本显著）；
+  模拟重建复测 78.2/108ms（synth 207.1ms），平移 2.43/1.67ms、命中 0.004/0.006ms。
+  复测在上一轮验收运行的波动内（判据仍以上表验收运行为准）；完整行见
+  `outputs/perf-baseline/after-real.md`、`after-synth.md`。
 
 ### 12.3 LOD / 缓存语义边界
 
@@ -227,6 +236,11 @@
   **不是安全边界**（伪造指纹可使 Yellow 源显示 Green）；`Producer` 仅可观测、未签名。
   需强校验时依赖源 DWG 解析（R9）或外部可信存证。
 - 已知窗口（不闭合）：Save 的 size/mtime/hash 取自 Save 时刻源文件，census 来自此前 Load。
+- **信任旁路可达性（明示）**：源删除后「免重读源」的信任旁路只能经
+  `DrawingSession.Load(..., persisted, trustEmptySource: true)` 直接调用到达；`LoadTrusted`
+  自身要求 `File.Exists(sourcePath)`（源缺失即返回 Empty + false），CLI/View 的 sidecar
+  通路均经 `LoadTrusted` 取信任，故正常路径不可达——此为本意（design.md §7 口径），
+  测试中的源删除成功载入即该直接调用。
 - **真实路径边界（明示）**：两份真实标本均为 **Yellow**（census 非空，342/7557），其二开走
   working 副本 + 侧车（实测不重读源 DWG，4230/2089ms，`noSourceReread=True`），**不触发**
   verified-empty 分支；verified-empty 的「双开免重读源」仅由合成 DXF / CLI 用例覆盖。
@@ -249,7 +263,8 @@
   二进制缓存属另立切片。
 - **快照 150ms 目标未达**（冷 434/193、重复最小 182/191；跨运行 193–301/182–214 波动）：
   留作后续（减少基元描边/路径合并、或快照按视口瓦片并行）；本轮不改渲染后端。
-- **交互档失效重建 <50ms 未达**（实测 77.6/120.4ms，同状态 Refined 暖重建 82/138ms）：
+- **交互期越界/编辑重建 <50ms 未达**（模拟重建实测 77.6/120.4ms，同状态 Refined 暖重建
+  82/138ms；触发为质量档+缩放失效的模拟，非生产交互期真实触发）：
   失效/越界重建必须全量软件光栅 55k/77k 基元并重分配 9.3MB 缓存位图，交互档 LOD 只能省
   5%–13%；<50ms 仅适用于缓存命中/复用（平移 blit、交互缩放仿射）。若需重建也 <50ms，
   需另立切片（瓦片化/并行光栅或增量重绘脏区），本切片不改渲染后端。
