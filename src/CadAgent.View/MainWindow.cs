@@ -12,6 +12,8 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CadAgent.Core;
+using CadAgent.Data.Blocks;
+using CadAgent.Data.Handlers;
 using CadAgent.Data.Rules;
 using CadAgent.Report;
 using CadAgent.View.Controls;
@@ -107,8 +109,12 @@ public sealed class MainWindow : Window
     /// <summary>T9 工具点击命中容差（设备像素，与 DrawingCanvas.PickTolerancePixels 同口径）。</summary>
     private const double PickTolerancePixels = 5;
 
-    /// <summary>项2 Plan-2 T5：布局幅面空间路由的行内拒绝文案（纸面编辑已启用，Plan-1 全幅拒绝退役）。</summary>
-    private const string BlockChildMessage = "块子图元编辑将在后续切片提供（Plan-3）";
+    /// <summary>项2 Plan-3 T6：子图元模式关闭时布局幅面块子图元的行内拒绝文案
+    /// （模式开启后编辑块定义，全实例生效——Plan-3 已落地，旧「后续切片」文案退役）。</summary>
+    private const string BlockChildToggleOffMessage = "块子图元需开启「子图元」模式（全实例生效）";
+
+    /// <summary>子图元模式开启时的状态栏提示（块内编辑=全实例生效）。</summary>
+    private const string SubEntityModeHint = "子图元模式：块内编辑=全实例生效";
 
     /// <summary>两击跨空间（模型/纸面）不成线——不得混空间成图元。</summary>
     private const string CrossSpaceMessage = "两击跨空间（模型/纸面），请在视图内同一空间完成";
@@ -638,6 +644,19 @@ public sealed class MainWindow : Window
         toolbar.Children.Add(undo);
         UndoButton = undo;
 
+        // 项2 Plan-3 T6：子图元模式 Toggle（默认关）。开=块子图元按块定义编辑（全实例生效，
+        // 每次执行前模态确认 + 实例计数）；关=旧语义（模型幅面整父、布局幅面行内提示）。
+        var subEntityToggle = new ToggleButton
+        {
+            Content = "子图元",
+            Margin = new Thickness(2, 0),
+            IsChecked = false,
+            [ToolTip.TipProperty] = "子图元模式：块内编辑影响所有引用实例（默认关）"
+        };
+        subEntityToggle.IsCheckedChanged += (_, _) => Canvas?.Invalidate(); // 状态栏提示同步
+        SubEntityToggle = subEntityToggle;
+        toolbar.Children.Add(subEntityToggle);
+
         var textInput = new TextBox { Watermark = "Text content", Width = 140, Margin = new Thickness(2, 0) };
         EditTextInput = textInput;
         toolbar.Children.Add(textInput);
@@ -1133,6 +1152,9 @@ public sealed class MainWindow : Window
     /// <summary>前后对比切换（T6）。</summary>
     public ToggleButton? DiffToggle { get; }
 
+    /// <summary>子图元模式开关（项2 Plan-3 T6：默认关；开=块子图元按块定义编辑，全实例生效）。</summary>
+    internal ToggleButton? SubEntityToggle { get; }
+
     /// <summary>审计/对比错误文本（快照缺失等失败时可见）。</summary>
     public TextBlock? AuditError { get; }
 
@@ -1259,6 +1281,13 @@ public sealed class MainWindow : Window
     /// （headless 无 owner 消息泵不测 ShowDialog，真模态走 Task 11 真机协议）。
     /// </summary>
     internal Func<string, Task<bool>>? ConfirmDeleteOverride;
+
+    /// <summary>
+    /// 块定义变更确认 seam（项2 Plan-3 T6）：null → 真模态 ConfirmDialog.ShowDialog&lt;bool&gt;；
+    /// 非 null → 测试代理（headless 无 owner 消息泵不测 ShowDialog）。每次块定义变更
+    /// （移动/删除/改层/改文字）执行前必经此确认，取消 → 不开始 tx。
+    /// </summary>
+    internal Func<string, Task<bool>>? ConfirmEditOverride;
 
     /// <summary>改层工具目标层下拉（T9：ChangeLayer 激活且选中实体时选择即应用）。</summary>
     public ComboBox? EditLayerSelector { get; }
@@ -1663,6 +1692,8 @@ public sealed class MainWindow : Window
             string status = $"{_baseStatus} | Zoom {Canvas.Zoom:0.##}x | 幅面 {_currentSheetName}";
             // 项2 B（Plan-2 T5）：布局幅面 = 纸面/模型双空间（视口内模型 + 纸面均可编辑）。
             if (_layoutSheetActive) status += "（纸面/模型双空间）";
+            // 项2 Plan-3 T6：子图元模式开启 → 醒目提示块内编辑=全实例生效。
+            if (SubEntityToggle?.IsChecked == true) status += $" | {SubEntityModeHint}";
             if (selected is not null)
                 status += $" | Selected {selected.Handle} ({selected.Kind}, layer {selected.Layer})";
             if (Audit?.SelectedSummary is string summary) status += $" | Tx {summary}";
@@ -2143,24 +2174,43 @@ public sealed class MainWindow : Window
         : ParentHandle(item.Handle);
 
     /// <summary>
-    /// 布局幅面按选中图元守卫（Move/Delete/ChangeLayer/改文字 等按图元动作）：Locked → 只读；
-    /// BlockChild（块子图元，不分空间）→ Plan-3 拒绝；Paper → 允许（经 out 意图交给调用方加
-    /// space/layout 参数）；Model → 可映射性判定（twist/无视口拒绝）。模型幅面直通（意图 Model，
-    /// 既有"块子图元按父实体整体"语义不变）。
+    /// 布局幅面按选中图元守卫（Move/Delete/ChangeLayer/改文字 等按图元动作）：Locked → 只读
+    /// （先于一切）；子图元模式开启 → BlockChild 意图（两幅面；模型空间子图元保留可映射性判定）；
+    /// 模式关闭：BlockChild → 布局幅面行内提示拒绝（模型幅面直通=既有整父语义）；Paper → 允许
+    /// （经 out 意图交给调用方加 space/layout 参数）；Model → 可映射性判定（twist/无视口拒绝）。
     /// </summary>
     private bool TryGuardSelection(RenderItem item, out EditSpaceIntent intent)
     {
         intent = EditSpaceIntent.Model;
+        EditRoute route = _layoutSheetActive
+            ? EditRouting.Route(_layoutViewport, item, (0, 0))
+            : new EditRoute(EditSpaceIntent.Model, true, null);
+        if (route.Intent == EditSpaceIntent.Locked)
+        {
+            // 文案单一来源 EditRouting（"视口边框只读"）；契约违约兜底不得复用其他文案。
+            SetEditError(route.Reason ?? "视口边框只读");
+            return false;
+        }
+        // 子图元模式（项2 Plan-3 T6）：块子图元按块定义编辑（全实例生效，确认在动作入口）。
+        if (item.BlockName is not null && SubEntityToggle?.IsChecked == true)
+        {
+            intent = EditSpaceIntent.BlockChild;
+            if (!_layoutSheetActive || item.Space == RenderSpace.PaperSpace) return true;
+            if (!route.CanMapModel)
+            {
+                SetEditError(route.Reason ?? NoViewportMessage); // 旋转/无视口：增量不可映射
+                return false;
+            }
+            return true;
+        }
         if (!_layoutSheetActive) return true;
-        EditRoute route = EditRouting.Route(_layoutViewport, item, (0, 0));
         switch (route.Intent)
         {
-            case EditSpaceIntent.Locked:
-                // 文案单一来源 EditRouting（"视口边框只读"）；契约违约兜底不得复用其他文案。
+            case EditSpaceIntent.Locked: // 上方已处理，防御性保留（契约违约不可达）
                 SetEditError(route.Reason ?? "视口边框只读");
                 return false;
             case EditSpaceIntent.BlockChild:
-                SetEditError(BlockChildMessage);
+                SetEditError(BlockChildToggleOffMessage);
                 return false;
             case EditSpaceIntent.Paper:
                 if (_currentLayoutName.Length == 0)
@@ -2184,8 +2234,63 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
+    /// 块定义编辑预检（项2 Plan-3 T6；Data 守卫单一来源）：块不存在/受保护（匿名含 Dimension、
+    /// XRef、动态、未加载）→ 精确 Data 文案入 EditError，返回 false。只读、无副作用。
+    /// </summary>
+    private bool TryPreflightBlock(RenderItem item)
+    {
+        string? blockName = item.BlockName;
+        if (blockName is null) return false;
+        var block = EditTargetResolver.FindBlock(_session, blockName);
+        if (block is null)
+        {
+            SetEditError(string.Format(EditTargetResolver.BlockNameNotFoundMessage, blockName));
+            return false;
+        }
+        if (!EditTargetResolver.IsBlockEditable(block))
+        {
+            SetEditError(string.Format(EditTargetResolver.BlockProtectedMessage, blockName));
+            return false;
+        }
+        if (item.SourceHandle is null)
+        {
+            // 防御：渲染未戳记来源（正常路径恒有子实体句柄）。
+            SetEditError(BlockChildToggleOffMessage);
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// 块定义变更确认（项2 Plan-3 T6）：预检 → 实例计数（约值，含嵌套估算）→ 模态确认。
+    /// 返回 true 才允许执行；取消/被拒 → false（不开始 tx）。
+    /// </summary>
+    private async Task<bool> ConfirmBlockEditAsync(RenderItem item)
+    {
+        if (!TryPreflightBlock(item)) return false;
+        int count = BlockInstanceCounter.Count(_doc, item.BlockName!);
+        string msg = $"将修改块定义 {item.BlockName}，影响约 {count} 个实例（含嵌套估算）；所有引用同步变化。继续？";
+        return ConfirmEditOverride is not null
+            ? await ConfirmEditOverride(msg)
+            : await new ConfirmDialog(msg).ShowDialog<bool>(this);
+    }
+
+    /// <summary>
+    /// 块定义编辑执行入口（BlockChild 意图）：确认 → 重入兜底 → 经 EditViewModel/StepEngine
+    /// 执行（handle=子实体 SourceHandle，block=最内层块名）。<paramref name="apply"/> 收到句柄。
+    /// </summary>
+    private async Task RunBlockEditAsync(RenderItem item, Func<string, Task<EditResult>> apply)
+    {
+        if (!await ConfirmBlockEditAsync(item)) return;
+        if (_editBusy || _diffBusy) return; // 确认等待期间重入（seam 路径防御）
+        string handle = item.SourceHandle!;
+        await RunEditAsync(() => apply(handle));
+    }
+
+    /// <summary>
     /// 布局幅面移动增量：纸面选中 → 原始 dx/dy（纸面增量即图纸增量）；模型（含模型幅面直通）
     /// → ÷视口比例（可映射性经 Route 判定）。<paramref name="intent"/> 交给调用方选择 space 参数。
+    /// 块子图元（子图元模式）不走本方法：调用方先判 BlockChild 并自行换算块局部增量。
     /// </summary>
     private bool TryMoveDelta(double bx, double by, double wx, double wy,
         out double dx, out double dy, out EditSpaceIntent intent)
@@ -2227,10 +2332,17 @@ public sealed class MainWindow : Window
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
         if (Edit.ActiveTool == EditTool.Delete && Canvas.SelectedHandle is string selected)
         {
-            // R5：Locked/BlockChild 守卫先于确认（不对只读/Plan-3 目标弹确认）；纸面目标允许。
+            // R5：Locked/BlockChild 守卫先于确认（不对只读目标弹确认）；纸面目标允许。
             RenderItem? item = Canvas.SelectedItem;
             EditSpaceIntent intent = EditSpaceIntent.Model;
             if (item is not null && !TryGuardSelection(item, out intent)) return;
+            // 项2 Plan-3 T6：子图元模式下的块子图元 → 块定义删除（确认含实例计数）。
+            if (intent == EditSpaceIntent.BlockChild)
+            {
+                string? blockName = item!.BlockName; // BlockChild 意图 ⇒ 最内层块名非空
+                await RunBlockEditAsync(item, h => Edit.DeleteAsync(h, block: blockName));
+                return;
+            }
             bool paper = item is not null && intent == EditSpaceIntent.Paper;
             bool attribute = item?.AttributeTag is not null; // I1：属性项实例级（模型/纸面同口径）
             string handle = EditTargetHandle(item!, paper);
@@ -2272,8 +2384,15 @@ public sealed class MainWindow : Window
             RenderItem? item = Canvas.SelectedItem;
             EditSpaceIntent intent = EditSpaceIntent.Model;
             if (item is not null && !TryGuardSelection(item, out intent)) return;
+            // 项2 Plan-3 T6：子图元模式下块子图元 → 块定义改层（全实例生效，确认先行）。
+            if (intent == EditSpaceIntent.BlockChild)
+            {
+                string? blockName = item!.BlockName; // BlockChild 意图 ⇒ 最内层块名非空
+                _ = RunBlockEditAsync(item, h => Edit.ChangeLayerAsync(h, layer, block: blockName));
+                return;
+            }
             bool paper = item is not null && intent == EditSpaceIntent.Paper;
-            // Imp#3：模型块子图元仍按父实体整体改层；纸面取纸面句柄 + space/layout；
+            // Imp#3：模型块子图元（模式关）仍按父实体整体改层；纸面取纸面句柄 + space/layout；
             // I1：属性项（不分幅面）取 ATTRIB 句柄实例级改层。
             string handle = EditTargetHandle(item!, paper);
             _ = RunEditAsync(() => paper
@@ -2363,7 +2482,7 @@ public sealed class MainWindow : Window
                 if (hit is int i)
                 {
                     RenderItem hitItem = Canvas.Items[i];
-                    // 布局幅面按下图元空间守卫（框只读/块子图元 Plan-3/模型不可映射含旋转）。
+                    // 布局幅面按下图元空间守卫（框只读/块子图元模式/模型不可映射含旋转）。
                     if (!TryGuardSelection(hitItem, out _)) return true;
                     Canvas.Select(i);
                     _moveBase = hitItem.Points.Count > 0
@@ -2376,7 +2495,32 @@ public sealed class MainWindow : Window
                     _moveBase = null;
                     // 首击后选择可能被改（SelectByHandle/深读定位）→ 按当前选中复检，
                     // 防选中漂移绕过守卫（布局下的 BlockChild 整父移动）。
-                    if (selected is not null && !TryGuardSelection(selected, out _)) return true;
+                    if (selected is not null)
+                    {
+                        if (!TryGuardSelection(selected, out EditSpaceIntent selIntent)) return true;
+                        if (selIntent == EditSpaceIntent.BlockChild)
+                        {
+                            // 项2 Plan-3 T6：块定义移动——世界增量来源分流后经 Insert 链逆解为局部增量。
+                            if (!TryPreflightBlock(selected)) return true; // 匿名/动态/XRef 先拒，勿进逆解
+                            double wdx = wx - bx, wdy = wy - by;
+                            if (_layoutSheetActive && selected.Space == RenderSpace.ModelSpace)
+                            {
+                                double vpScale = _layoutViewport!.Scale; // 守卫已证可映射
+                                wdx /= vpScale;
+                                wdy /= vpScale;
+                            }
+                            var (ok, ldx, ldy, inverseError) = BlockEditMath.WorldDeltaToBlockDelta(
+                                _doc, selected.ParentInsertChain ?? Array.Empty<string>(), wdx, wdy);
+                            if (!ok)
+                            {
+                                SetEditError(inverseError); // 奇异/链解析失败：无 tx
+                                return true;
+                            }
+                            _ = RunBlockEditAsync(selected,
+                                h => Edit.MoveAsync(h, ldx, ldy, block: selected.BlockName));
+                            return true;
+                        }
+                    }
                     if (!TryMoveDelta(bx, by, wx, wy, out double dx, out double dy, out EditSpaceIntent intent)) return true;
                     // Imp#3：模型块子图元句柄→父 Insert/Dimension 整体移动；纸面取纸面句柄；
                     // I1：属性项（不分幅面）取 ATTRIB 句柄实例级移动。
@@ -2403,9 +2547,10 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// 项2 Plan-2 T5：改文字点击——命中图元（无命中则用当前选中）须为文字类或 Insert 属性；
-    /// 目标句柄取 SourceHandle（属性=ATTRIB 句柄，实例级 set-text），内容取 Text content 框
-    /// （空=清空）。不弹确认（实例级，非块定义）。块子图元/只读框按路由守卫拒绝。
+    /// 项2 Plan-2 T5 / Plan-3 T6：改文字点击——命中图元（无命中则用当前选中）须为文字类或
+    /// Insert 属性；目标句柄取 SourceHandle（属性=ATTRIB 句柄，实例级 set-text）。子图元模式下
+    /// 块内文字 → 块定义 set-text（block=块名，确认后全实例生效）；模式关 → 行内提示。
+    /// 属性项（AttributeTag）BlockName 为 null，恒走实例级路径。
     /// </summary>
     private bool ApplySetTextClick(double wx, double wy)
     {
@@ -2416,10 +2561,23 @@ public sealed class MainWindow : Window
             SetEditError("请点击文字或属性图元");
             return true;
         }
-        // 块子图元（含模型幅面）→ Plan-3：句柄带子索引后缀，直落处理器只会报"句柄不存在"。
         if (target.BlockName is not null)
         {
-            SetEditError(BlockChildMessage);
+            if (SubEntityToggle?.IsChecked != true)
+            {
+                SetEditError(BlockChildToggleOffMessage); // 子索引句柄直落处理器只会报"句柄不存在"
+                return true;
+            }
+            if (target.Kind != RenderKind.Text)
+            {
+                SetEditError("仅文字/属性可改文字");
+                return true;
+            }
+            if (!TryGuardSelection(target, out _)) return true;
+            Canvas.Select(hitIndex ?? Canvas.SelectedIndex);
+            string blockText = EditTextInput?.Text ?? "";
+            _ = RunBlockEditAsync(target,
+                h => Edit!.SetTextAsync(h, blockText, block: target.BlockName));
             return true;
         }
         if (target.Kind != RenderKind.Text && target.AttributeTag is null)

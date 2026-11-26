@@ -63,7 +63,7 @@ public class SheetSelectorHeadlessTests
     /// 使纸面目标点为空点（全长映射线会在目标点二次命中 → 只重置基准不移动）。</param>
     /// <param name="twist">视口 TwistAngle（弧度）：非 0 时布局仍登记（尺寸合法）但纸→模型不可映射。</param>
     /// <param name="blockChild">模型空间追加块 LUM_CHILD（一条对角线子图元）+ Insert@(20,20)，
-    /// 锚点落在视口模型区域内——块子图元 Plan-3 拒绝用例夹具。</param>
+    /// 锚点落在视口模型区域内——块子图元（模式关）拒绝用例夹具。</param>
     /// <param name="extraLayer">追加空图层（布局幅面 ChangeLayer 允许路径目标）。</param>
     private static string LayoutDxf(double nearLineEndX = 1000, double twist = 0,
         bool blockChild = false, string? extraLayer = null)
@@ -582,7 +582,7 @@ public class SheetSelectorHeadlessTests
 
     /// <summary>
     /// 项2 B（Plan-2 T5）取代 Plan-1 的「块子图元按父实体整体」允许路径：布局幅面下块子图元
-    /// （模型空间 Insert 子线，句柄 "{insert}:0"）Delete → Plan-3 拒绝文案、零 tx、确认不触发、
+    /// （模型空间 Insert 子线，句柄 "{insert}:0"）Delete → 模式关提示文案、零 tx、确认不触发、
     /// audit.db 不落盘（父 Insert 与两条线原样保留）。模型幅面的整父语义不变（见 MainWindow 早期口径）。
     /// </summary>
     [AvaloniaFact]
@@ -608,9 +608,9 @@ public class SheetSelectorHeadlessTests
             ToolButton(window, "Delete").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Dispatcher.UIThread.RunJobs();
 
-            Assert.False(confirmInvoked); // 守卫先于确认（Plan-3 目标不弹确认）
+            Assert.False(confirmInvoked); // 守卫先于确认（模式关的块子图元不弹确认）
             Assert.True(window.EditError?.IsVisible ?? false);
-            Assert.Contains("Plan-3", window.EditError!.Text);
+            Assert.Contains("块子图元需开启「子图元」模式（全实例生效）", window.EditError!.Text);
             Assert.Empty(window.Edit!.RecentTxIds);
             var saved = CadAgent.Data.DrawingSession.Load(path);
             Assert.Contains(saved.Doc.Entities, e => e is Insert); // 父 Insert 原样保留
