@@ -213,4 +213,11 @@ if (route.Intent is EditSpaceIntent.Paper or EditSpaceIntent.BlockChild && selec
 
 ## 执行记录（执行中追加）
 
-（SDD ledger 记录 ruling/commit/门禁数字。）
+- 基线：main b9b693c 全 sln 1897 通过 / 0 失败 / 1 设计内 skip（共 1898 例）；本计划分支 `feat/cad-agent-paper-edit` @ 1621cb0（计划文档提交 `docs(plan): 项2 Plan-2（B 纸面空间编辑）实施计划`）。
+- Task 1：`ed30a11`（EditTargetResolver + 既有编辑处理器三空间化）→ 评审修 `a7aa90e`（space 仅 `paper` 预校验、add-circle 纸面化；Ruling R2/R3）。Data 531/531。
+- Task 2：`ef58c01`（set-text/set-attribute + Registry + HandlerKindDocs 首版；Ruling R4/R5 记账）。Data 561/561。
+- Task 3：`92d74bf`（CLI 纸面计划 E2E 3 例 + HandlerKindDocs 契约补全）→ `bd44cbe`（评审小项：端点/step 参数/契约/注记）→ `350cf10`（set-attribute insert 形态补 space 须配 layout）。Cli 362/362。
+- Task 4：`e131608`（EditTool.SetText + VM 纸面参数 + SetTextAsync/SetAttributeAsync）→ 评审修 `fef533d`（DeleteAsync paper/attribute 转发双测 + 私有 ApplyAsync 守卫）。View 459/459。
+- Task 5：`26fa8fb`（纸面 Move/Delete/ChangeLayer + 纸面新建 Line/Text/InsertBlock + 改文字工具 + insert-block 纸面写入口）→ 评审修 `2090ae5`（Move 二击复检 BlockChild、Plan-3 常量、死夹具/文案清理、覆盖补齐）。View 470/470、Data 563/563。
+- Task 6（本任务）：目标套件 `outputs/plan2-gates/{core,data,view,cli,report,llm,tarchbridge,zwcad,acad}.log` —— **Core 284 / Data 563 / View 470 / Cli 362 / Report 31 / Llm 33 / TArchBridge 76 / Zwcad 16 / Acad 181（180 通过 + 1 既有真机 skip）**，全 sln 两次：`sln.log`（exit 1，2015 通过 / 1 失败 / 1 skip，失败=Zwcad `OpenSaveAs_RoundTrip_EntityCountPreserved` 被 `VendorGuard` 外来 ZWCAD 实例拒绝，环境性）→ `sln-run2.log`（exit 0）**2016 例：通过 2015 / 失败 0 / 跳过 1**；基线 1897 → **净增 118 例**。抖动隔离留证（不改测试）：`view-isolate-checkbox.log`/`view-rerun.log`（pointer flake 1/1 与 470/470）、`acad-isolate-ownership.log`（静态缝顺序抖动 1/1）、`zwcad-rerun.log`（16/16）。
+- 收尾：spec §12 追加 B 闭环注记（追加式，旧文 0 删）——`docs(spec): 项2 Plan-2（B）闭环注记`。未 push/merge/改 git config。
