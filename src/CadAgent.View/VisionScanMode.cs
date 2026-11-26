@@ -123,12 +123,13 @@ internal static class VisionScanMode
         bool confirmEgress, string? profileName, int? maxTiles, ILlmClient? clientOverride, ProviderProfile? profileOverride,
         SqliteAuditStore audit, OperatorIdentity op, ScanProgress progress, TextWriter stdout, TextWriter stderr)
     {
-        // 2. 读图 + census sidecar（与 Cli LoadWithCensus 同模式：persisted 直载 + 非空回写）
+        // 2. 读图 + census sidecar（镜像 Cli LoadWithCensus：LoadTrusted 信任空 census →
+        //    不重读源 DWG；未信任且源在 → 总是回写（含空 census 的 VerifiedEmpty 指纹））
         var doc = LoadOrReject(() =>
         {
-            var persisted = UnparsedCensusStore.Load(project, drawing);
-            var s = DrawingSession.Load(drawing, persisted);
-            if (s.Unparsed.TotalCount > 0)
+            var persisted = UnparsedCensusStore.LoadTrusted(project, drawing, out bool verifiedEmpty);
+            var s = DrawingSession.Load(drawing, persisted, verifiedEmpty);
+            if (!verifiedEmpty && File.Exists(drawing))
                 UnparsedCensusStore.Save(project, drawing, s.Unparsed);
             return s;
         }, drawing, session, audit, op, stderr);

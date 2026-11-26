@@ -147,6 +147,9 @@ public class UnparsedCensusTrustTests
         {
             string src = Path.Combine(dir, "a.dwg");
             File.WriteAllText(src, "v1");
+            // 固定时间戳（秒级，免受文件系统取整影响）——避免与 Save 时刻竞态。
+            DateTime mtime = new(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(src, mtime);
             string sidecar = Path.Combine(dir, ".cadagent", "unparsed.json");
 
             UnparsedCensusStore.Save(dir, src, UnparsedCensus.Empty);
@@ -155,8 +158,9 @@ public class UnparsedCensusTrustTests
                 var root = doc.RootElement;
                 Assert.True(root.GetProperty("VerifiedEmpty").GetBoolean());
                 Assert.Equal(new FileInfo(src).Length, root.GetProperty("SourceSize").GetInt64());
-                Assert.Equal(File.GetLastWriteTimeUtc(src),
-                    root.GetProperty("SourceMtimeUtc").GetDateTime().ToUniversalTime());
+                Assert.Equal(mtime, root.GetProperty("SourceMtimeUtc").GetDateTime().ToUniversalTime());
+                // Producer：仅可观测（载入忽略、不参与信任）；伪造它不改变信任判定。
+                Assert.StartsWith("CadAgent/", root.GetProperty("Producer").GetString());
             }
 
             UnparsedCensusStore.Save(dir, src, NonEmpty());
@@ -164,6 +168,33 @@ public class UnparsedCensusTrustTests
                 Assert.False(doc.RootElement.GetProperty("VerifiedEmpty").GetBoolean());
             Assert.Equal(2, UnparsedCensusStore.LoadTrusted(dir, src, out bool trusted).TotalCount);
             Assert.False(trusted);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void Save_CleansOrphanTempsOlderThanOneDay_KeepsRecent()
+    {
+        string dir = NewProjectDir();
+        try
+        {
+            string src = Path.Combine(dir, "a.dwg");
+            File.WriteAllText(src, "v1");
+            string agentDir = Path.Combine(dir, ".cadagent");
+            Directory.CreateDirectory(agentDir);
+            string stale = Path.Combine(agentDir, "unparsed.json.stale.tmp");
+            string recent = Path.Combine(agentDir, "unparsed.json.recent.tmp");
+            File.WriteAllText(stale, "{}");
+            File.WriteAllText(recent, "{}");
+            File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-2));
+
+            UnparsedCensusStore.Save(dir, src, UnparsedCensus.Empty);
+
+            Assert.False(File.Exists(stale)); // 崩溃遗留 >1 天 → 清掉
+            Assert.True(File.Exists(recent)); // 近期 tmp（可能在写）不动
         }
         finally
         {

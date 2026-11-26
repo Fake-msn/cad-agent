@@ -5,7 +5,8 @@ namespace CadAgent.View.ViewModels;
 /// <summary>
 /// 主视图模型（计划4 T1）：纯 C#，无 Avalonia 依赖，可单测。
 /// 构造时加载 DrawingSession；失败→ErrorMessage（Session 不可用，UI 层先行判断）。
-/// 项3 T5：启动走 <see cref="LoadAsync"/>（后台 Load+Build+Sheets，UI 不阻塞）；同步构造保留。
+/// 项3 T5：启动走 <see cref="LoadAsync"/>（后台仅 Load：DWG 物化/working 读取/census，UI 不阻塞）；
+/// 渲染模型/幅面登记簿仍由 MainWindow 在 UI 线程构建。同步构造保留。
 /// </summary>
 public sealed class MainViewModel
 {
@@ -36,8 +37,8 @@ public sealed class MainViewModel
     }
 
     /// <summary>
-    /// 异步加载（项3 T5）：Load（DWG 物化/working 读取/census）在后台线程完成，UI 线程不阻塞
-    /// （大图 6–12s）；渲染模型/幅面登记簿仍由 MainWindow 在 UI 线程构建。
+    /// 异步加载（项3 T5）：仅 Load（DWG 物化/working 读取/census）在后台线程完成，UI 线程不阻塞
+    /// （大图 6–12s）；渲染模型/幅面登记簿仍由 MainWindow 在 UI 线程构建（本方法不构建）。
     /// 失败语义不变：构造内既有 catch 把异常落 ErrorMessage，本方法不抛（调用方仍按 vm.ErrorMessage 分支）。
     /// 同步构造保留（既有测试/CLI 零改动）。
     /// </summary>

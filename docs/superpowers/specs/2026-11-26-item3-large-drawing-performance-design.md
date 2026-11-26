@@ -91,7 +91,13 @@
 1. **空 census 信任（R9 语义调整）**：`UnparsedCensusStore` sidecar v2 增字段：
    `sourceSha256`（源 DWG 内容哈希）、`sourceSize`、`sourceMtimeUtc`、`verifiedEmpty`（true 表示已从源重建且确认 Empty）。
    - working 载入时：persisted 非空 → 现状；persisted Empty 且 `verifiedEmpty && sourceSha256==当前源哈希 && size/mtime 一致` → **信任 Empty，不重读源 DWG**；否则按 R9 从源重建（保留 fail-closed）。
-   - 任何源变化（哈希不符）→ sidecar 失效，重建并重写。
+   - 任何源变化（哈希/size/mtime 不符）→ sidecar 失效，重建并重写。
+   - **安全边界（明示）**：sidecar 为本地普通文件，任何本地进程均可读写/改写；`verifiedEmpty`
+     只是免重读源的性能捷径，**不是**安全边界——伪造指纹可让 Yellow 源冒充 Green；
+     引擎/版本（sidecar `Producer` 字段，仅可观测，载入忽略）同样未签名。需完整校验时依赖
+     源 DWG 解析（R9）或外部可信存证。
+   - 写入窗口（明示）：Save 的 size/mtime/hash 取自 Save 时刻的源，census 来自此前的 Load；
+     源在两者之间被换图会把旧 census 挂上新指纹（窗口极短，不闭合）。
 2. **Async 加载（View）**：新增 `MainViewModel.LoadAsync(drawingPath, projectDir, skillDirs)`（后台线程 Load+Build；失败以 ErrorMessage 返回）与同步构造并存（既有测试/CLI 零改动）；启动入口改用异步路径并显示进度/骨架屏，失败语义不变。
 3. **不改工作副本格式**：working 仍为 `.working.dxf`；DWG 首载物化与 census 行为保持正确性。若真实图 working 解析仍 >5s，记 tracked（可选后续：AC1027 working 或二进制缓存，需另立切片）。
 4. 目标：两次打开同一 Green 图的第二次不重读源 DWG（当前冷载 6–12s → working 载 2.9–4.9s 或更低）；UI 不阻塞。
@@ -125,6 +131,10 @@
 - LOD 为视觉降级：概览态文字/填充/细图元可能不显示或简化；Refined 恢复；导出/快照使用 Refined。
 - 交互期缩放复用旧位图（按比例变换），静止 150ms 精绘；越界/失效重建（交互档 <50ms）。
 - 加载绝对读速受 ACadSharp 限制；本切片只做异步与空 census 信任，工作副本格式不改。
+- **空 census 信任非安全边界**：sidecar 可被任何本地进程改写，伪造 `verifiedEmpty`/指纹可使
+  Yellow 源显示为 Green；`Producer` 仅可观测、未签名。防篡改需外部可信存证（不在本切片）。
+- 真实 TCH-DWG「换源后回 Yellow」路径由既有 census 闸口用例承载（合成 TCH DWG 写入器不支持）；
+  调用层面的「源变更 → 指纹失效 → 重写 sidecar」由 CLI 用例钉住。
 - ComputeHash 缓存仅对经引擎/显式失效的变更正确；绕过路径须 `InvalidateHash()`（文档化契约）。
 - 索引内存 O(n)（候选格重复登记）；上限与真实图测量记录。
 - 冲突/遮挡顺序仍按 Items 序；LOD 不改变绘制顺序语义。

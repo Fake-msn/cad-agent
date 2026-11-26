@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -48,11 +49,23 @@ public sealed record UnparsedCensus(IReadOnlyList<UnparsedClassBrief> Classes)
 /// 旧 JSON 缺新字段 → 默认 false/0 → 不信任（安全回退 R9）。
 /// 已知限制（单文件多源互斥）：一个项目仅一份 sidecar——第二源 Save 覆盖第一源，
 /// Load 靠 SourcePath+SourceHash 匹配诚实返回 Empty；多源场景 census 仅最近源有效。
+/// <para>
+/// <b>安全边界（明示）</b>：sidecar 是本地普通文件，任何本地进程均可改写；「已验证空」
+/// 只是免重读源的性能捷径，<b>不是</b>安全边界——伪造它（含 Producer/指纹）会让 Yellow
+/// 源冒充 Green。引擎/版本号（sidecar 的 Producer 字段）亦未签名，仅作可观测线索。
+/// 完整校验仍需源 DWG 解析（R9）或外部可信存证。
+/// </para>
 /// </summary>
 public static class UnparsedCensusStore
 {
     private sealed record Sidecar(string SourcePath, string SourceHash, IReadOnlyList<UnparsedClassBrief> Classes,
-        long SourceSize = 0, DateTime SourceMtimeUtc = default, bool VerifiedEmpty = false);
+        long SourceSize = 0, DateTime SourceMtimeUtc = default, bool VerifiedEmpty = false, string? Producer = null);
+
+    /// <summary>写入侧车标（"CadAgent/&lt;版本&gt;"）：仅可观测；载入忽略，不参与信任判定。</summary>
+    private static readonly string ProducerId =
+        "CadAgent/" + (typeof(UnparsedCensusStore).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(UnparsedCensusStore).Assembly.GetName().Version?.ToString() ?? "unknown");
 
     private static string SidecarPath(string projectDir) =>
         Path.Combine(projectDir, ".cadagent", "unparsed.json");
@@ -85,6 +98,7 @@ public static class UnparsedCensusStore
     /// 仅在 VerifiedEmpty=true 且 census 为空且全匹配时为 true（调用方据此跳过源 DWG 重读）。
     /// 损坏/不匹配 → Empty + false（既有 fail-closed 语义：调用方回退 R9 重建）。
     /// 旧 v1 sidecar（无 size/mtime）hash 匹配仍返回其 census（Load 行为不变），但不构成「已验证空」。
+    /// Producer 仅记录、载入忽略（不参与信任判定）。
     /// </summary>
     public static UnparsedCensus LoadTrusted(string projectDir, string sourcePath, out bool verifiedEmpty)
     {
@@ -110,19 +124,46 @@ public static class UnparsedCensusStore
         catch { return UnparsedCensus.Empty; } // 损坏 sidecar 降级 Empty（闸口另有图内 Unknowns 兜底）
     }
 
+    /// <summary>
+    /// 写 sidecar（幂等复写）：VerifiedEmpty = 本次 census 来自源且为空。
+    /// 已知窗口（明示不闭合）：size/mtime/hash 取自本次 Save 时刻的源文件，而 census 来自
+    /// 之前的 Load——源若恰在两者之间被换图，旧 census 会挂到新指纹上；窗口极短，彻底闭合
+    /// 需 Load 回传载入时指纹（超出本切片）。
+    /// </summary>
     public static void Save(string projectDir, string sourcePath, UnparsedCensus census)
     {
         string p = SidecarPath(projectDir);
-        Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+        string dir = Path.GetDirectoryName(p)!;
+        Directory.CreateDirectory(dir);
+        CleanupOrphanTemps(dir);
+        // 指纹一次取得（同一次 Save 内 size/mtime/hash 不各读一遍源）。
         var fi = new FileInfo(sourcePath);
+        long size = fi.Length;
+        DateTime mtime = fi.LastWriteTimeUtc;
+        string hash = HashOf(sourcePath);
         // VerifiedEmpty = 本次 census 来自源（首载或 R9 重建）并为空 → 下次载入可信任 Empty。
-        var sc = new Sidecar(Path.GetFullPath(sourcePath), HashOf(sourcePath), census.Classes,
-            fi.Length, fi.LastWriteTimeUtc, census.TotalCount == 0);
+        var sc = new Sidecar(Path.GetFullPath(sourcePath), hash, census.Classes, size, mtime,
+            census.TotalCount == 0, ProducerId);
         // 原子写（T3 闭合 T1 deferred minor，对齐 SaveWorking 约定）：先写 tmp 再 Move——
         // 写中途崩溃不损既有 sidecar（census 证据不因半截 JSON 降级 Empty）。
         // tmp 名唯一：并发写同一项目（测试并行/多进程）不互踩临时文件。
         string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(sc));
         File.Move(tmp, p, overwrite: true);
+    }
+
+    /// <summary>尽力清理崩溃遗留的写临时文件（&gt;1 天）：失败不影响保存。</summary>
+    private static void CleanupOrphanTemps(string dir)
+    {
+        try
+        {
+            DateTime cutoff = DateTime.UtcNow.AddDays(-1);
+            foreach (string orphan in Directory.EnumerateFiles(dir, "unparsed.json.*.tmp"))
+                if (File.GetLastWriteTimeUtc(orphan) < cutoff) File.Delete(orphan);
+        }
+        catch
+        {
+            // 清理属尽力而为（权限/占用/枚举竞态）：不得因清理失败阻断 sidecar 写入。
+        }
     }
 }

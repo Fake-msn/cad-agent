@@ -70,7 +70,7 @@ public sealed class DrawingSession : IDrawingSession
 
     /// <summary>
     /// 加载图纸。.dwg 首载经 DWG 通知通道重建 census；working 分支内存 DXF 无 TCH 通知，
-    /// census 优先用 <paramref name="persisted"/>（sidecar UnparsedCensusStore.Load）。
+    /// census 优先用 <paramref name="persisted"/>（sidecar UnparsedCensusStore.LoadTrusted/Load）。
     /// R9（陈旧 working 假 Green 旁路闭合）：persisted Empty/缺 + 源 .dwg 存在 → 从源 DWG
     /// 通知一次性重建 census（只取 census，doc 丢弃，working 不重写）；源缺失 → 拒绝
     /// （InvalidOperationException，无法核验完整性，不得假 Green 放行）。

@@ -130,11 +130,14 @@ public sealed class DrawingCanvas : Control
     /// <summary>测试 seam：headless 直接切档，不依赖真实 150ms 计时器。</summary>
     internal void SetQualityForTests(RenderQuality quality) => Quality = quality;
 
-    /// <summary>状态栏注记（「概览」/「高亮为包围盒（图元过密）」）；MainWindow 读取（Task 5 接线）。</summary>
+    /// <summary>状态栏注记（「概览」/「高亮为包围盒（图元过密）」）；MainWindow 经事件消费。</summary>
     internal string? LastRenderNote { get; private set; }
 
-    /// <summary>测试 seam：直接置注记（MainWindow 状态栏接线 headless 验证，不依赖真实渲染/交互）。</summary>
-    internal void SetLastRenderNoteForTests(string? note) => LastRenderNote = note;
+    /// <summary>
+    /// 注记变化（Render 末尾值变化时触发；清空为 null 亦触发）——MainWindow 据此只刷新状态文本，
+    /// 不得再触发重绘（避免渲染内自激）。
+    /// </summary>
+    internal event Action? RenderNoteChanged;
 
     /// <summary>测试 seam：直绘对照（关缓存），用于缓存 blit 与直绘的像素等价断言。</summary>
     internal bool DisableCacheForTests { get; set; }
@@ -202,14 +205,19 @@ public sealed class DrawingCanvas : Control
             context.DrawLine(PreviewPen, new Point(anchor.X, anchor.Y - 6), new Point(anchor.X, anchor.Y + 6));
         }
 
-        UpdateRenderNote(baseInteractive);
+        // 状态注记：叠加降级优先（数据在途），其次基元层为交互档位图时标「概览」。
+        // 值变化才发事件（MainWindow 状态栏据此刷新；同值不重复通知）。
+        SetRenderNote(_drawer.LastSelectionDowngraded ? "高亮为包围盒（图元过密）"
+            : baseInteractive ? "概览"
+            : null);
     }
 
-    /// <summary>状态注记：叠加降级优先（数据在途），其次基元层为交互档位图时标「概览」。</summary>
-    private void UpdateRenderNote(bool baseInteractive) =>
-        LastRenderNote = _drawer.LastSelectionDowngraded ? "高亮为包围盒（图元过密）"
-            : baseInteractive ? "概览"
-            : null;
+    private void SetRenderNote(string? note)
+    {
+        if (note == LastRenderNote) return;
+        LastRenderNote = note;
+        RenderNoteChanged?.Invoke();
+    }
 
     /// <summary>
     /// 主路径（项3 T2）：视口裁剪（索引查询）+ LOD；选中/高亮由绘制器最后重绘（受预算）。
@@ -480,7 +488,7 @@ public sealed class DrawingCanvas : Control
             // 若按交互档画过（小字跳过/hatch 降 bbox/折线更粗）已陈旧——blit-only 重绘一次。
             if (wasInteractive || LastRenderNote is not null)
             {
-                LastRenderNote = null;
+                SetRenderNote(null); // 清注记即通知状态栏（下一次 Render 同值不再发）
                 InvalidateVisual();
             }
             return;

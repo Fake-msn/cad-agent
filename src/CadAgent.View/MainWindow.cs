@@ -1099,6 +1099,10 @@ public sealed class MainWindow : Window
         Content = dock;
 
         Canvas.RenderInvalidated += OnCanvasInvalidated;
+        // 项3 T5：画布注记在 Render 末尾才产出（RenderInvalidated 早于渲染）——改由注记事件驱动
+        // 状态栏文本刷新；只改 Status 文本，绝不再触发画布重绘。窗口关闭时解绑（防事件滞留）。
+        _canvasControl.RenderNoteChanged += OnCanvasRenderNoteChanged;
+        Closed += OnWindowClosed;
         UpdateIssuesPanel();
         UpdateSemanticPanel();
         UpdateAdjudicationPanel();
@@ -1684,6 +1688,19 @@ public sealed class MainWindow : Window
         ReportStatus.Text = message ?? "";
         ReportStatus.IsVisible = message is not null;
         ReportStatus.Foreground = error ? Brushes.IndianRed : Brushes.MediumSeaGreen;
+    }
+
+    /// <summary>
+    /// 画布注记变化（Render 末尾）→ 仅刷新状态栏文本（OnCanvasInvalidated 不含重绘）。
+    /// 事件在渲染过程中抛出，直接改 Text 会「render pass 内失效可视化」——编组到下一轮 UI 队列。
+    /// </summary>
+    private void OnCanvasRenderNoteChanged() => Dispatcher.UIThread.Post(OnCanvasInvalidated);
+
+    private void OnWindowClosed(object? sender, EventArgs e)
+    {
+        if (_canvasControl is not null)
+            _canvasControl.RenderNoteChanged -= OnCanvasRenderNoteChanged;
+        Closed -= OnWindowClosed;
     }
 
     /// <summary>画布状态变化（选择/图层可见性/视图）→ 状态栏 + 复选框同步。</summary>
