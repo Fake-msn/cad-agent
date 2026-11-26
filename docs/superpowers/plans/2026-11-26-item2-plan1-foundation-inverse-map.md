@@ -829,7 +829,7 @@ public static class EditRouting
     public static LayoutViewportContext? ContextFrom(Viewport vp); // null when handle/scale degenerate
 }
 ```
-- `Route` 判定序（Plan-1 版）：`hit.Locked` → `Locked`；`hit.Space==ModelSpace` → `Model`（`vp` 为空或 twist → `Unavailable`+Reason）；`hit.Space==PaperSpace` → `Paper`（Plan-1 未启用→调用方提示）；未命中 → 在 `vp.PaperRect` 内 → `Model`，否则 `Paper`。
+- `Route` 判定序（Plan-1 版）：`hit.Locked` → `Locked`；`hit.BlockName!=null` → `BlockChild`（**模型空间子图元保留 CanMapModel = vp!=null && vp.CanMapModel**——调用方按父实体整体处理需模型增量；不可映射时附 Reason）；`hit.Space==ModelSpace` → `Model`（`CanMapModel=vp!=null && vp.CanMapModel`，否则附 Reason）；`hit.Space==PaperSpace` → `Paper`；未命中 → 在 `vp.PaperRect` 内 → `Model`，否则 `Paper`。`Unavailable` 成员保留但不产出（文档注记）。
 - `ContextFrom(vp)`：构造上下文后 `ctx.IsDegenerate ? null : ctx`（**唯一退化判据**，不得在 View 层重复 1e-12 字面量；且必须 `!vp.RepresentsPaper` 才可作为布局视口）；Handle=vp.Handle；TwistRadians=vp.TwistAngle。
 
 - [ ] **Step 1: 写失败测试**（矩阵：模型命中/纸面命中/Locked/框内空点/框外空点/缺上下文/twist）
@@ -1022,7 +1022,8 @@ private bool InsidePaperRect(double x, double y) => _layoutViewport is { } vp
     && y >= vp.PaperRect.MinY && y <= vp.PaperRect.MaxY;
 ```
 
-6. `OnCanvasToolClick`：
+6. **空间判定单一决策点**：所有工具点击/执行守卫必须经 `EditRouting.Route(_layoutViewport, hit, (wx,wy))` 判定，不得在 MainWindow 重新推导 Space/Locked/twist（Route 是唯一判定源，拒绝复制谓词）。`BlockChild` 在 Plan-1 按既有 Imp#3 语义处理为**父实体整体**（模型空间子图元同样需要 `CanMapModel`；不可映射则拒绝）。`Paper`/`Locked` 按 §Task 7 守卫文案拒绝。`Unavailable` 不产出。
+7. `OnCanvasToolClick`：
 - Line：第一击 → `TryModelPoint` 校验但**预览锚点存纸坐标**（`Canvas.SetPendingPoint((wx, wy))`）；第二击 → 对首锚点与当前点都 `TryModelPoint`（首锚点失败→清 pending+错误），提交 `Edit.DrawLineAsync(mx1,my1,mx2,my2)`（模型坐标）。
 - Text/InsertBlock：`TryModelPoint` 后以模型坐标提交。
 - Move：命中后（仅模型命中可编辑；命中 Locked → 错误“视口边框只读”；命中 PaperSpace → 错误“纸面编辑将在后续切片提供”）；
