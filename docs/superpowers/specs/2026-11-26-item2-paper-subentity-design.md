@@ -55,7 +55,8 @@ record RenderItem(..., string Handle, bool Closed = false,
 ### 2.3 纸→模型逆映射（`src/CadAgent.Core/SheetModel.cs`）
 - `ViewportTransform.PaperToModel(paper, viewTarget, viewHeight, paperCenter, paperHeight)` = `ModelToPaper` 精确逆（s=paperHeight/viewHeight）。
 - View 每幅面持 `LayoutViewportContext { ViewportHandle, PaperRect, Scale, ViewTarget, Center, CanMapModel }`。
-- `|TwistAngle|>1e-9` 或非矩形裁剪 → `CanMapModel=false`：模型编辑拒绝（「视口带旋转/裁剪，纸→模型映射未支持；纸面编辑仍可用」），纸面编辑不受影响。
+- `|TwistAngle|>1e-9` → `CanMapModel=false`：模型编辑拒绝（「视口带旋转，纸→模型映射未支持；纸面编辑仍可用」），纸面编辑不受影响。
+- **非矩形视口裁剪**：ACadSharp 3.8.35 未暴露可检裁剪边界——不做检测、不假装检测（注记；若未来 API 暴露再补拒绝）。
 - 单测：往返恒等（1e-9）、twist 拒绝、视口内外判定。
 
 ### 2.4 ComputeHash 全空间扩展（承重修复）
@@ -189,7 +190,7 @@ EditRoute Route(LayoutViewportContext? vp, RenderItem? hit, (double X,double Y) 
 每里程碑全 sln（基线 1796 通过/1 skip）；View 已知 audit.db teardown flake 隔离复跑留证；真实标本以合成夹具为主，可选真机抽查不设硬门禁（不伪造真机证据）。
 
 ### 6.3 明示边界
-- TwistAngle≠0/非矩形视口：模型编辑拒绝（纸面可用）。
+- TwistAngle≠0：模型编辑拒绝（纸面可用）；非矩形视口裁剪不可检测（不假装检测）。
 - 视口对象自身移动/缩放/删除不做；新建/删布局、改幅面名不做。
 - XREF/动态块/匿名块（含标注）块内编辑不做；属性定义（ATTDEF 默认值）编辑不做；块内新建实体不做。
 - 不支持类型（MLeader/Table 等）：纸面渲染回退占位、编辑拒绝「暂不支持实体类型」。
