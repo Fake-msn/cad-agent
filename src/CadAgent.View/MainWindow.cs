@@ -116,6 +116,12 @@ public sealed class MainWindow : Window
     /// <summary>纸面写参数固定值（handlers 契约：space 仅支持 paper，须配 layout）。</summary>
     private const string PaperSpace = "paper";
 
+    /// <summary>路由给 Paper 但当前布局无布局名（纸面写参数 layout 缺失）——纸面不可用。</summary>
+    private const string MissingLayoutNameMessage = "当前布局缺少布局名，纸面编辑不可用";
+
+    /// <summary>Route 契约违约兜底（模型意图却无原因）：仅防御分支可达。</summary>
+    private const string NoViewportMessage = "当前布局无有效视口，无法编辑模型";
+
     private string _baseStatus = "";
     private string _diffSummary = "";
     private TextBlock? _semanticHeader;
@@ -2112,7 +2118,7 @@ public sealed class MainWindow : Window
                 target = new PointTarget(EditSpaceIntent.Paper, px, py);
                 return true;
             case EditSpaceIntent.Paper:
-                SetEditError("当前布局缺少布局名，纸面编辑不可用");
+                SetEditError(MissingLayoutNameMessage);
                 return false;
             case EditSpaceIntent.Model when route.CanMapModel:
                 (double mx, double my) = _layoutViewport!.PaperToModel((px, py));
@@ -2120,7 +2126,7 @@ public sealed class MainWindow : Window
                 return true;
             default:
                 // 旋转/无有效视口：模型点不可映射（纸面点击不会落到此分支——Route 未命中纸面点恒 Paper）。
-                SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
+                SetEditError(route.Reason ?? NoViewportMessage);
                 return false;
         }
     }
@@ -2153,7 +2159,7 @@ public sealed class MainWindow : Window
             case EditSpaceIntent.Paper:
                 if (_currentLayoutName.Length == 0)
                 {
-                    SetEditError("当前布局缺少布局名，纸面编辑不可用");
+                    SetEditError(MissingLayoutNameMessage);
                     return false;
                 }
                 intent = EditSpaceIntent.Paper;
@@ -2161,12 +2167,12 @@ public sealed class MainWindow : Window
             case EditSpaceIntent.Model:
                 if (!route.CanMapModel)
                 {
-                    SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
+                    SetEditError(route.Reason ?? NoViewportMessage);
                     return false;
                 }
                 return true;
             default: // Unavailable：路由不产出，防御性拒绝
-                SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
+                SetEditError(route.Reason ?? NoViewportMessage);
                 return false;
         }
     }
@@ -2183,14 +2189,19 @@ public sealed class MainWindow : Window
         intent = EditSpaceIntent.Model;
         if (!_layoutSheetActive || Canvas?.SelectedItem is not { } selected) return true;
         EditRoute route = EditRouting.Route(_layoutViewport, selected, (0, 0));
-        if (route.Intent == EditSpaceIntent.Paper && _currentLayoutName.Length > 0)
+        if (route.Intent == EditSpaceIntent.Paper)
         {
+            if (_currentLayoutName.Length == 0)
+            {
+                SetEditError(MissingLayoutNameMessage); // 纸面目标但缺布局名，不得误报视口原因
+                return false;
+            }
             intent = EditSpaceIntent.Paper; // 纸面增量即图纸增量（不 ÷s）
             return true;
         }
         if (!route.CanMapModel)
         {
-            SetEditError(route.Reason ?? "当前布局无有效视口，无法编辑模型");
+            SetEditError(route.Reason ?? NoViewportMessage);
             return false;
         }
         double s = _layoutViewport!.Scale; // 可映射 ⇒ 非退化，比例可信
@@ -2204,7 +2215,7 @@ public sealed class MainWindow : Window
     /// 视图闭环 T9：第二击先经模态确认（ConfirmDialog.ShowDialog&lt;bool&gt;；headless
     /// 测试经 ConfirmDeleteOverride seam 注入）——取消保持选中不清状态；确认后才走
     /// 既有删除执行逻辑（EditViewModel→StepEngine，无审计旁路）。
-    /// 项2 A：布局幅面按选中图元空间守卫（框只读/纸面未启用）先于确认对话框。</summary>
+    /// 项2 B：布局幅面按选中图元空间守卫（框只读/块子图元 Plan-3/纸面允许）先于确认对话框。</summary>
     private async Task OnDeleteClickAsync()
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
@@ -2243,7 +2254,7 @@ public sealed class MainWindow : Window
 
     /// <summary>T9：ChangeLayer 激活且选中实体时，层下拉选择即应用改层。
     /// 视图闭环 T5：_diffBusy 并列硬闸——diff 加载期间一律忽略。
-    /// 项2 A：布局幅面按选中图元空间守卫（框只读/纸面未启用）先于执行。</summary>
+    /// 项2 B：布局幅面按选中图元空间守卫（框只读/块子图元 Plan-3/纸面允许）先于执行。</summary>
     private void OnEditLayerSelected(object? sender, SelectionChangedEventArgs e)
     {
         if (Edit is null || Canvas is null || _editBusy || _diffBusy) return;
@@ -2354,6 +2365,9 @@ public sealed class MainWindow : Window
                 {
                     RenderItem? selected = Canvas.SelectedItem;
                     _moveBase = null;
+                    // 首击后选择可能被改（SelectByHandle/深读定位）→ 按当前选中复检，
+                    // 防选中漂移绕过守卫（布局下的 BlockChild 整父移动）。
+                    if (selected is not null && !TryGuardSelection(selected, out _)) return true;
                     if (!TryMoveDelta(bx, by, wx, wy, out double dx, out double dy, out EditSpaceIntent intent)) return true;
                     // Imp#3：模型幅面/模型空间子图元句柄→父 Insert/Dimension 整体移动；纸面取纸面句柄。
                     bool paper = intent == EditSpaceIntent.Paper;
@@ -2390,6 +2404,12 @@ public sealed class MainWindow : Window
         if (target is null)
         {
             SetEditError("请点击文字或属性图元");
+            return true;
+        }
+        // 块子图元（含模型幅面）→ Plan-3：句柄带子索引后缀，直落处理器只会报"句柄不存在"。
+        if (target.BlockName is not null)
+        {
+            SetEditError(BlockChildMessage);
             return true;
         }
         if (target.Kind != RenderKind.Text && target.AttributeTag is null)

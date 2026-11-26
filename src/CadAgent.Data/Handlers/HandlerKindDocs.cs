@@ -18,5 +18,6 @@ public static class HandlerKindDocs
         insert-symbol: 跨文档导入 skill 符号并插入 {symbol: string(符号名,须 --skill 包内), x,y: number, scale?: number, rotation?: number(弧度), layer?: string}（建块/复用块；Line/Circle/Arc/Text 白名单）
         通用可选参数 sheetId: string（幅面 ID=图框 Insert 句柄）——携带时语义闸口按该幅面作用域校验（跨幅未确认→拒绝留痕）；缺省=legacy 全局作用域
         通用可选参数 attribute: true（仅 delete-entity/move-entity/change-layer/set-text 可用；attribute:true=仅匹配 Insert 属性，不匹配实体本身）
+        纸面隐含：add-line/add-text/add-circle/insert-block 省略 space 仅给 layout 时，解析器按该布局纸面写入（等价 space:"paper"）
         """;
 }

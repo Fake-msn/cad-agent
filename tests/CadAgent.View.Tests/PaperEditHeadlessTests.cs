@@ -54,6 +54,9 @@ public class PaperEditHeadlessTests
             }
             var titleBlock = new BlockRecord("TB_TITLE");
             doc.BlockRecords.Add(titleBlock);
+            var lumBlock = new BlockRecord("LUM_P"); // 纸面插块目标（点工具路径）
+            lumBlock.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(1, 0, 0) });
+            doc.BlockRecords.Add(lumBlock);
             var layout = new Layout(LayoutName);
             doc.Layouts.Add(layout);
             layout.AddViewport(new Viewport
@@ -452,6 +455,68 @@ public class PaperEditHeadlessTests
             Assert.Contains("跨空间", window.EditError.Text);
             Assert.Empty(window.Edit!.RecentTxIds);
             Assert.Equal(before, window.Canvas.Items.Count);
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 11. Move 二击复检：首击后选中漂移到块子图元 → Plan-3 拒绝，零 tx、盘上不变 ----
+
+    [AvaloniaFact]
+    public void Move_SelectionDriftToBlockChild_SecondClickRefusedPlan3_NoTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf(blockChild: true));
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 150, 100); // 纸面线 → 选中 + 基准 (100,100)
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+
+            // 选中漂移（SelectByHandle = 深读定位同一路径）：当前选中变为视口内块子图元。
+            RenderItem child = window.Canvas.Items.Single(i => i.BlockName is not null
+                && i.Space == RenderSpace.ModelSpace && !i.Locked);
+            Assert.True(window.Canvas.SelectByHandle(child.Handle));
+            Assert.Equal(child.Handle, window.Canvas.SelectedHandle);
+
+            ClickCanvasAtWorld(window, 620, 380); // 空点目标：复检须拒绝（不得整父移动 Insert）
+
+            Assert.True(window.EditError!.IsVisible);
+            Assert.Contains("Plan-3", window.EditError.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            Assert.Equal(100, SavedPaperLine(saved).StartPoint.X, 6); // 纸面未动
+            Assert.Equal(20, saved.Doc.Entities.OfType<Insert>().Single().InsertPoint.X, 6); // 模型未动
+            Assert.False(File.Exists(Path.Combine(projectDir, ".cadagent", "audit.db")));
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 12. InsertBlock 点工具：视口外单击 → 纸面插块落盘（space/layout 审计，模型不变）----
+
+    [AvaloniaFact]
+    public async Task InsertBlockToolOutsideViewport_WritesPaperInsert_ModelUnchanged()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperDxf());
+        try
+        {
+            SelectLayoutSheet(window);
+            ToolButton(window, "InsertBlock").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditBlockInput!.Text = "LUM_P";
+            window.BlockScaleInput!.Text = "2";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 150, 300)); // 视口外纸面
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = CadAgent.Data.DrawingSession.Load(path);
+            var paper = saved.Doc.Layouts.First(l => l.Name == LayoutName).AssociatedBlock!;
+            var inserted = Assert.Single(paper.Entities.OfType<Insert>(), i => i.Block.Name == "LUM_P");
+            Assert.Equal(150, inserted.InsertPoint.X, 6);
+            Assert.Equal(300, inserted.InsertPoint.Y, 6);
+            Assert.Equal(2, inserted.XScale, 6);
+            Assert.Empty(saved.Doc.Entities.OfType<Insert>()); // 模型空间未写入
+            AssertPaperScopeAudited(projectDir, "insert-block");
         }
         finally { Cleanup(window, path, projectDir); }
     }

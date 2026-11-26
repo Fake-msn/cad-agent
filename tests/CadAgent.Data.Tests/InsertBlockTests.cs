@@ -131,6 +131,17 @@ public class InsertBlockTests : IDisposable
             Assert.Equal(2, insert.XScale, 6);
             Assert.Equal(insert.Handle.ToString(), r.TargetHandle);
             Assert.Empty(s.Doc.Entities); // 模型空间未写入（空间隔离）
+
+            // 落盘往返（与模型用例同口径）：纸面 Insert 存续，模型空间仍空。
+            s.SaveWorking();
+            s.Reload();
+            var reloaded = s.Doc.Layouts.First(l => l.Name == PaperFixtures.LayoutName);
+            var persisted = Assert.Single(reloaded.AssociatedBlock!.Entities.OfType<Insert>());
+            Assert.Equal("LUM", persisted.Block.Name);
+            Assert.Equal(420, persisted.InsertPoint.X, 6);
+            Assert.Equal(297, persisted.InsertPoint.Y, 6);
+            Assert.Equal(2, persisted.XScale, 6);
+            Assert.Empty(s.Doc.Entities.OfType<Insert>());
         }
         finally { File.Delete(path); }
     }

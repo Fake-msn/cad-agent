@@ -588,4 +588,56 @@ public class EditPanelHeadlessTests
         }
         finally { Cleanup(window, f); }
     }
+
+    // ---- 项2 Plan-2 T5 收尾：改文字工具的 UI 接线（模型幅面）----
+
+    /// <summary>模型幅面 SetText UI 路径：Text 工具建字 → 改文字点同一图元 → 落盘值变更 + 画布更新。</summary>
+    [AvaloniaFact]
+    public async Task SetTextTool_ModelText_PersistsNewValue()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "Text").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "旧字";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 40));
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+
+            ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(EditTool.SetText, window.Edit.ActiveTool);
+            window.EditTextInput.Text = "新字";
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 30, 40)); // 命中文字盒
+
+            Assert.Null(window.Edit.ErrorMessage);
+            Assert.Equal(2, window.Edit.RecentTxIds.Count);
+            var saved = CadAgent.Data.DrawingSession.Load(f.DxfPath);
+            Assert.Equal("新字", Assert.Single(saved.Doc.Entities.OfType<TextEntity>()).Value);
+            RenderItem item = Assert.Single(window.Canvas!.Items, i => i.Kind == RenderKind.Text);
+            Assert.Equal("新字", item.Text);
+        }
+        finally { Cleanup(window, f); }
+    }
+
+    /// <summary>改文字目标非文字类（夹具 WALL 线）→ 「仅文字/属性可改文字」，零 tx、无审计库。</summary>
+    [AvaloniaFact]
+    public void SetTextTool_LineTarget_Refused_NoTx()
+    {
+        (MainWindow window, Fixture f) = ShowWindow();
+        try
+        {
+            ToolButton(window, "改文字").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            window.EditTextInput!.Text = "新字";
+            ClickCanvasAtWorld(window, 50, 0); // 命中模型 WALL 线
+
+            Assert.True(window.EditError!.IsVisible);
+            Assert.Contains("仅文字/属性可改文字", window.EditError.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            Assert.False(File.Exists(f.AuditDbPath));
+        }
+        finally { Cleanup(window, f); }
+    }
 }

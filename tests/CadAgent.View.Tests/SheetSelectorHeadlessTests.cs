@@ -61,12 +61,11 @@ public class SheetSelectorHeadlessTests
     /// </summary>
     /// <param name="nearLineEndX">近线模型终点 X（默认 1000 → 纸面映射到 (4000,350)）。Move 用例取小值，
     /// 使纸面目标点为空点（全长映射线会在目标点二次命中 → 只重置基准不移动）。</param>
-    /// <param name="paperLine">纸面项夹具（Important 2）：布局关联块内的纸面线 (100,100)-(200,100)。</param>
     /// <param name="twist">视口 TwistAngle（弧度）：非 0 时布局仍登记（尺寸合法）但纸→模型不可映射。</param>
     /// <param name="blockChild">模型空间追加块 LUM_CHILD（一条对角线子图元）+ Insert@(20,20)，
-    /// 锚点落在视口模型区域内（BlockChild 允许路径夹具）。</param>
+    /// 锚点落在视口模型区域内——块子图元 Plan-3 拒绝用例夹具。</param>
     /// <param name="extraLayer">追加空图层（布局幅面 ChangeLayer 允许路径目标）。</param>
-    private static string LayoutDxf(double nearLineEndX = 1000, bool paperLine = false, double twist = 0,
+    private static string LayoutDxf(double nearLineEndX = 1000, double twist = 0,
         bool blockChild = false, string? extraLayer = null)
         => DxfFixture.CreateTempDxf(doc =>
     {
@@ -91,9 +90,6 @@ public class SheetSelectorHeadlessTests
             ViewHeight = 200,
             TwistAngle = twist,
         });
-        if (paperLine)
-            layout.AssociatedBlock!.Entities.Add(
-                new Line { StartPoint = new XYZ(100, 100, 0), EndPoint = new XYZ(200, 100, 0) });
     });
 
     private sealed class FixedIdentity : IIdentityProvider
@@ -346,11 +342,12 @@ public class SheetSelectorHeadlessTests
     }
 
     /// <summary>
-    /// 旧「布局整体只读」语义作废（Task 7 取代）：视口内可编辑，视口框只读（项2 T5 保留）。
+    /// 布局幅面守卫（项2 B 口径）：工具激活不允许被整体拒绝；视口框只读（拒绝先于确认），
+    /// 切回模型幅面后编辑恢复可用。
     /// 拒绝路径无 EditCompleted，故 Delete 按压不等待编辑事件（守卫先于确认对话框）。
     /// </summary>
     [AvaloniaFact]
-    public void LayoutSheet_ViewportEditsAllowed_FrameAndPaperProtected()
+    public void LayoutSheet_LockedFrameAndPaperGuards()
     {
         (MainWindow window, string path, string projectDir) = Show(LayoutDxf(),
             new FixedIdentity(new OperatorIdentity("tester", Role.Draw)));
@@ -755,7 +752,7 @@ public class SheetSelectorHeadlessTests
 
     /// <summary>
     /// Text 工具逆映射：布局幅面纸面 (850,420) 单击 → 模型 (100,20) 落盘 TextEntity；
-    /// 纸面显示位置回验（Text 与 Line/Move 共用 TryModelPoint 通道）。
+    /// 纸面显示位置回验（Text 与 Line/Move 共用 TryPointTarget 通道）。
     /// </summary>
     [AvaloniaFact]
     public async Task LayoutSheet_TextTool_WritesModelTextAtInversePoint()
