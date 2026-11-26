@@ -98,8 +98,9 @@ public static class EditRouting
         if (vp is null) return "当前布局无有效视口";
         if (vp.CanMapModel) return null;
         // 非退化仍不可映射 = 视口旋转（CanMapModel 已含 |Twist| 阈值，此处不再重复字面量）。
+        // R14：坐标无关动作同样拒绝；Plan-1 纸面未启用，不得声称「纸面编辑可用」。
         return vp.IsDegenerate
             ? "当前布局无有效视口"
-            : "视口带旋转，纸→模型映射未支持；纸面编辑仍可用";
+            : "视口带旋转，布局内模型编辑暂不支持";
     }
 }

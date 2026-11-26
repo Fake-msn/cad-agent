@@ -62,10 +62,12 @@ public class EditRoutingTests
     [Fact]
     public void Route_ModelHitWithTwistedContext_IsModelButCannotMap_WithReason()
     {
+        // Minor 3 / R14：坐标无关动作（Delete/ChangeLayer）在旋转视口下的拒绝原因
+        // 不得声称「纸面编辑可用」（Plan-1 纸面未启用）——单一来源 Message 钉住。
         var r = EditRouting.Route(Vp(0.3), Hit(RenderSpace.ModelSpace), (500, 350));
         Assert.Equal(EditSpaceIntent.Model, r.Intent);
         Assert.False(r.CanMapModel);
-        Assert.Contains("旋转", r.Reason);
+        Assert.Equal("视口带旋转，布局内模型编辑暂不支持", r.Reason);
     }
 
     [Fact]

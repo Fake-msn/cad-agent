@@ -2088,6 +2088,12 @@ public sealed class MainWindow : Window
         mx = px;
         my = py;
         if (!_layoutSheetActive) return true;
+        if (_layoutViewport is null)
+        {
+            // 防御性分支（R15：无有效视口的布局不会登记为幅面）；不得落入纸面文案。
+            SetEditError("当前布局无有效视口，无法编辑模型");
+            return false;
+        }
         EditRoute route = EditRouting.Route(_layoutViewport, null, (px, py));
         if (route.Intent == EditSpaceIntent.Model && route.CanMapModel)
         {
@@ -2399,8 +2405,7 @@ public sealed class MainWindow : Window
 
     /// <summary>
     /// T5/项2 A：幅面图元——模型幅面框内锚点裁剪；布局幅面 ComposeLayout（纸面→
-    /// 视口内模型→框）。视口选择：纸边界（RepresentsPaper）与退化视口不作可编辑视口
-    /// （退化判据唯一来源 LayoutViewportContext.IsDegenerate，经 EditRouting.ContextFrom），
+    /// 视口内模型→框）。视口选择唯一经 EditRouting.ContextFrom（纸边界/退化 → null），
     /// 无可用视口 → 仅纸面（诚实降级）。
     /// </summary>
     private IReadOnlyList<RenderItem> ItemsForSheet(SheetRecord sheet, out LayoutViewportContext? viewport)
@@ -2411,7 +2416,6 @@ public sealed class MainWindow : Window
             return RenderModelBuilder.CropToFrame(_fullModelItems, sheet.FrameBounds);
         }
         ACadSharp.Entities.Viewport? candidate = FindViewport(_doc, sheet.TitleAttributes.GetValueOrDefault("viewportHandle"));
-        if (candidate is { RepresentsPaper: true }) candidate = null;
         viewport = candidate is null ? null : EditRouting.ContextFrom(candidate);
         ACadSharp.Entities.Viewport? vp = viewport is null ? null : candidate;
         return RenderModelBuilder.ComposeLayout(_doc, sheet.LayoutName, vp);
