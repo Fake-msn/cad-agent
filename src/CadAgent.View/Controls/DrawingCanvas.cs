@@ -430,8 +430,8 @@ public sealed class DrawingCanvas : Control
     }
 
     /// <summary>
-    /// 交互标记（滚轮/中键拖动）：切 Interactive 并重置 150ms 静止计时器；
-    /// 静止到点 → Refined 重建缓存（两阶段精绘）。
+    /// 交互标记（滚轮缩放/中键拖动/编辑工具点击）：切 Interactive 并重置 150ms 静止计时器；
+    /// 静止到点 → Refined 重建缓存或按 Refined 重绘叠加层（两阶段精绘）。
     /// </summary>
     private void BeginInteraction()
     {
@@ -463,17 +463,19 @@ public sealed class DrawingCanvas : Control
         RefineNow();
     }
 
-    /// <summary>静止精绘：先停表；视图/质量未变（缓存已是当前 Refined 快照）则只清注记，不重建。</summary>
+    /// <summary>静止精绘：先停表；视图/质量未变（缓存已是当前 Refined 快照）则只清注记并重绘叠加层。</summary>
     private void RefineNow()
     {
         StopIdleTimer();
         _interacting = false;
+        bool wasInteractive = Quality == RenderQuality.Interactive;
         Quality = RenderQuality.Refined;
         CanvasProjection projection = CanvasProjection.From(ViewModel);
         if (CacheIsRefinedSnapshot(projection))
         {
-            // 无变化的精绘（如工具点击后静止）：不重新栅格化；仍显示「概览」时清注记并重绘一次。
-            if (LastRenderNote is not null)
+            // 无变化的精绘（如工具点击后静止）：不重新栅格化；但位图之上的选中/高亮叠加层
+            // 若按交互档画过（小字跳过/hatch 降 bbox/折线更粗）已陈旧——blit-only 重绘一次。
+            if (wasInteractive || LastRenderNote is not null)
             {
                 LastRenderNote = null;
                 InvalidateVisual();

@@ -15,8 +15,9 @@ namespace CadAgent.View.Tests;
 
 /// <summary>
 /// 项3 Task 3 headless coverage: 位图平移缓存 + 两阶段精绘。
-/// 真实 Skia 帧（UseHeadlessDrawing=false）像素对比；计数 seam 判定缓存是否复用；
-/// 交互计时器不依赖真实 150ms（ForceRefinedForTests 同步走同一路径；缩放测试置 IdleRefineMs=0）。
+/// 真实 Skia 帧（UseHeadlessDrawing=false）像素对比；计数 seam 判定缓存是否复用。
+/// 静止精绘默认 150ms；测试置 IdleRefineMs=5000 避免墙钟到点，用 ForceRefinedForTests 同步走同一路径。
+/// 仅两个测试（未消费点击 / 短间隔计时器）用 20ms 真实计时器到点验证。
 /// </summary>
 public class DrawingCanvasCacheTests
 {
@@ -666,7 +667,7 @@ public class DrawingCanvasCacheTests
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
             Assert.False(canvas.HasIdleTimer);
             Assert.Null(canvas.LastRenderNote);
-            Assert.True(baseline == canvas.BaseRenderCount, "选择点击不得触发精绘重建");
+            Assert.Equal(baseline, canvas.BaseRenderCount); // 选择点击不得触发精绘重建
 
             // handler 缺失（VM-only 画布）同样只选择、不交互
             vm.ToolClickHandler = null;
@@ -681,7 +682,7 @@ public class DrawingCanvasCacheTests
             Assert.Equal(RenderQuality.Refined, canvas.Quality);
             Assert.False(canvas.HasIdleTimer);
             Assert.Null(canvas.LastRenderNote);
-            Assert.True(baseline == canvas.BaseRenderCount, "选择点击不得重建基元层");
+            Assert.Equal(baseline, canvas.BaseRenderCount); // 选择点击不得重建基元层
         }
         finally { window.Close(); }
     }
@@ -775,6 +776,110 @@ public class DrawingCanvasCacheTests
             Capture(window);
             Assert.Null(canvas.LastRenderNote);
             Assert.Equal(baseline, canvas.BaseRenderCount);
+        }
+        finally { window.Close(); }
+    }
+
+    // ---- 8e. 精绘守卫命中（位图未重建）仍须按 Refined 重绘叠加层 ----
+
+    [AvaloniaFact]
+    public void RefineGuard_AfterConsumedClick_RedrawsOverlayAtRefined_SmallText()
+    {
+        // 文本投影字高 2–4px：Interactive 跳过（叠加不可见）/ Refined 简化条（黄色 1px）。
+        var items = new[]
+        {
+            Line(0, 0, 10, 0, handle: "L1"),
+            Line(0, 0, 0, 10, handle: "L2"),
+            new RenderItem(RenderKind.Text, new[] { (1.0, 5.0) }, "0", 0xFFFFFF, "ABC", 0.2, 0, "T1"),
+        };
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(items);
+        canvas.IdleRefineMs = 5_000; // 真实计时器但不至在测试内到点
+        try
+        {
+            vm.Select(2);
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap refinedBefore = Capture(window);
+            double fontPx = 0.2 * vm.Scale;
+            Assert.InRange(fontPx, 2.0, 4.0); // 交互档跳过 / 精绘档简化条
+            (double sx, double sy) = vm.WorldToScreen(1.0, 5.0);
+            int probeX = (int)Math.Round(sx + fontPx * 0.9); // 简化条中点
+            int probeY = (int)Math.Round(sy);
+            Assert.True(YellowScore(refinedBefore, probeX, probeY) > 150, "Refined 选中须画黄色简化条");
+
+            int baseline = canvas.BaseRenderCount;
+            // 消费的工具点击（选中同一文本 → 仅失效重绘，不改视图）：交互档小字跳过
+            vm.ToolClickHandler = (_, _) => { vm.Select(2); return true; };
+            window.MouseDown(new Point(120, 100), MouseButton.Left);
+            window.MouseUp(new Point(120, 100), MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap interactive = Capture(window);
+
+            Assert.Equal(RenderQuality.Interactive, canvas.Quality);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+            Assert.True(YellowScore(interactive, probeX, probeY) < 100, "交互档小字跳过（叠加不可见）");
+
+            canvas.ForceRefinedForTests(); // 缓存已是 Refined 快照 → 不重建，仅重绘叠加层
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap refined = Capture(window);
+
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+            Assert.True(YellowScore(refined, probeX, probeY) > 150, "精绘守卫须按 Refined 重画叠加（黄色简化条）");
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void RefineGuard_AfterConsumedClick_RedrawsOverlayAtRefined_MidSizeHatch()
+    {
+        // 600 点斜带 Hatch（bbox 8×8 世界单位）：Interactive 点数>500 → bbox；Refined → 实际轮廓。
+        var pts = new (double X, double Y)[600];
+        for (int i = 0; i < pts.Length; i++)
+        {
+            double t = 2.0 + 4.0 * i / (pts.Length - 1);
+            pts[i] = (t, t);
+        }
+        var hatch = new RenderItem(RenderKind.Hatch, pts, "0", 0xFFFFFF, null, 0, 0, "H1");
+        var items = new[]
+        {
+            Line(0, 0, 10, 0, handle: "L1"),
+            Line(0, 0, 0, 10, handle: "L2"),
+            hatch,
+        };
+        (Window window, DrawingCanvas canvas, CanvasViewModel vm) = Show(items);
+        canvas.IdleRefineMs = 5_000;
+        try
+        {
+            vm.Select(2);
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap refinedBefore = Capture(window);
+            (double ex, double ey) = vm.WorldToScreen(4, 6); // bbox 上边中点（远离斜带）
+            (double dx, double dy) = vm.WorldToScreen(4, 4); // 斜带上的点
+            int edgeX = (int)Math.Round(ex), edgeY = (int)Math.Round(ey);
+            int diagX = (int)Math.Round(dx), diagY = (int)Math.Round(dy);
+            Assert.Null(canvas.LastRenderNote); // 未降级（既非过密也未超预算）
+            Assert.True(YellowScore(refinedBefore, edgeX, edgeY) < 100, "精绘档不画 bbox 边");
+            Assert.True(YellowScore(refinedBefore, diagX, diagY) > 150, "精绘档沿斜带轮廓描边");
+
+            int baseline = canvas.BaseRenderCount;
+            vm.ToolClickHandler = (_, _) => { vm.Select(2); return true; };
+            window.MouseDown(new Point(120, 100), MouseButton.Left);
+            window.MouseUp(new Point(120, 100), MouseButton.Left);
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap interactive = Capture(window);
+
+            Assert.Equal(RenderQuality.Interactive, canvas.Quality);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+            Assert.True(YellowScore(interactive, edgeX, edgeY) > 150, "交互档降级为 bbox（上边可见）");
+
+            canvas.ForceRefinedForTests(); // 不重建位图，但叠加须回到 Refined 轮廓
+            Dispatcher.UIThread.RunJobs();
+            WriteableBitmap refined = Capture(window);
+
+            Assert.Equal(RenderQuality.Refined, canvas.Quality);
+            Assert.Equal(baseline, canvas.BaseRenderCount);
+            Assert.True(YellowScore(refined, edgeX, edgeY) < 100, "精绘后 bbox 边须消失（恢复轮廓）");
+            Assert.True(YellowScore(refined, diagX, diagY) > 150);
         }
         finally { window.Close(); }
     }
