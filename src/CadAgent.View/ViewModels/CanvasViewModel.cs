@@ -142,7 +142,7 @@ public sealed class CanvasViewModel
     /// 问题定位高亮句柄集（T5）：SelectHandles 设置，画布对命中的图元同样施加
     /// 选中高亮；用户点击画布（Select）接管选择时清空。空句柄不参与匹配。
     /// </summary>
-    public IReadOnlyCollection<string> HighlightedHandles => _highlightedHandles;
+    public IReadOnlySet<string> HighlightedHandles => _highlightedHandles;
 
     /// <summary>过滤 HiddenLayers 后的可见图元。</summary>
     public IEnumerable<RenderItem> VisibleItems => Items.Where(i => !HiddenLayers.Contains(i.Layer));
@@ -336,6 +336,14 @@ public sealed class CanvasViewModel
         return ((screenX - Pan.X - _offsetX) / s + _minX,
                 (_viewportH - screenY - _offsetY - Pan.Y) / s + _minY);
     }
+
+    // 项3 T2：绘制器投影快照（CanvasProjection.From）读取的变换原语，语义同 WorldToScreen。
+    internal double OriginX => _minX;
+    internal double OriginY => _minY;
+    internal double OffsetX => _offsetX;
+    internal double OffsetY => _offsetY;
+    internal double ViewportWidth => _viewportW;
+    internal double ViewportHeight => _viewportH;
 
     /// <summary>
     /// 当前视口对应的世界矩形（屏幕 0..viewport 逆变换，min/max 归一——屏幕 Y-down 转
