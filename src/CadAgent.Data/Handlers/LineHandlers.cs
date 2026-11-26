@@ -12,6 +12,9 @@ internal static class HandlerHelpers
     /// <summary>纸面限定缺 layout 的统一文案（解析器预校验/新建族/属性检索三处共用，防契约漂移）。</summary>
     public const string PaperNeedsLayoutMessage = "space:\"paper\" 须配 layout";
 
+    /// <summary>属性定义（ADEF）模板不可编辑（move/change-layer 共用；delete/set-text 另有专用文案）。</summary>
+    public const string AttributeDefinitionEditMessage = "属性定义不可编辑";
+
     public static DrawingSession AsDrawing(IDrawingSession session) =>
         session as DrawingSession ?? throw new InvalidOperationException("处理器需要 DrawingSession");
 

@@ -80,6 +80,9 @@ public sealed class MoveEntityHandler : IStepHandler
         if (target == null)
             return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        // 属性定义是实例属性模板（ADEF : TextEntity，否则落到文字分支被移动）：任何目标空间都拒绝。
+        if (target.Entity is AttributeDefinition)
+            return new StepResult(false, HandlerHelpers.AttributeDefinitionEditMessage, "");
         Entity entity = target.Entity;
         double dx = HandlerHelpers.Req(p, "dx"), dy = HandlerHelpers.Req(p, "dy");
         switch (entity)
@@ -207,6 +210,9 @@ public sealed class ChangeLayerHandler : IStepHandler
         if (target == null)
             return new StepResult(false, targetError, "");
         if (target.Entity is Viewport) return new StepResult(false, "视口对象不支持编辑", "");
+        // 属性定义模板不可编辑（change-layer 对任意实体都会改层，须先于赋值拒绝）。
+        if (target.Entity is AttributeDefinition)
+            return new StepResult(false, HandlerHelpers.AttributeDefinitionEditMessage, "");
         target.Entity.Layer = HandlerHelpers.ResolveLayer(s, p.GetProperty("layer").GetString());
         return new StepResult(true, "", target.Entity.Handle.ToString());
     }

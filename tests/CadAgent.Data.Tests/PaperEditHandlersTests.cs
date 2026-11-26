@@ -682,4 +682,16 @@ public class HandlerKindDocsTests
     [Fact]
     public void Default_InsertBlockDocSaysBlockIsInsertedName() =>
         Assert.Contains("被插入块名", DocumentedLine("insert-block"));
+
+    // 终审修复：块语义通述行须声明属性定义（ADEF）模板不可编辑（四类编辑全部拒绝）。
+    [Fact]
+    public void Default_BlockSemanticsLineDeclaresAttributeDefinitionProtected()
+    {
+        string line = HandlerKindDocs.Default
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .Single(l => l.StartsWith("通用可选参数 block:", StringComparison.Ordinal));
+        Assert.Contains("属性定义不可编辑", line);
+        Assert.Contains("move/change-layer/delete/set-text 全部拒绝", line);
+    }
 }

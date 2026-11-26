@@ -135,6 +135,73 @@ public class BlockEditHandlerTests : IDisposable
         Assert.Same(line, again!.Entity);
     }
 
+    // ---- ADEF 保护（终审修复）：模板不可经 move/change-layer 编辑（定义层只读）----
+
+    [Fact]
+    public void Move_BlockAttributeDefinition_Rejected_DefinitionUnchanged()
+    {
+        var (s, block, _, _, adef, _, _, _) = New();
+        double x = adef.InsertPoint.X, y = adef.InsertPoint.Y;
+        var r = new MoveEntityHandler().Apply(s, P(new
+        {
+            handle = adef.Handle.ToString(), block = block.Name, dx = 1.5, dy = -2
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("属性定义不可编辑", r.Error);
+        Assert.Contains(adef, block.Entities); // 定义模板保护：失败不改集合
+        Assert.Equal(x, adef.InsertPoint.X, 6);
+        Assert.Equal(y, adef.InsertPoint.Y, 6);
+    }
+
+    [Fact]
+    public void ChangeLayer_BlockAttributeDefinition_Rejected_DefinitionUnchanged()
+    {
+        var (s, block, _, _, adef, _, _, _) = New();
+        string before = adef.Layer.Name;
+        var r = new ChangeLayerHandler().Apply(s, P(new
+        {
+            handle = adef.Handle.ToString(), block = block.Name, layer = "T-文字"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("属性定义不可编辑", r.Error);
+        Assert.Equal(before, adef.Layer.Name);
+    }
+
+    [Fact]
+    public void Move_NonBlockAttributeDefinition_Rejected()
+    {
+        // 防御纵深：ADEF 只应存在于块定义；顶层出现（脏图）同样拒绝，不落 TextEntity 分支。
+        var (s, _, _, _, _, _, _, _) = New();
+        var adef = new AttributeDefinition
+        {
+            Tag = "T", Value = "默认值", InsertPoint = new XYZ(7, 8, 0)
+        };
+        PaperFixtures.ForceHandle(adef, 7201);
+        s.Doc.Entities.Add(adef);
+        var r = new MoveEntityHandler().Apply(s, P(new { handle = "7201", dx = 3, dy = 4 }));
+        Assert.False(r.Ok);
+        Assert.Equal("属性定义不可编辑", r.Error);
+        Assert.Equal(7, adef.InsertPoint.X, 6);
+        Assert.Equal(8, adef.InsertPoint.Y, 6);
+    }
+
+    [Fact]
+    public void ChangeLayer_NonBlockAttributeDefinition_Rejected()
+    {
+        var (s, _, _, _, _, _, _, _) = New();
+        var adef = new AttributeDefinition { Tag = "T", Value = "默认值" };
+        PaperFixtures.ForceHandle(adef, 7202);
+        s.Doc.Entities.Add(adef);
+        string before = adef.Layer.Name;
+        var r = new ChangeLayerHandler().Apply(s, P(new
+        {
+            handle = "7202", layer = "T-文字"
+        }));
+        Assert.False(r.Ok);
+        Assert.Equal("属性定义不可编辑", r.Error);
+        Assert.Equal(before, adef.Layer.Name);
+    }
+
     // ---- delete-entity：从块定义集合移除 ----
 
     [Fact]

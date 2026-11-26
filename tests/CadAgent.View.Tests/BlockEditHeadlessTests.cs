@@ -108,6 +108,43 @@ public class BlockEditHeadlessTests
         doc.Entities.Add(new Line { StartPoint = new XYZ(-20, 15, 0), EndPoint = new XYZ(40, 15, 0) });
     });
 
+    /// <summary>纸面标题块：块内含线，两实例均插在布局纸面（纸面增量直通，无 ÷s）。</summary>
+    private const string PaperTitleBlockName = "PAPER_TITLE";
+
+    private static string PaperBlockDxf() => DxfFixture.CreateTempDxf(doc =>
+    {
+        var block = new BlockRecord(PaperTitleBlockName);
+        block.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(10, 0, 0) });
+        doc.BlockRecords.Add(block);
+        var layout = new Layout("布局1");
+        doc.Layouts.Add(layout);
+        layout.AddViewport(new Viewport
+        {
+            Center = new XYZ(500, 350, 0),
+            Width = 1000,
+            Height = 700,
+            ViewTarget = new XYZ(0, 0, 0),
+            ViewHeight = 200,
+        });
+        layout.AssociatedBlock!.Entities.Add(new Insert(block) { InsertPoint = new XYZ(100, 100, 0) });
+        layout.AssociatedBlock.Entities.Add(new Insert(block) { InsertPoint = new XYZ(300, 100, 0) });
+    });
+
+    /// <summary>两层嵌套：外层块 OUTER_D2 内插 INNER_D2（链长 2），外层两实例共享定义。</summary>
+    private static string NestedDepthTwoDxf() => DxfFixture.CreateTempDxf(doc =>
+    {
+        var inner = new BlockRecord("INNER_D2");
+        inner.Entities.Add(new Line { StartPoint = new XYZ(0, 0, 0), EndPoint = new XYZ(4, 0, 0) });
+        doc.BlockRecords.Add(inner);
+        var outer = new BlockRecord("OUTER_D2");
+        outer.Entities.Add(new Insert(inner) { InsertPoint = new XYZ(2, 0, 0) });
+        doc.BlockRecords.Add(outer);
+        doc.Entities.Add(new Insert(outer) { InsertPoint = new XYZ(0, 0, 0) });
+        doc.Entities.Add(new Insert(outer) { InsertPoint = new XYZ(100, 0, 0) });
+        doc.Entities.Add(new Line { StartPoint = new XYZ(-20, -20, 0), EndPoint = new XYZ(140, -20, 0) });
+        doc.Entities.Add(new Line { StartPoint = new XYZ(-20, 20, 0), EndPoint = new XYZ(140, 20, 0) });
+    });
+
     /// <summary>Dimension 匿名块（*D）：子图元进入渲染但块不可编辑。</summary>
     private static string DimensionDxf() => DxfFixture.CreateTempDxf(doc =>
     {
@@ -297,9 +334,37 @@ public class BlockEditHeadlessTests
             Assert.Single(lines, i => Math.Abs(i.Points[0].X - 20) < 1e-6);
             Assert.Single(lines, i => Math.Abs(i.Points[0].X - 120) < 1e-6);
             using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
-            Assert.Contains(audit.ReadAll(), r => r.Entry.Kind == "step"
-                && r.Entry.ParamsJson.Contains("move-entity")
-                && r.Entry.ParamsJson.Contains(TitleBlockName));
+            AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
+            Assert.Contains("move-entity", step.Entry.ParamsJson);
+            Assert.Contains(TitleBlockName, step.Entry.ParamsJson);
+            // 终审修复：确认用的实例计数随执行调用进入 step params（审计可复算影响面）。
+            Assert.Contains("\"block\":\"" + TitleBlockName + "\"", step.Entry.ParamsJson);
+            Assert.Contains("\"affectedInstances\":2", step.Entry.ParamsJson);
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 2b. 非块编辑：step params 不得携带 affectedInstances（条件写入）----
+
+    [AvaloniaFact]
+    public async Task NonBlockMove_OmitsAffectedInstancesInAudit()
+    {
+        (MainWindow window, string path, string projectDir) = Show(TwoInsertDxf());
+        try
+        {
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 0, -20); // 顶层包络线（块外实体，y=-20）
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 60, -10));
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
+            AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
+            Assert.Contains("move-entity", step.Entry.ParamsJson);
+            Assert.DoesNotContain("affectedInstances", step.Entry.ParamsJson);
+            Assert.DoesNotContain("\"block\"", step.Entry.ParamsJson);
         }
         finally { Cleanup(window, path, projectDir); }
     }
@@ -420,6 +485,11 @@ public class BlockEditHeadlessTests
             Assert.DoesNotContain(window.Canvas.Items,
                 i => i.BlockName == TitleBlockName && i.Kind == RenderKind.Line);
             Assert.Equal(2, window.Canvas.Items.Count(i => i.BlockName == TitleBlockName && i.Kind == RenderKind.Text));
+            using var audit = new SqliteAuditStore(Path.Combine(projectDir, ".cadagent", "audit.db"));
+            AuditRecord step = Assert.Single(audit.ReadAll(), r => r.Entry.Kind == "step");
+            Assert.Contains("delete-entity", step.Entry.ParamsJson);
+            Assert.Contains("\"block\":\"" + TitleBlockName + "\"", step.Entry.ParamsJson);
+            Assert.Contains("\"affectedInstances\":2", step.Entry.ParamsJson);
         }
         finally { Cleanup(window, path, projectDir); }
     }
@@ -644,6 +714,123 @@ public class BlockEditHeadlessTests
             Assert.Equal(10, line.EndPoint.X, 9);
             Assert.Equal(2, window.Canvas.Items.Count(i =>
                 i.BlockName == TitleBlockName && i.Kind == RenderKind.Line)); // 两实例恢复
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 12b. 纸面宿主块子图元：纸面增量直通（不 ÷s），两实例纸面渲染同步 ----
+
+    [AvaloniaFact]
+    public async Task ToggleOn_PaperHostedBlockChild_Move_PaperDeltaFlowsThrough()
+    {
+        (MainWindow window, string path, string projectDir) = Show(PaperBlockDxf());
+        try
+        {
+            window.SheetSelector!.SelectedIndex = 1; // 布局幅面
+            Dispatcher.UIThread.RunJobs();
+            EnableSubEntityMode(window);
+            List<RenderItem> lines = window.Canvas!.Items
+                .Where(i => i.BlockName == PaperTitleBlockName && i.Kind == RenderKind.Line
+                    && i.Space == RenderSpace.PaperSpace && !i.Locked)
+                .OrderBy(i => i.Points[0].X).ToList();
+            Assert.Equal(2, lines.Count);
+            Assert.Equal(100, lines[0].Points[0].X, 6);
+
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 105, 100); // 实例 1 子线纸面中点
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+            window.ConfirmEditOverride = _ => Task.FromResult(true);
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 110, 140)); // 基准=子线首点(100,100)
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds); // 单事务
+            var saved = DrawingSession.Load(path);
+            Line line = SavedBlockLine(saved, PaperTitleBlockName);
+            Assert.Equal(10, line.StartPoint.X, 9); // 纸面 Δ 原值（无 ÷ 视口比例）
+            Assert.Equal(40, line.StartPoint.Y, 9);
+            List<RenderItem> after = window.Canvas.Items
+                .Where(i => i.BlockName == PaperTitleBlockName && i.Kind == RenderKind.Line
+                    && i.Space == RenderSpace.PaperSpace && !i.Locked)
+                .OrderBy(i => i.Points[0].X).ToList();
+            Assert.Equal(2, after.Count);
+            Assert.Equal(110, after[0].Points[0].X, 6);
+            Assert.Equal(140, after[0].Points[0].Y, 6);
+            Assert.Equal(310, after[1].Points[0].X, 6); // 第二实例同步
+            Assert.Equal(140, after[1].Points[0].Y, 6);
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 12c. 两层嵌套块子图元：链长 2 逆解，两外层实例同步 ----
+
+    [AvaloniaFact]
+    public async Task ToggleOn_DepthTwoNestedChild_Move_ChainLengthTwo()
+    {
+        (MainWindow window, string path, string projectDir) = Show(NestedDepthTwoDxf());
+        try
+        {
+            EnableSubEntityMode(window);
+            List<RenderItem> lines = window.Canvas!.Items
+                .Where(i => i.BlockName == "INNER_D2" && i.Kind == RenderKind.Line && !i.Locked)
+                .OrderBy(i => i.Points[0].X).ToList();
+            Assert.Equal(2, lines.Count);
+            Assert.Equal(2, lines[0].ParentInsertChain!.Count); // 反空断言：链长确为 2
+            Assert.Equal(2, lines[0].Points[0].X, 6); // outer(0,0)+inner(2,0)
+
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 4, 0);
+            Assert.NotNull(window.Canvas!.SelectedHandle);
+            window.ConfirmEditOverride = _ => Task.FromResult(true);
+            await ActAndWaitForEditAsync(window, () => ClickCanvasAtWorld(window, 22, 0)); // 世界 Δ (20,0)；基准=子线首点(2,0)
+
+            Assert.Null(window.Edit!.ErrorMessage);
+            Assert.Single(window.Edit.RecentTxIds);
+            var saved = DrawingSession.Load(path);
+            Line line = saved.Doc.BlockRecords.First(b => b.Name == "INNER_D2")
+                .Entities.OfType<Line>().Single();
+            Assert.Equal(20, line.StartPoint.X, 6); // 恒等链（无旋转/缩放）→ 局部=世界
+            List<RenderItem> after = window.Canvas.Items
+                .Where(i => i.BlockName == "INNER_D2" && i.Kind == RenderKind.Line && !i.Locked)
+                .OrderBy(i => i.Points[0].X).ToList();
+            Assert.Equal(2, after.Count);
+            Assert.Equal(22, after[0].Points[0].X, 6);
+            Assert.Equal(122, after[1].Points[0].X, 6); // 第二外层实例同步
+        }
+        finally { Cleanup(window, path, projectDir); }
+    }
+
+    // ---- 12d. 插入链缺失 → fail-closed（不把空链当恒等）----
+
+    [AvaloniaFact]
+    public void ToggleOn_MissingParentInsertChain_FailsClosed_NoTx()
+    {
+        (MainWindow window, string path, string projectDir) = Show(TwoInsertDxf());
+        try
+        {
+            EnableSubEntityMode(window);
+            RenderItem[] items = window.Canvas!.Items.ToArray();
+            int index = BlockChildIndex(window, RenderKind.Line);
+            Assert.True(index >= 0);
+            items[index] = items[index] with { ParentInsertChain = null }; // 病态渲染项：来源链缺失
+            window.Canvas.Refresh(items);
+            Dispatcher.UIThread.RunJobs();
+
+            ToolButton(window, "Move").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Dispatcher.UIThread.RunJobs();
+            ClickCanvasAtWorld(window, 5, 0);
+            bool confirmInvoked = false;
+            window.ConfirmEditOverride = _ => { confirmInvoked = true; return Task.FromResult(true); };
+            ClickCanvasAtWorld(window, 20, 0);
+            Dispatcher.UIThread.RunJobs();
+
+            Assert.False(confirmInvoked); // 链缺失先于确认/执行
+            Assert.True(window.EditError?.IsVisible ?? false);
+            Assert.Contains("插入链缺失，无法计算块局部增量", window.EditError!.Text);
+            Assert.Empty(window.Edit!.RecentTxIds);
+            var saved = DrawingSession.Load(path);
+            Assert.Equal(0, SavedBlockLine(saved, TitleBlockName).StartPoint.X, 9); // 盘上不变
         }
         finally { Cleanup(window, path, projectDir); }
     }

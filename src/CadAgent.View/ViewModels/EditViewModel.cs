@@ -105,29 +105,38 @@ public sealed class EditViewModel
         return ApplyAsync(EditTool.Text, JsonSerializer.SerializeToElement(args));
     }
 
-    /// <summary>block=块名 → 块定义实体（全实例生效；与 space/layout/attribute 互斥，由处理器校验）。</summary>
+    /// <summary>block=块名 → 块定义实体（全实例生效；与 space/layout/attribute 互斥，由处理器校验）。
+    /// affectedInstances 为视图确认时已算出的影响实例数（审计附注；引擎不依赖，仅非空时落 params）。</summary>
     public Task<EditResult> MoveAsync(string handle, double dx, double dy,
-        string? space = null, string? layout = null, string? block = null) =>
+        string? space = null, string? layout = null, string? block = null,
+        int? affectedInstances = null) =>
         WithHandle(handle, h =>
         {
             var args = HandleArgs(h, space, layout, block, attribute: false);
             args["dx"] = dx;
             args["dy"] = dy;
+            AddAffectedInstances(args, affectedInstances);
             return ApplyAsync(EditTool.Move, JsonSerializer.SerializeToElement(args));
         });
 
     /// <summary>attribute=true 时仅检索 Insert 属性（实例语义；ATTRIB 句柄与实体句柄同口径）。</summary>
     public Task<EditResult> DeleteAsync(string handle, string? space = null, string? layout = null,
-        bool attribute = false, string? block = null) =>
-        WithHandle(handle, h => ApplyAsync(EditTool.Delete,
-            JsonSerializer.SerializeToElement(HandleArgs(h, space, layout, block, attribute))));
+        bool attribute = false, string? block = null, int? affectedInstances = null) =>
+        WithHandle(handle, h =>
+        {
+            var args = HandleArgs(h, space, layout, block, attribute);
+            AddAffectedInstances(args, affectedInstances);
+            return ApplyAsync(EditTool.Delete, JsonSerializer.SerializeToElement(args));
+        });
 
     public Task<EditResult> ChangeLayerAsync(string handle, string layer,
-        string? space = null, string? layout = null, string? block = null) =>
+        string? space = null, string? layout = null, string? block = null,
+        int? affectedInstances = null) =>
         WithHandle(handle, h =>
         {
             var args = HandleArgs(h, space, layout, block, attribute: false);
             args["layer"] = layer;
+            AddAffectedInstances(args, affectedInstances);
             return ApplyAsync(EditTool.ChangeLayer, JsonSerializer.SerializeToElement(args));
         });
 
@@ -144,11 +153,13 @@ public sealed class EditViewModel
     }
 
     /// <summary>改文字（spec §3.3 set-text）：TEXT/MText/ATTRIB 改值；block=块内文字（全实例生效）。</summary>
-    public Task<EditResult> SetTextAsync(string handle, string text, string? block = null) =>
+    public Task<EditResult> SetTextAsync(string handle, string text, string? block = null,
+        int? affectedInstances = null) =>
         WithHandle(handle, h =>
         {
             var args = new Dictionary<string, object?> { ["handle"] = h, ["text"] = text };
             if (block is not null) args["block"] = block; // 条件写入：不留 "block":null 噪声
+            AddAffectedInstances(args, affectedInstances);
             return ApplyAsync(EditTool.SetText, JsonSerializer.SerializeToElement(args));
         });
 
@@ -171,6 +182,12 @@ public sealed class EditViewModel
     {
         if (space is not null) args["space"] = space;
         if (layout is not null) args["layout"] = layout;
+    }
+
+    /// <summary>仅块编辑路径携带（视图确认时已算出的影响实例数）；非空才落 params，不产生 null 噪声。</summary>
+    private static void AddAffectedInstances(Dictionary<string, object?> args, int? affectedInstances)
+    {
+        if (affectedInstances is int n) args["affectedInstances"] = n;
     }
 
     /// <summary>句柄为十进制 ulong 字符串（RenderItem.Handle/审计 Target 同口径）；非法→拒绝，不留审计。</summary>

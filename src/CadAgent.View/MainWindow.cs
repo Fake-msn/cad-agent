@@ -116,6 +116,9 @@ public sealed class MainWindow : Window
     /// <summary>项2 Plan-3 T6 防御：渲染项未戳记来源句柄（正常路径恒有）→ 无法定位块内实体。</summary>
     private const string BlockChildSourceMissingMessage = "渲染来源缺失，无法定位块内实体";
 
+    /// <summary>块子图元插入链缺失（病态渲染项）：不得把空链当恒等增量执行，须 fail-closed。</summary>
+    private const string BlockChainMissingMessage = "插入链缺失，无法计算块局部增量";
+
     /// <summary>子图元模式开启时的状态栏提示（块内编辑=全实例生效）。</summary>
     private const string SubEntityModeHint = "子图元模式：块内编辑=全实例生效";
 
@@ -2257,7 +2260,8 @@ public sealed class MainWindow : Window
         }
         if (!EditTargetResolver.IsBlockEditable(block))
         {
-            SetEditError(string.Format(EditTargetResolver.BlockProtectedMessage, blockName));
+            // 文案用块表规范名（FindBlock 已解析大小写变体），不回声请求侧写法。
+            SetEditError(string.Format(EditTargetResolver.BlockProtectedMessage, block.Name));
             return false;
         }
         if (item.SourceHandle is null)
@@ -2271,28 +2275,31 @@ public sealed class MainWindow : Window
 
     /// <summary>
     /// 块定义变更确认（项2 Plan-3 T6）：预检 → 实例计数（约值，含嵌套估算）→ 模态确认。
-    /// 返回 true 才允许执行；取消/被拒 → false（不开始 tx）。
+    /// 返回确认时的实例计数；取消/被拒 → null（不开始 tx）。计数同时作为
+    /// affectedInstances 交给执行调用（审计附注，引擎不依赖）。
     /// </summary>
-    private async Task<bool> ConfirmBlockEditAsync(RenderItem item)
+    private async Task<int?> ConfirmBlockEditAsync(RenderItem item)
     {
-        if (!TryPreflightBlock(item)) return false;
+        if (!TryPreflightBlock(item)) return null;
         int count = BlockInstanceCounter.Count(_doc, item.BlockName!);
         string msg = $"将修改块定义 {item.BlockName}，影响约 {count} 个实例（含嵌套估算）；所有引用同步变化。继续？";
-        return ConfirmEditOverride is not null
+        bool confirmed = ConfirmEditOverride is not null
             ? await ConfirmEditOverride(msg)
             : await new ConfirmDialog(msg).ShowDialog<bool>(this);
+        return confirmed ? count : null;
     }
 
     /// <summary>
     /// 块定义编辑执行入口（BlockChild 意图）：确认 → 重入兜底 → 经 EditViewModel/StepEngine
-    /// 执行（handle=子实体 SourceHandle，block=最内层块名）。<paramref name="apply"/> 收到句柄。
+    /// 执行（handle=子实体 SourceHandle，block=最内层块名）。<paramref name="apply"/> 收到句柄与确认时的实例计数。
     /// </summary>
-    private async Task RunBlockEditAsync(RenderItem item, Func<string, Task<EditResult>> apply)
+    private async Task RunBlockEditAsync(RenderItem item, Func<string, int, Task<EditResult>> apply)
     {
-        if (!await ConfirmBlockEditAsync(item)) return;
+        int? count = await ConfirmBlockEditAsync(item);
+        if (count is null) return;
         if (_editBusy || _diffBusy) return; // 确认等待期间重入（seam 路径防御）
         string handle = item.SourceHandle!;
-        await RunEditAsync(() => apply(handle));
+        await RunEditAsync(() => apply(handle, count.Value));
     }
 
     /// <summary>
@@ -2348,7 +2355,8 @@ public sealed class MainWindow : Window
             if (intent == EditSpaceIntent.BlockChild)
             {
                 string? blockName = item!.BlockName; // BlockChild 意图 ⇒ 最内层块名非空
-                await RunBlockEditAsync(item, h => Edit.DeleteAsync(h, block: blockName));
+                await RunBlockEditAsync(item,
+                    (h, n) => Edit.DeleteAsync(h, block: blockName, affectedInstances: n));
                 return;
             }
             bool paper = item is not null && intent == EditSpaceIntent.Paper;
@@ -2396,7 +2404,8 @@ public sealed class MainWindow : Window
             if (intent == EditSpaceIntent.BlockChild)
             {
                 string? blockName = item!.BlockName; // BlockChild 意图 ⇒ 最内层块名非空
-                _ = RunBlockEditAsync(item, h => Edit.ChangeLayerAsync(h, layer, block: blockName));
+                _ = RunBlockEditAsync(item,
+                    (h, n) => Edit.ChangeLayerAsync(h, layer, block: blockName, affectedInstances: n));
                 return;
             }
             bool paper = item is not null && intent == EditSpaceIntent.Paper;
@@ -2510,6 +2519,12 @@ public sealed class MainWindow : Window
                         {
                             // 项2 Plan-3 T6：块定义移动——世界增量来源分流后经 Insert 链逆解为局部增量。
                             if (!TryPreflightBlock(selected)) return true; // 匿名/动态/XRef 先拒，勿进逆解
+                            // 链缺失不得当恒等增量（BlockEditMath 空链=恒等仅服务其自身契约）。
+                            if (selected.ParentInsertChain is not { Count: > 0 })
+                            {
+                                SetEditError(BlockChainMissingMessage);
+                                return true;
+                            }
                             double wdx = wx - bx, wdy = wy - by;
                             if (_layoutSheetActive && selected.Space == RenderSpace.ModelSpace)
                             {
@@ -2518,14 +2533,15 @@ public sealed class MainWindow : Window
                                 wdy /= vpScale;
                             }
                             var (ok, ldx, ldy, inverseError) = BlockEditMath.WorldDeltaToBlockDelta(
-                                _doc, selected.ParentInsertChain ?? Array.Empty<string>(), wdx, wdy);
+                                _doc, selected.ParentInsertChain, wdx, wdy);
                             if (!ok)
                             {
                                 SetEditError(inverseError); // 奇异/链解析失败：无 tx
                                 return true;
                             }
                             _ = RunBlockEditAsync(selected,
-                                h => Edit.MoveAsync(h, ldx, ldy, block: selected.BlockName));
+                                (h, n) => Edit.MoveAsync(h, ldx, ldy, block: selected.BlockName,
+                                    affectedInstances: n));
                             return true;
                         }
                     }
@@ -2585,7 +2601,7 @@ public sealed class MainWindow : Window
             Canvas.Select(hitIndex ?? Canvas.SelectedIndex);
             string blockText = EditTextInput?.Text ?? "";
             _ = RunBlockEditAsync(target,
-                h => Edit!.SetTextAsync(h, blockText, block: target.BlockName));
+                (h, n) => Edit!.SetTextAsync(h, blockText, block: target.BlockName, affectedInstances: n));
             return true;
         }
         if (target.Kind != RenderKind.Text && target.AttributeTag is null)
